@@ -1,0 +1,19 @@
+{
+  "name": "@wybe-labs/wybe-connect",
+  "version": "0.1.0",
+  "description": "Lets a coding harness (Claude Code first) feed a person's Wybe node: redacts on the laptop, sends only what the granted OAuth scopes allow, never reads anything back.",
+  "private": false,
+  "type": "module",
+  "license": "MIT",
+  "author": "Wybe Labs AS",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test",
+    "test:weaken": "node test/redact-weaken.js",
+    "sync-lib": "node scripts/sync-lib.js"
+  },
+  "dependencies": {},
+  "devDependencies": {}
+}

@@ -1,0 +1,19 @@
+{
+  "name": "wybe-connect",
+  "owner": {
+    "name": "Wybe Labs AS"
+  },
+  "metadata": {
+    "description": "Connect your coding harness to your Wybe colleague. Sends only; redacts on your machine first.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "wybe-connect",
+      "source": "./packages/claude-code",
+      "description": "Feeds your Wybe node from Claude Code: session summaries per the OAuth scopes you granted, redacted on your laptop before anything leaves it. Write-only - the node never reads your machine and Claude Code never reads the node.",
+      "version": "0.1.0",
+      "category": "productivity"
+    }
+  ]
+}

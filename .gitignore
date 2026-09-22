@@ -1,0 +1,5 @@
+node_modules/
+.DS_Store
+*.log
+# local state never lives in the repo; the real one is ~/.wybe-connect
+.wybe-connect/
