@@ -1,0 +1,12 @@
+{
+  "name": "wybe-connect",
+  "description": "Feeds your Wybe node from Claude Code. Hooks send redacted session deltas per the OAuth scopes you granted (sessions:light = your own prompts and metadata; sessions:full = also assistant output and tool I/O); the connect skill pairs this machine with your node once. Write-only: nothing is ever read back from the node.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Wybe Labs AS"
+  },
+  "homepage": "https://github.com/wybe-labs/wybe-connect",
+  "repository": "https://github.com/wybe-labs/wybe-connect",
+  "license": "MIT",
+  "keywords": ["wybe", "memory", "mcp", "oauth", "privacy", "redaction"]
+}
