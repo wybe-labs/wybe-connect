@@ -239,3 +239,22 @@ test('every family has a name, a one-line reason and a global regex', () => {
     assert.ok(f.re instanceof RegExp && f.re.global, `${f.name} must be global`);
   }
 });
+
+// Idempotence: the Cursor adapter redacts each hook record as it is spooled and the flush redacts
+// the built payload again (defence in depth). A second pass must neither change the text nor
+// count the tags of the first pass as new hits, or the payload's `redaction.families` would lie.
+test('redaction is idempotent: a second pass changes nothing and reports no hits', () => {
+  const all = Object.values(BAIT).filter((v) => typeof v === 'string').join('\n');
+  const first = redact(all);
+  assert.ok(first.hits.length >= 10, 'the first pass must have work to do');
+  const second = redact(first.text);
+  assert.equal(second.text, first.text);
+  assert.deepEqual(second.hits, []);
+});
+
+test('TRAP: a userinfo that only STARTS with a redaction tag is still redacted', () => {
+  const pw = ['real', 'Pw-9x'].join('');
+  const r = redact(`https://${tag('url-userinfo')}:${pw}@db.example.internal/x`);
+  assert.ok(!r.text.includes(pw), 'a password hiding behind a tag leaked');
+  assert.deepEqual(r.hits, [{ family: 'url-userinfo', count: 1 }]);
+});
