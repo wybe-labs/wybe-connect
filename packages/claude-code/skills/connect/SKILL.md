@@ -1,15 +1,15 @@
 ---
 name: connect
-description: Connect this Claude Code to the person's Wybe colleague (their Wybe node) so that hooks feed it redacted session summaries and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me", "Koble til Wybe", "Connect me to my Wybe colleague at https://<slug>.wybe.me", "connect to Wybe", "wybe connect", or any request to pair, link or hook up Claude Code with a Wybe node URL.
+description: Connect this Claude Code to the person's Wybe colleague (their Wybe node) so that hooks feed it redacted session summaries and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me", "Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me", "Koble til Wybe", "Connect me to my Wybe colleague at https://<slug>.wybe.me", "connect to Wybe", "wybe connect", or any request to pair, link or hook up Claude Code with a Wybe node URL.
 ---
 
 # Connect to Wybe
 
 The person pasted (or said) one of these, with their own node URL:
 
-> Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me
+> Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
 
-> Connect me to my Wybe colleague at https://<slug>.wybe.me
+> Connect me to my Wybe AI colleague at https://dittfirma.wybe.me
 
 Your job: pair this machine with that node once, then run the first sync. Everything the
 plugin sends afterwards is **write-only** (the node never reads this machine, Claude Code never
@@ -19,7 +19,7 @@ start; the person is granting access to their work context and should hear what 
 ## Steps
 
 1. **Take the node URL from the sentence.** It must be `https://<something>.wybe.me`. If there
-   is no URL, ask for it: "Hvilken adresse har Wybe-kollegaen din? (https://<navn>.wybe.me)".
+   is no URL, ask for it: "Hvilken adresse har KI-kollegaen din i Wybe? (https://dittfirma.wybe.me)".
 
 2. **Make sure the plugin is installed.** If `${CLAUDE_PLUGIN_ROOT}` is set, it already is (you
    are running from it). Otherwise tell the person to run, in Claude Code:
