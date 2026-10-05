@@ -2,7 +2,7 @@
 // Stop / SessionEnd / PreCompact hook: flush the redacted transcript delta to the node.
 // stdin: { session_id, transcript_path, cwd, hook_event_name, ... }. Exit 0 always.
 
-import { readHookInput, failOpen } from './hook-input.js';
+import { readHookInput, failOpen, queueNotice } from '../lib/hook-io.js';
 import { flush } from '../lib/flush.js';
 
 try {
@@ -13,9 +13,7 @@ try {
     cwd: typeof input.cwd === 'string' ? input.cwd : process.cwd(),
     event: typeof input.hook_event_name === 'string' ? input.hook_event_name : 'Stop',
   });
-  if (summary.queued > 0 || (summary.queue && summary.queue.count > 0)) {
-    process.stderr.write(`wybe-connect: node not reachable (${summary.lastOutcome?.kind ?? 'unknown'}); ${summary.queue.count} delta(s) queued locally\n`);
-  }
+  process.stderr.write(queueNotice(summary));
 } catch (err) {
   failOpen('flush', err);
 }

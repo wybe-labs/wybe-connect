@@ -171,6 +171,28 @@ function findGitConfig(cwd) {
   return join(dirname(gitdir), 'config');
 }
 
+/**
+ * The checked-out branch from HEAD (a worktree's own HEAD lives in its gitdir), or null when
+ * detached or not a repository. For harnesses whose hooks do not name the branch (Cursor).
+ */
+export function gitBranch(cwd) {
+  try {
+    const dotGit = join(cwd, '.git');
+    if (!existsSync(dotGit)) return null;
+    let gitdir = dotGit;
+    if (!statSync(dotGit).isDirectory()) {
+      const line = readFileSync(dotGit, 'utf8').split('\n').find((l) => l.startsWith('gitdir:'));
+      if (!line) return null;
+      gitdir = line.slice('gitdir:'.length).trim();
+      if (!isAbsolute(gitdir)) gitdir = resolve(cwd, gitdir);
+    }
+    const m = /^ref: refs\/heads\/(.+)$/m.exec(readFileSync(join(gitdir, 'HEAD'), 'utf8'));
+    return m ? m[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
 export function stripInjected(text) {
   return text.replace(SYSTEM_REMINDER, '').trim();
 }
@@ -199,6 +221,8 @@ export function buildSession(entries, { scope, sessionId = null, transcriptId = 
       const p = e.input?.file_path ?? e.input?.notebook_path;
       if (typeof p === 'string') files.add(p);
     }
+    // other harnesses' readers name the touched paths directly (lib/codex-rollout.js, lib/cursor-spool.js)
+    if (e.kind === 'file-change' && typeof e.path === 'string') files.add(e.path);
   }
 
   const prompts = main
@@ -250,9 +274,10 @@ export function buildSession(entries, { scope, sessionId = null, transcriptId = 
 }
 
 /**
- * The trap: a light payload must carry no assistant text at all. Every assistant text block and
- * every tool input/output of the source entries is searched for in the serialised payload; any
- * hit throws. Called on every light build, so an omission upstream cannot pass silently.
+ * The trap: a light payload must carry no assistant text at all. Every assistant text block,
+ * every tool input/output, every subagent prompt and every harness-injected context block
+ * (developer/inter-agent messages, kind 'context') of the source entries is searched for in the
+ * serialised payload; any hit throws. Called on every light build, so an omission upstream cannot pass silently.
  */
 export function assertLightIsClean(payload, entries) {
   const serialised = JSON.stringify(payload);
@@ -262,6 +287,7 @@ export function assertLightIsClean(payload, entries) {
     if (e.kind === 'tool-result') fragments.push(e.text);
     if (e.kind === 'tool-use') fragments.push(JSON.stringify(e.input));
     if (e.kind === 'prompt' && e.sidechain) fragments.push(e.text);
+    if (e.kind === 'context' && typeof e.text === 'string') fragments.push(e.text);
     for (const f of fragments) {
       const probe = f.length > 24 ? f.slice(0, 24) : f;
       if (probe.length >= 8 && serialised.includes(JSON.stringify(probe).slice(1, -1))) {

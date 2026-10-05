@@ -3,7 +3,7 @@
 // reads the open questions the last tool response carried (lib/flush.js stores them) and hands
 // them to Claude as additionalContext together with the standing instruction. Exit 0 always.
 
-import { readHookInput, failOpen } from './hook-input.js';
+import { readHookInput, failOpen } from '../lib/hook-io.js';
 import { paths, loadCredentials, readJson } from '../lib/home.js';
 import { buildContext } from '../lib/session-context.js';
 

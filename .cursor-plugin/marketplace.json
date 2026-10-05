@@ -1,0 +1,16 @@
+{
+  "name": "wybe-connect",
+  "owner": {
+    "name": "Wybe Labs AS"
+  },
+  "metadata": {
+    "description": "Connect your coding harness to your Wybe AI colleague. Sends only; redacts on your machine first."
+  },
+  "plugins": [
+    {
+      "name": "wybe-connect",
+      "source": "packages/cursor",
+      "description": "Feeds your Wybe AI colleague from Cursor: prompts and edited files (sessions:light), plus replies and tool I/O (sessions:full), redacted on your laptop. Write-only."
+    }
+  ]
+}

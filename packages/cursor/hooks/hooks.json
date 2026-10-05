@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      { "command": "node \"${CURSOR_PLUGIN_ROOT}/hooks/on-event.js\"", "timeout": 10 }
+    ],
+    "beforeSubmitPrompt": [
+      { "command": "node \"${CURSOR_PLUGIN_ROOT}/hooks/on-event.js\"", "timeout": 5 }
+    ],
+    "afterFileEdit": [
+      { "command": "node \"${CURSOR_PLUGIN_ROOT}/hooks/on-event.js\"", "timeout": 5 }
+    ],
+    "afterAgentResponse": [
+      { "command": "node \"${CURSOR_PLUGIN_ROOT}/hooks/on-event.js\"", "timeout": 5 }
+    ],
+    "postToolUse": [
+      { "command": "node \"${CURSOR_PLUGIN_ROOT}/hooks/on-event.js\"", "timeout": 5 }
+    ],
+    "stop": [
+      { "command": "node \"${CURSOR_PLUGIN_ROOT}/hooks/on-event.js\"", "timeout": 30, "loop_limit": 1 }
+    ],
+    "sessionEnd": [
+      { "command": "node \"${CURSOR_PLUGIN_ROOT}/hooks/on-event.js\"", "timeout": 10 }
+    ]
+  }
+}

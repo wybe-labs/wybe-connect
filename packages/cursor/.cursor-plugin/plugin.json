@@ -1,0 +1,14 @@
+{
+  "name": "wybe-connect",
+  "version": "0.1.0",
+  "description": "Feeds your Wybe AI colleague from Cursor. Hooks record your prompts and the files edited (sessions:light), plus the agent's replies and tool I/O (sessions:full), redacted on your machine, and send them at every stop. Write-only: nothing is ever read back.",
+  "author": {
+    "name": "Wybe Labs AS"
+  },
+  "homepage": "https://github.com/wybe-labs/wybe-connect",
+  "repository": "https://github.com/wybe-labs/wybe-connect",
+  "license": "MIT",
+  "keywords": ["wybe", "memory", "mcp", "oauth", "privacy", "redaction"],
+  "skills": "./skills/",
+  "hooks": "./hooks/hooks.json"
+}

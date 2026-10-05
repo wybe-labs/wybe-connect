@@ -9,7 +9,7 @@ The plugin. Install from the marketplace at the root of this repository:
 
 Then paste, with your own node address:
 
-> Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me
+> Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
 
 The `connect` skill takes it from there (see `skills/connect/SKILL.md`).
 

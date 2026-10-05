@@ -3,3 +3,6 @@ node_modules/
 *.log
 # local state never lives in the repo; the real one is ~/.wybe-connect
 .wybe-connect/
+
+# git worktrees for parallel work
+.worktrees/

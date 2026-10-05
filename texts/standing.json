@@ -1,0 +1,43 @@
+{
+  "version": 1,
+  "about": "Customer-facing texts for assistants without hooks (Claude Desktop / claude.ai, ChatGPT). The root README's generated section and the node's connect cards (plan B4.2) render exactly these strings; test/texts.test.js keeps the README identical to this file. Change the texts here, then run: npm run sync-texts",
+  "mcp_address_example": "https://dittfirma.wybe.me/mcp",
+  "standing": {
+    "nb": "Jeg har koblet til KI-kollegaen min i Wybe (verktøyet «wybe»). Når vi har snakket om jobben min og du har lært noe varig – prosjekter, beslutninger, arbeidsmåte, verktøy, ideer – så tilby å sende det dit med «remember», og vis meg hva du sender før du sender. Kun jobb: aldri noe privat, aldri noe om andre personer, aldri passord, nøkler eller andre hemmeligheter. Koblingen går bare én vei: du kan sende til KI-kollegaen, men aldri lese noe tilbake derfra. Hvis svaret fra verktøyet har åpne spørsmål, still meg ett av dem når det passer, og send svaret mitt med «answers». Jeg bestemmer hva som deles.",
+    "en": "I have connected my Wybe AI colleague (the «wybe» tool). When we have talked about my work and you have learned something durable – projects, decisions, how I work, tools, ideas – offer to send it there with «remember», and show me what you will send before you send it. Work only: never anything private, never anything about other people, never passwords, keys or other secrets. The connection is one way: you can send to my AI colleague but never read anything back from it. If the tool's answer carries open questions, ask me one of them when it fits and send my answer with «answers». I decide what is shared."
+  },
+  "sync": {
+    "nb": "Synk med KI-kollegaen min i Wybe: gå gjennom det vi har snakket om (kun jobb) og lag en kort liste over varige fakta – prosjekter, beslutninger, arbeidsmåte, verktøy, ideer, research og gjentakende oppgaver. Ta ikke med noe privat, noe om andre personer eller hemmeligheter som passord og nøkler. Vis meg listen først; når jeg har godkjent den, send den med «remember» (ett punkt per faktum). Hvis svaret har åpne spørsmål, still meg det første.",
+    "en": "Sync with my Wybe AI colleague: go through what we have talked about (work only) and make a short list of durable facts – projects, decisions, how I work, tools, ideas, research and recurring tasks. Leave out anything private, anything about other people, and secrets such as passwords and keys. Show me the list first; once I have approved it, send it with «remember» (one item per fact). If the answer carries open questions, ask me the first one."
+  },
+  "setup": {
+    "claude_desktop": {
+      "nb": [
+        "Åpne Claude (skrivebordsappen eller claude.ai) og gå til Customize → Connectors → + → Add custom connector.",
+        "Kall den «wybe» og lim inn adressen til KI-kollegaen din, for eksempel https://dittfirma.wybe.me/mcp (bruk firmaets egen adresse).",
+        "Trykk Connect, logg inn med passnøkkelen din på auth.wybe.me og kryss av for det du vil dele. Du kan oppheve koblingen når som helst under «Mine koblinger».",
+        "Lim inn den faste instruksen i Claude sine personlige preferanser eller i instruksjonene til et prosjekt. Bruk synk-meldingen når du vil sende et sammendrag."
+      ],
+      "en": [
+        "Open Claude (the desktop app or claude.ai) and go to Customize → Connectors → + → Add custom connector.",
+        "Name it «wybe» and paste your AI colleague's address, for example https://dittfirma.wybe.me/mcp (use your company's own address).",
+        "Click Connect, sign in with your passkey at auth.wybe.me and tick what you want to share. You can revoke the connection at any time under «Mine koblinger».",
+        "Paste the standing instruction into Claude's personal preferences or into a project's instructions. Use the sync prompt when you want to send a summary."
+      ]
+    },
+    "chatgpt": {
+      "nb": [
+        "Slå på utviklermodus i ChatGPT på nett: Settings → Security and login → Developer mode (Plus, Pro, Business, Enterprise og Edu). Utviklermodus lar ChatGPT bruke verktøy som skriver; KI-kollegaen tar bare imot og gir ingenting tilbake.",
+        "Gå til ChatGPT Plugins, trykk + og lag en utviklermodus-app med adressen til KI-kollegaen din, for eksempel https://dittfirma.wybe.me/mcp (bruk firmaets egen adresse), og OAuth.",
+        "Logg inn med passnøkkelen din på auth.wybe.me og kryss av for det du vil dele. Du kan oppheve koblingen når som helst under «Mine koblinger».",
+        "Lim inn den faste instruksen under Customize ChatGPT (egendefinerte instruksjoner). Bruk synk-meldingen når du vil sende et sammendrag."
+      ],
+      "en": [
+        "Turn on developer mode in ChatGPT on the web: Settings → Security and login → Developer mode (Plus, Pro, Business, Enterprise and Edu). Developer mode lets ChatGPT use tools that write; your AI colleague only receives and gives nothing back.",
+        "Go to ChatGPT Plugins, press + and create a developer-mode app with your AI colleague's address, for example https://dittfirma.wybe.me/mcp (use your company's own address), and OAuth.",
+        "Sign in with your passkey at auth.wybe.me and tick what you want to share. You can revoke the connection at any time under «Mine koblinger».",
+        "Paste the standing instruction under Customize ChatGPT (custom instructions). Use the sync prompt when you want to send a summary."
+      ]
+    }
+  }
+}

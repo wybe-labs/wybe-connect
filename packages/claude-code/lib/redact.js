@@ -17,7 +17,7 @@ const E = '(?![A-Za-z0-9_-])'; // right boundary tolerant of trailing base64url 
 /** @type {ReadonlyArray<{name: string, reason: string, re: RegExp, validate?: (m: string) => boolean}>} */
 export const FAMILIES = Object.freeze([
   { name: 'pem-private-key', reason: 'a private key block is a credential in full, whole block goes', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
-  { name: 'url-userinfo', reason: 'DSNs and URLs carry passwords in the userinfo part (postgres://user:pw@host)', re: /(?<keep>\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@"'`<>]+(?=@)/gi },
+  { name: 'url-userinfo', reason: 'DSNs and URLs carry passwords in the userinfo part (postgres://user:pw@host)', re: /(?<keep>\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@"'`<>]+(?=@)/gi, validate: notAlreadyRedacted },
   { name: 'bearer', reason: 'an Authorization: Bearer value is a live access token', re: /(?<keep>\bBearer\s+)[A-Za-z0-9_\-.~+/=]{8,}/gi },
   { name: 'wybe-credential', reason: 'wnc_/wbt_/wpc_/wat_/wrt_/wac_/wcl_ are Wybe credentials with different lifetimes but the same blast radius when leaked', re: new RegExp(`${B}w(?:nc|bt|pc|at|rt|ac|cl)_[A-Za-z0-9_-]{16,}${E}`, 'g') },
   { name: 'openai-key', reason: 'sk-... keys (OpenAI style, and sk-ant-... for Anthropic) grant paid API access', re: new RegExp(`${B}sk-(?:ant-)?[A-Za-z0-9_-]{20,}${E}`, 'g') },
@@ -32,6 +32,15 @@ export const FAMILIES = Object.freeze([
 ]);
 
 const FAMILY_NAMES = new Set(FAMILIES.map((f) => f.name));
+
+/**
+ * url-userinfo's only validator: a userinfo that is EXACTLY the tag an earlier pass wrote is not
+ * a new secret, so a second pass leaves it alone and counts nothing. Anything more than the bare
+ * tag (a password hiding behind one) is still redacted. Hoisted, so FAMILIES above can name it.
+ */
+function notAlreadyRedacted(match) {
+  return !match.endsWith('://[REDACTED:url-userinfo]');
+}
 
 /**
  * Mod-11 control digits of a Norwegian fodselsnummer (11 digits, d1..d9 + k1 k2).
