@@ -16,7 +16,28 @@ ChatGPT). Three promises, in order of importance:
 
 Install and pairing take one pasted sentence; see "Getting started".
 
-## What leaves your machine, per scope
+## What leaves your machine
+
+**Claude Code sends essence only (plugin 0.3.0).** No transcript, delta or tool output is sent from
+Claude Code any more. A headless `claude -p` on your own machine (`skills/distil`, `lib/distil.js`)
+reads your local sessions and memory with read-only tools. It sends a short list of durable
+**work** facts with `remember`, plus answers to your colleague's open questions. It has two
+triggers:
+
+- **Ongoing.** The Stop / PreCompact / SessionEnd hooks note each session. At most once every 6
+  hours, a background run distils the sessions noted since the last run.
+- **Importer.** When you press «Importer» on your node, the colleague's next answer carries an
+  `import_request`. The plugin's MCP server also checks for one every 5 minutes while Claude Code
+  is open. A background run then distils all local sources: `CLAUDE.md` files, auto memory, and
+  transcripts from the last 30 days. It closes the request with `import_of`.
+
+The run uses your own Claude Code subscription. You can set its model with
+`WYBE_CONNECT_DISTIL_MODEL` (for example `sonnet`). Its log is in `~/.wybe-connect/state/`. It
+runs at most 40 items per run, ≤ 400 characters each, work only. It never includes secrets,
+code or file contents. The plugin's MCP server also redacts every argument before forwarding it.
+
+The table below is per scope. For Claude Code, the `sessions:*` rows no longer apply. Codex and
+Cursor still send session payloads as described; moving them to essence is a follow-up.
 
 | Scope | Consent label (nb) | What flows | When |
 |---|---|---|---|

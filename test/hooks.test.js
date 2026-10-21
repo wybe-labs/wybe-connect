@@ -14,9 +14,15 @@ const FIXTURE = join(import.meta.dirname, 'fixtures', 'session.jsonl');
 const TOKEN = ['wat_', 'p0Oi9Uy8Tr7Ew6Qa5Sd4Fg3Hj2Kl1Zx0Cv9Bn8Mm'].join('');
 const REFUSED = 'http://127.0.0.1:9';
 
-function runHook(script, input, home) {
+const FAKE_CLAUDE = join(import.meta.dirname, 'fixtures', 'fake-claude.mjs');
+
+/** Runs a hook as Claude Code does. `claude` is always the recorder: a test must never start the real one. */
+function runHook(script, input, home, extraEnv = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [join(HOOKS, script)], { env: { ...process.env, WYBE_CONNECT_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const env = { ...process.env, WYBE_CONNECT_HOME: home, WYBE_CONNECT_CLAUDE_BIN: FAKE_CLAUDE, FAKE_CLAUDE_LOG: join(home, '..', 'fake-claude.log'), ...extraEnv };
+    delete env.WYBE_CONNECT_DISTIL;
+    Object.assign(env, extraEnv);
+    const child = spawn(process.execPath, [join(HOOKS, script)], { env, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => { stdout += d; });
@@ -72,76 +78,72 @@ test('sessionScopeOf prefers full, then light, else null; transcriptIdOf strips 
   assert.equal(transcriptIdOf('C:\\x\\we ird.jsonl'), 'we_ird');
 });
 
-test('flush hook: unreachable node -> exit 0, one stderr line without the token, cursor advanced, delta queued and redacted', async () => {
+/** The recorder's lines, after the detached start has had time to write. */
+async function fakeStarts(home, expected) {
+  const log = join(home, '..', 'fake-claude.log');
+  for (let i = 0; i < 100; i++) {
+    const n = existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).length : 0;
+    if (n >= expected) break;
+    await new Promise((r) => setTimeout(r, 30));
+  }
+  return existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+}
+
+test('flush hook (essence only): notes the transcript and starts ONE background distil run; nothing is sent from the hook', async () => {
   const { home, project, transcript } = sandbox();
-  writeCredentials(home, REFUSED, ['remember', 'sessions:light']);
-  const r = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home);
-  assert.equal(r.code, 0);
-  assert.equal(r.stdout, '');
-  assert.equal(r.stderr.trim().split('\n').length, 1, r.stderr);
-  assert.match(r.stderr, /node not reachable \(network\); 1 delta\(s\) queued locally/);
-  assert.ok(!r.stderr.includes(TOKEN));
-
-  const cursor = JSON.parse(readFileSync(join(home, 'state', '11111111-2222-4333-8444-555555555555.json'), 'utf8'));
-  assert.equal(cursor.byteOffset, statSync(transcript).size);
-  assert.equal(cursor.seq, 1);
-
-  const queued = readdirSync(join(home, 'queue'));
-  assert.equal(queued.length, 1);
-  const payload = JSON.parse(readFileSync(join(home, 'queue', queued[0]), 'utf8'));
-  assert.equal(payload.scope, 'sessions:light');
-  assert.deepEqual(payload.project, { name: 'project', git_remotes: ['origin'], branch: 'feat/retry' });
-  assert.deepEqual(payload.delta, { seq: 1, event: 'Stop', byte_from: 0, byte_to: statSync(transcript).size, restarted: false });
-  const s = JSON.stringify(payload);
-  assert.ok(!s.includes('PLANTED-ASSISTANT-SENTENCE'), 'assistant text in a light payload');
-  assert.ok(!s.includes('Pl4nted-Pw'), 'the planted DSN password left unredacted');
-  assert.ok(s.includes('[REDACTED:url-userinfo]'));
-  assert.deepEqual(payload.redaction, { families: [{ family: 'url-userinfo', count: 1 }] });
-
-  const again = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'PreCompact' }, home);
-  assert.equal(again.code, 0);
-  assert.equal(readdirSync(join(home, 'queue')).length, 1, 'nothing new to build, the queued item stays');
-  assert.equal(JSON.parse(readFileSync(join(home, 'state', '11111111-2222-4333-8444-555555555555.json'), 'utf8')).seq, 1);
-});
-
-test('flush hook: once the node answers, the new delta is sent and the queue drains; open questions are cached', async () => {
-  const { home, project, transcript } = sandbox();
-  writeCredentials(home, REFUSED, ['sessions:full']);
-  const first = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home);
-  assert.equal(first.code, 0);
-  assert.equal(readdirSync(join(home, 'queue')).length, 1);
-
   const node = await fakeNodeServer();
   try {
-    writeCredentials(home, node.base, ['sessions:full']);
-    appendFileSync(transcript, `${JSON.stringify({ type: 'user', uuid: 'u-9', timestamp: '2026-09-22T09:10:00.000Z', cwd: project, sessionId: 'sess', gitBranch: 'feat/retry', message: { role: 'user', content: 'And write the changelog line.' } })}\n`);
-    const r = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'SessionEnd' }, home);
-    assert.equal(r.code, 0);
-    assert.equal(r.stderr, '');
-    assert.equal(readdirSync(join(home, 'queue')).length, 0, 'the queue drained');
-    const calls = node.seen.filter((c) => c.rpc === 'tools/call');
-    assert.equal(calls.length, 2);
-    for (const c of node.seen) assert.equal(c.auth, `Bearer ${TOKEN}`);
-    assert.equal(calls[0].params.name, 'report_session');
-    assert.equal(calls[0].params.arguments.session.delta.seq, 2, 'the fresh delta goes first');
-    assert.equal(calls[0].params.arguments.session.prompts.at(-1).text, 'And write the changelog line.');
-    assert.equal(calls[1].params.arguments.session.delta.seq, 1, 'then the queued one');
-    assert.ok(JSON.stringify(calls[1].params.arguments.session).includes('PLANTED-ASSISTANT-SENTENCE'), 'sessions:full carries assistant text');
-    const cached = JSON.parse(readFileSync(join(home, 'state', 'open-questions.json'), 'utf8'));
-    assert.deepEqual(cached.open_questions, [{ id: 'q-7', text: 'Hva bruker du Claude Code mest til?' }]);
+    writeCredentials(home, node.base, ['remember', 'sessions:full']);
+    const r = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home);
+    assert.deepEqual(r, { code: 0, stdout: '', stderr: '' });
+    const starts = await fakeStarts(home, 1);
+    assert.equal(starts.length, 1, 'one headless run');
+    const [run] = starts;
+    assert.equal(run.distil, '1', 'the run is marked, so its own hooks and MCP server start nothing');
+    assert.equal(run.argv[0], '-p');
+    assert.match(run.argv[1], /Use the wybe-connect `distil` skill\.\nMode: ongoing/);
+    assert.ok(run.argv[1].includes(transcript), 'the run distils exactly the noted transcript');
+    assert.deepEqual(run.argv.slice(2, 4), ['--allowedTools', 'Read,Glob,Grep,mcp__plugin_wybe-connect_wybe__remember,mcp__plugin_wybe-connect_wybe__pending_questions']);
+    assert.equal(node.seen.length, 0, 'the hook itself sends nothing: no raw session leaves the machine');
+    assert.equal(existsSync(join(home, 'queue')), false, 'no raw delta is queued either');
+    const state = JSON.parse(readFileSync(join(home, 'state', 'distil.json'), 'utf8'));
+    assert.equal(state.running.mode, 'ongoing');
+    assert.deepEqual(state.pending, [], 'the noted transcript went to the run');
 
-    const start = await runHook('session-start.js', { session_id: 'sess2', hook_event_name: 'SessionStart', source: 'startup' }, home);
-    assert.equal(start.code, 0);
-    assert.equal(start.stderr, '');
-    const out = JSON.parse(start.stdout);
-    assert.deepEqual(Object.keys(out), ['hookSpecificOutput']);
-    assert.equal(out.hookSpecificOutput.hookEventName, 'SessionStart');
-    assert.ok(out.hookSpecificOutput.additionalContext.includes(STANDING_INSTRUCTION));
-    assert.ok(out.hookSpecificOutput.additionalContext.includes('(q-7) Hva bruker du Claude Code mest til?'));
-    assert.ok(!out.hookSpecificOutput.additionalContext.includes(TOKEN));
+    const again = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'PreCompact' }, home);
+    assert.deepEqual(again, { code: 0, stdout: '', stderr: '' });
+    await new Promise((res) => setTimeout(res, 300));
+    assert.equal((await fakeStarts(home, 1)).length, 1, 'within the interval, no second run');
+    assert.deepEqual(JSON.parse(readFileSync(join(home, 'state', 'distil.json'), 'utf8')).pending.map((p) => p.transcriptPath), [transcript], 'noted for the next run');
   } finally {
     node.server.close();
   }
+});
+
+test('inside a distil run the hooks do nothing (no recursion), and SessionStart adds no context there', async () => {
+  const { home, project, transcript } = sandbox();
+  writeCredentials(home, REFUSED, ['remember']);
+  const r = await runHook('flush.js', { session_id: 's', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home, { WYBE_CONNECT_DISTIL: '1' });
+  assert.deepEqual(r, { code: 0, stdout: '', stderr: '' });
+  assert.equal(existsSync(join(home, 'state', 'distil.json')), false);
+  const s = await runHook('session-start.js', { hook_event_name: 'SessionStart' }, home, { WYBE_CONNECT_DISTIL: '1' });
+  assert.deepEqual(s, { code: 0, stdout: '', stderr: '' });
+  assert.equal((await fakeStarts(home, 0)).length, 0);
+});
+
+test('session-start hands Claude the standing instruction and the cached open questions', async () => {
+  const { home } = sandbox();
+  writeCredentials(home, REFUSED, ['remember']);
+  mkdirSync(join(home, 'state'), { recursive: true });
+  writeFileSync(join(home, 'state', 'open-questions.json'), JSON.stringify({ fetched_at: '2026-10-21T10:00:00Z', open_questions: [{ id: 'q-7', text: 'Hva bruker du Claude Code mest til?' }] }));
+  const start = await runHook('session-start.js', { session_id: 'sess2', hook_event_name: 'SessionStart', source: 'startup' }, home);
+  assert.equal(start.code, 0);
+  assert.equal(start.stderr, '');
+  const out = JSON.parse(start.stdout);
+  assert.equal(out.hookSpecificOutput.hookEventName, 'SessionStart');
+  assert.ok(out.hookSpecificOutput.additionalContext.includes(STANDING_INSTRUCTION));
+  assert.ok(out.hookSpecificOutput.additionalContext.includes('(q-7) Hva bruker du Claude Code mest til?'));
+  assert.ok(!out.hookSpecificOutput.additionalContext.includes(TOKEN));
 });
 
 test('hooks without a credential do nothing and exit 0; malformed stdin exits 0 with one stderr line', async () => {
@@ -157,11 +159,11 @@ test('hooks without a credential do nothing and exit 0; malformed stdin exits 0 
   assert.equal(bad.stderr.trim().split('\n').length, 1);
 });
 
-test('a grant without a sessions scope never builds or sends anything', async () => {
+test('a grant without `remember` never notes or distils anything', async () => {
   const { home, project, transcript } = sandbox();
-  writeCredentials(home, REFUSED, ['remember']);
+  writeCredentials(home, REFUSED, ['sessions:light']);
   const r = await runHook('flush.js', { session_id: 's', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home);
   assert.deepEqual(r, { code: 0, stdout: '', stderr: '' });
-  assert.equal(existsSync(join(home, 'queue')), false);
   assert.equal(existsSync(join(home, 'state')), false);
+  assert.equal((await fakeStarts(home, 0)).length, 0);
 });

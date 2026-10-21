@@ -9,12 +9,21 @@
 //   connected      tools/list = the node's own tools + connect; tools/call is forwarded to the
 //                  node's /mcp with the stored bearer (one refresh on 401), the result verbatim
 // Write-only stays true: the proxy forwards only the node's own tools, and the node has no read tool.
+// Every forwarded argument is redacted first (lib/redact.js; the ruling's laptop-side redaction).
+// Import: when a node answer carries `import_request` (the person pressed «Importer» in the portal),
+// the proxy hands it to lib/distil.js, which starts the background distil run. While Claude Code is
+// open the proxy also asks `pending_questions` at start and every POLL_MINUTES, so a press reaches a
+// running Claude Code without waiting for the next tool call. Inside a distil run it does neither.
 // stdout carries JSON-RPC only; nothing here prints a token.
 
 import { createInterface } from 'node:readline';
 import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, writeJsonPrivate } from './home.js';
+import { redactValue } from './redact.js';
+import { importRequestOf, inDistilRun, maybeRun } from './distil.js';
+
+export const POLL_MINUTES = 5;
 
 export const SERVER_INFO = Object.freeze({ name: 'wybe', version: '0.2.0' });
 
@@ -37,7 +46,7 @@ const text = (t, isError = false) => ({ content: [{ type: 'text', text: t }], ..
  * handle(message) answers one JSON-RPC message (null for a notification); notify(message) is how
  * the proxy pushes notifications/tools/list_changed after a sign-in completes.
  */
-export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', notify = () => {}, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now }) {
+export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', notify = () => {}, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, onImportRequest = () => {} }) {
   let pending = null; // { nodeUrl, url, done, error }
 
   const credentials = () => {
@@ -114,6 +123,22 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
     return text(`A browser window is opening on the Wybe sign-in page. Ask the person to sign in with their passkey and tick what they want to share, then call connect again to confirm. If no browser opened, they can open this link: ${state.url}`);
   }
 
+  /** Caches open questions and hands an import request on, for any node answer. */
+  function noticeAnswer(result) {
+    const questions = openQuestionsOf(result);
+    if (questions.length) writeJsonPrivate(paths.openQuestions, { fetched_at: new Date(now()).toISOString(), open_questions: questions });
+    const requestedAt = importRequestOf(result);
+    if (requestedAt) onImportRequest(requestedAt);
+  }
+
+  /** One `pending_questions` call: the read the ruling allows, and how an «Importer» press arrives. */
+  async function poll() {
+    if (!credentials()) return null;
+    const out = await upstream('tools/call', { name: 'pending_questions', arguments: {} });
+    if (out.ok) noticeAnswer(out.result);
+    return out;
+  }
+
   async function handle(msg) {
     if (!msg || typeof msg !== 'object' || msg.jsonrpc !== '2.0') return null;
     const { id, method, params } = msg;
@@ -141,13 +166,12 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
         const name = params?.name;
         if (name === CONNECT_TOOL.name) return reply(await callConnect(params?.arguments));
         if (!credentials()) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
-        const out = await upstream('tools/call', { name, arguments: params?.arguments ?? {} });
+        const out = await upstream('tools/call', { name, arguments: redactValue(params?.arguments ?? {}).value });
         if (!out.ok) {
           const why = out.kind === 'auth' ? 'the connection was refused (revoked or expired); call `connect` again' : `the AI colleague could not be reached (${out.kind}: ${out.message})`;
           return reply(text(`Not delivered: ${why}.`, true));
         }
-        const questions = openQuestionsOf(out.result);
-        if (questions.length) writeJsonPrivate(paths.openQuestions, { fetched_at: new Date(now()).toISOString(), open_questions: questions });
+        noticeAnswer(out.result);
         return reply(out.result);
       }
       default:
@@ -155,13 +179,22 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
     }
   }
 
-  return { handle };
+  return { handle, poll };
 }
 
 /** Newline-delimited JSON-RPC on stdin/stdout (the MCP stdio transport). */
-export function runStdio({ paths, clientName, input = process.stdin, output = process.stdout }) {
+export function runStdio({ paths, clientName, input = process.stdin, output = process.stdout, env = process.env }) {
   const write = (m) => output.write(`${JSON.stringify(m)}\n`);
-  const proxy = createProxy({ paths, clientName, notify: write });
+  const distilling = inDistilRun(env);
+  const onImportRequest = (requestedAt) => {
+    if (!distilling) maybeRun({ paths, importRequestedAt: requestedAt, env });
+  };
+  const proxy = createProxy({ paths, clientName, notify: write, onImportRequest });
+  if (!distilling) {
+    const tick = () => proxy.poll().catch(() => {});
+    setTimeout(tick, 2_000).unref();
+    setInterval(tick, POLL_MINUTES * 60_000).unref();
+  }
   const rl = createInterface({ input });
   rl.on('line', async (line) => {
     if (!line.trim()) return;

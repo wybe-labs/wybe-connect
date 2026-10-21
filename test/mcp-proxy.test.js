@@ -126,6 +126,44 @@ test('connected: a 401 refreshes once for the stored resource, stores the new gr
   assert.ok(node.seen.filter((s) => s.rpc === 'tools/call').every((s) => s.auth === 'new'));
 });
 
+test('every forwarded argument is redacted on this machine first (planted DSN password and key never reach the node)', async () => {
+  const p = home();
+  saveCredentials(creds(), p);
+  const node = fakeNode();
+  const proxy = createProxy({ paths: p, fetchImpl: node.fetchImpl });
+  const key = ['sk', 'ant', 'PLANTEDplantedPLANTEDplanted01'].join('-');
+  const bait = `Prod-DB er postgres://app:Pl4nted-Pw-9x@db.internal:5432/x og nøkkelen ${key}`;
+  await proxy.handle(req(1, 'tools/call', { name: 'remember', arguments: { items: [{ content: bait, subject: 'Infra' }] } }));
+  const sent = JSON.stringify(node.seen.find((s) => s.rpc === 'tools/call').params);
+  assert.ok(!sent.includes('Pl4nted-Pw-9x'), 'the DSN password left the machine');
+  assert.ok(!sent.includes('PLANTEDplanted'), 'the API key left the machine');
+  assert.ok(sent.includes('[REDACTED:url-userinfo]') && sent.includes('Prod-DB er postgres://'), 'the rest of the item is kept');
+});
+
+test('an import request in a node answer is handed on once per answer; pending_questions is the poll', async () => {
+  const p = home();
+  saveCredentials(creds(), p);
+  const AT = '2026-10-21T11:59:00.000Z';
+  const seen = [];
+  const fetchImpl = async (url, init = {}) => {
+    if (init.method === 'DELETE') return new Response('', { status: 200 });
+    const msg = JSON.parse(init.body);
+    seen.push(msg.method === 'tools/call' ? msg.params.name : msg.method);
+    if (msg.method === 'initialize') return json({ jsonrpc: '2.0', id: msg.id, result: {} }, 200, { 'mcp-session-id': 's1' });
+    if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
+    return json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify({ ok: true, open_questions: [], import_request: { requested_at: AT } }) }] } });
+  };
+  const asked = [];
+  const proxy = createProxy({ paths: p, fetchImpl, onImportRequest: (at) => asked.push(at) });
+  await proxy.poll();
+  assert.deepEqual(seen, ['initialize', 'notifications/initialized', 'pending_questions'], 'the poll is one pending_questions call');
+  assert.deepEqual(asked, [AT]);
+  await proxy.handle(req(1, 'tools/call', { name: 'remember', arguments: { items: [] } }));
+  assert.deepEqual(asked, [AT, AT], 'any answer carrying it hands it on; lib/distil.js runs each request once');
+  const unconnected = createProxy({ paths: home(), fetchImpl, onImportRequest: (at) => asked.push(at) });
+  assert.equal(await unconnected.poll(), null, 'not connected: no poll');
+});
+
 test('the plugin ships the server: .mcp.json starts bin/mcp-proxy.js, which speaks stdio JSON-RPC', async () => {
   const pkg = join(import.meta.dirname, '..', 'packages', 'claude-code');
   const mcp = JSON.parse(readFileSync(join(pkg, '.mcp.json'), 'utf8'));

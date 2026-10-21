@@ -6,9 +6,11 @@
 import { readHookInput, failOpen } from '../lib/hook-io.js';
 import { paths, loadCredentials, readJson } from '../lib/home.js';
 import { buildContext } from '../lib/session-context.js';
+import { inDistilRun } from '../lib/distil.js';
 
 try {
   await readHookInput();
+  if (inDistilRun()) process.exit(0); // the background distil run needs no standing instruction
   const p = paths();
   const context = buildContext({ credentials: loadCredentials(p), cached: readJson(p.openQuestions) });
   if (context) {
