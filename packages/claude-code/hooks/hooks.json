@@ -1,5 +1,5 @@
 {
-  "description": "wybe-connect: SessionStart injects the standing instruction and the node's cached open questions; Stop, SessionEnd and PreCompact flush the redacted transcript delta to the node (or the local queue). Every hook exits 0 whatever happens.",
+  "description": "wybe-connect: SessionStart gives Claude the standing instruction and the node's cached open questions; Stop, SessionEnd and PreCompact note the session for the next background distil run (essence only, at most every 6 hours) and send nothing themselves. Every hook exits 0 whatever happens.",
   "hooks": {
     "SessionStart": [
       {

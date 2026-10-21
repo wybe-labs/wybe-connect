@@ -13,7 +13,7 @@ function usage(code) {
 
 const args = process.argv.slice(2);
 let nodeUrl = null;
-let scopes = [...ALL_SCOPES];
+let scopes = ['remember']; // essence only: `remember` is all the Claude Code plugin sends (QA F7)
 for (let i = 0; i < args.length; i++) {
   if (args[i] === '--scopes') {
     scopes = String(args[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean);

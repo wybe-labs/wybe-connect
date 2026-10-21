@@ -17,13 +17,19 @@
 // stdout carries JSON-RPC only; nothing here prints a token.
 
 import { createInterface } from 'node:readline';
-import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js';
+import { connect as defaultConnect, refreshTokens } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, writeJsonPrivate } from './home.js';
 import { redactValue } from './redact.js';
 import { importRequestOf, inDistilRun, maybeRun } from './distil.js';
 
 export const POLL_MINUTES = 5;
+/**
+ * What the one sign-in asks for (QA F7): essence only means `remember` (facts, answers, import_of)
+ * is all Claude Code sends. `pending_questions` needs no scope. The sessions:* and conversations
+ * scopes are left off the consent screen rather than asked for and never used.
+ */
+export const CONNECT_SCOPES = Object.freeze(['remember']);
 
 export const SERVER_INFO = Object.freeze({ name: 'wybe', version: '0.2.0' });
 
@@ -78,7 +84,7 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
     const state = { nodeUrl, url: null, done: false, error: null };
     pending = state;
     connectImpl(nodeUrl, {
-      scopes: ALL_SCOPES,
+      scopes: [...CONNECT_SCOPES],
       clientName,
       fetchImpl,
       onUrl: (url) => { state.url = url; resolveUrl(); },

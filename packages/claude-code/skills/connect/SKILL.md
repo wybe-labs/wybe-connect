@@ -1,6 +1,6 @@
 ---
 name: connect
-description: Connect this Claude Code to the person's Wybe colleague (their Wybe node) so that hooks feed it redacted session summaries and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me", "Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me", "Koble til Wybe", "Connect me to my Wybe colleague at https://<slug>.wybe.me", "connect to Wybe", "wybe connect", or any request to pair, link or hook up Claude Code with a Wybe node URL.
+description: Connect this Claude Code to the person's Wybe colleague (their Wybe node) so that it receives the essence of their work (durable facts distilled and redacted on this machine) and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me", "Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me", "Koble til Wybe", "Connect me to my Wybe colleague at https://<slug>.wybe.me", "connect to Wybe", "wybe connect", or any request to pair, link or hook up Claude Code with a Wybe node URL.
 ---
 
 # Connect to Wybe
@@ -29,8 +29,8 @@ start; the person is granting access to their work context and should hear what 
    and to start Claude Code again and paste the sentence once more.
 
 3. **Sign in once:** call the `wybe` server's `connect` tool with `node_url`. A browser opens on
-   `auth.wybe.me`; the person signs in with their passkey and ticks the scopes they want to share
-   (`remember`, `conversations`, `sessions:light`, `sessions:full`). If the answer carries a link
+   `auth.wybe.me`; the person signs in with their passkey and approves `remember` (durable work facts;
+   that is all this plugin sends). If the answer carries a link
    because no browser appeared, show the link. When the person says they are done, call
    `connect` again: it answers `Connected to ...` with the granted scopes. That one sign-in
    serves the hooks and the tools; there is nothing else to add or copy.
@@ -48,8 +48,9 @@ start; the person is granting access to their work context and should hear what 
    If the answer to `remember` carries `open_questions`, ask the first one right away and pass
    the answer back with `answers: [<id>]`.
 
-5. **Confirm** in one paragraph: connected to which node, which scopes, that the hooks now
-   flush redacted session deltas at every stop/compaction/end, and that pairing can be revoked
+5. **Confirm** in one paragraph: connected to which node, which scopes, that from now on only the
+   essence is sent (a background distil on this machine, at most every 6 hours, redacted; never
+   transcripts), that «Importer» in their Wybe portal distils their local history once, and that pairing can be revoked
    under "Mine koblinger" on the node (revoking stops the flow; erasing what was learned is a
    separate action there).
 

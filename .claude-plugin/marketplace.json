@@ -11,7 +11,7 @@
     {
       "name": "wybe-connect",
       "source": "./packages/claude-code",
-      "description": "Feeds your Wybe node from Claude Code: session summaries per the OAuth scopes you granted, redacted on your laptop before anything leaves it. Write-only - the node never reads your machine and Claude Code never reads the node.",
+      "description": "Connects Claude Code to your Wybe AI colleague with one sign-in and sends only the essence: durable work facts distilled and redacted on your machine. Write-only - the node never reads your machine and Claude Code never reads the node.",
       "version": "0.3.0",
       "category": "productivity"
     }

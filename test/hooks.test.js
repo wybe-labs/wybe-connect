@@ -101,13 +101,20 @@ test('flush hook (essence only): notes the transcript and starts ONE background 
     const [run] = starts;
     assert.equal(run.distil, '1', 'the run is marked, so its own hooks and MCP server start nothing');
     assert.equal(run.argv[0], '-p');
-    assert.match(run.argv[1], /Use the wybe-connect `distil` skill\.\nMode: ongoing/);
+    assert.match(run.argv[1], /# Distil to Wybe[\s\S]*## This run\nMode: ongoing/, 'the distil instructions are inlined');
     assert.ok(run.argv[1].includes(transcript), 'the run distils exactly the noted transcript');
-    assert.deepEqual(run.argv.slice(2, 4), ['--allowedTools', 'Read,Glob,Grep,mcp__plugin_wybe-connect_wybe__remember,mcp__plugin_wybe-connect_wybe__pending_questions']);
+    assert.deepEqual(run.argv.slice(2, 4), ['--tools', 'Read,Glob,Grep']);
+    assert.ok(run.argv.includes('--strict-mcp-config') && run.argv.includes('dontAsk'));
     assert.equal(node.seen.length, 0, 'the hook itself sends nothing: no raw session leaves the machine');
     assert.equal(existsSync(join(home, 'queue')), false, 'no raw delta is queued either');
-    const state = JSON.parse(readFileSync(join(home, 'state', 'distil.json'), 'utf8'));
-    assert.equal(state.running.mode, 'ongoing');
+    let state;
+    for (let i = 0; i < 100; i++) {
+      state = JSON.parse(readFileSync(join(home, 'state', 'distil.json'), 'utf8'));
+      if (state.running === null) break;
+      await new Promise((res) => setTimeout(res, 30));
+    }
+    assert.equal(state.running, null, 'the watchdog recorded the end of the run');
+    assert.ok(state.lastRunAt && !state.lastFailureAt, 'a clean exit');
     assert.deepEqual(state.pending, [], 'the noted transcript went to the run');
 
     const again = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'PreCompact' }, home);
@@ -166,4 +173,17 @@ test('a grant without `remember` never notes or distils anything', async () => {
   assert.deepEqual(r, { code: 0, stdout: '', stderr: '' });
   assert.equal(existsSync(join(home, 'state')), false);
   assert.equal((await fakeStarts(home, 0)).length, 0);
+});
+
+test('F5: eight Stop/SessionEnd hooks at once start the headless run only once (lock around distil.json)', async () => {
+  const { dir, home } = sandbox();
+  writeCredentials(home, REFUSED, ['remember']);
+  const N = 8;
+  await Promise.all(Array.from({ length: N }, (_, i) => runHook('flush.js', { session_id: `s${i}`, transcript_path: join(dir, `t${i}.jsonl`), cwd: dir, hook_event_name: i % 2 ? 'Stop' : 'SessionEnd' }, home)));
+  await new Promise((r) => setTimeout(r, 1500));
+  assert.equal((await fakeStarts(home, 1)).length, 1);
+  const state = JSON.parse(readFileSync(join(home, 'state', 'distil.json'), 'utf8'));
+  const inRun = 1;
+  assert.equal(state.pending.length + inRun >= 1, true);
+  assert.ok(state.pending.length <= N - 1, 'every other noted transcript waits for the next run');
 });

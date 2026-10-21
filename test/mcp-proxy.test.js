@@ -182,3 +182,13 @@ test('the plugin ships the server: .mcp.json starts bin/mcp-proxy.js, which spea
   assert.equal(answers[0].result.serverInfo.name, 'wybe');
   assert.deepEqual(answers[1].result.tools, [CONNECT_TOOL]);
 });
+
+test('F7: essence only: the one sign-in asks for `remember` and nothing else', async () => {
+  let asked = null;
+  const connectImpl = (url, opts) => { asked = opts.scopes; opts.onUrl('https://auth.wybe.me/oauth/authorize?x'); return new Promise(() => {}); };
+  const proxy = createProxy({ paths: home(), fetchImpl: async () => { throw new Error('no network'); }, connectImpl });
+  await proxy.handle(req(1, 'tools/call', { name: 'connect', arguments: { node_url: NODE } }));
+  assert.deepEqual(asked, ['remember']);
+  const plugin = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'packages', 'claude-code', '.claude-plugin', 'plugin.json'), 'utf8')).description;
+  assert.ok(!/session deltas|sessions:full/.test(plugin), 'the description no longer promises session deltas');
+});

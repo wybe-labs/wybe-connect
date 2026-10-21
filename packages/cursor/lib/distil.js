@@ -1,35 +1,52 @@
 // Distillation on the person's own machine (Oscar, 21.10: import = "the essence of their local
 // sessions" plus answers to the colleague's questions, never raw sessions; the ongoing hooks send
 // essence only; the distil runs as a headless `claude -p` in the background). A run reads local
-// sessions and memory with Claude Code's own read tools and sends a short list of durable work facts,
-// plus answers to the node's open questions, with `remember` (skills/distil/SKILL.md). Nothing raw
-// leaves the machine; the plugin's MCP server redacts every argument before it is forwarded.
+// sessions and memory with read-only tools and sends a short list of durable work facts, plus
+// answers to the node's open questions, with `remember` (skills/distil/SKILL.md). Nothing raw leaves
+// the machine; the plugin's MCP server redacts every argument before it is forwarded.
+//
 // Two triggers, one runner:
 //   import   the node asked (portal «Importer»): a tool answer carries import_request.requested_at;
 //            the run covers all local sources and closes the request with `import_of`
 //   ongoing  the hooks note each transcript (noteSession); at most once per DISTIL_EVERY_HOURS a run
 //            distils the noted transcripts
-// The run itself has WYBE_CONNECT_DISTIL=1, so its own hooks and MCP server never start another run.
-// It uses the person's own Claude Code subscription; nothing here calls a model directly.
+//
+// The node is not trusted with the run (QA round 1): the only thing it supplies, requested_at, must
+// be a strict ISO 8601 timestamp or it is dropped, and the run is confined by the CLI itself:
+// `--tools Read,Glob,Grep` (no Bash, Write, Edit, WebFetch, Task), `--strict-mcp-config` with only
+// the plugin's own `wybe` server, `--permission-mode dontAsk`, `--max-turns`. A watchdog process
+// (bin/distil-run.js → runWatchdog) owns each run: it kills it after RUN_TIMEOUT_MS and records the
+// outcome. An import counts as handled only when the run exits 0; a failed one is retried after
+// FAILURE_BACKOFF_MS. distil.json is only read-modified-written under a lock file.
+// Every run has WYBE_CONNECT_DISTIL=1, so its own hooks and MCP server never start another run.
 
-import { spawn } from 'node:child_process';
-import { openSync, closeSync, mkdirSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { openSync, closeSync, mkdirSync, unlinkSync, statSync, existsSync, readFileSync, readdirSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, delimiter } from 'node:path';
 import { readJson, writeJsonPrivate } from './home.js';
 
 export const DISTIL_ENV = 'WYBE_CONNECT_DISTIL';
 export const DISTIL_EVERY_HOURS = 6;
-/** A run that has not finished after this long no longer blocks the next one. */
-export const RUN_STALE_MS = 2 * 60 * 60 * 1000;
+export const RUN_TIMEOUT_MS = 30 * 60 * 1000;
+/** A run older than this is presumed hung (its watchdog should have killed it at RUN_TIMEOUT_MS). */
+export const RUN_STALE_MS = RUN_TIMEOUT_MS + 10 * 60 * 1000;
+export const FAILURE_BACKOFF_MS = 30 * 60 * 1000;
+export const MAX_TURNS = 40;
 export const MAX_PENDING = 200;
-export const ALLOWED_TOOLS = Object.freeze([
-  'Read',
-  'Glob',
-  'Grep',
-  'mcp__plugin_wybe-connect_wybe__remember',
-  'mcp__plugin_wybe-connect_wybe__pending_questions',
-]);
+export const LOCK_STALE_MS = 30 * 1000;
+export const LOG_KEEP_DAYS = 14;
+/** Built-in tools the run has at all (`--tools`), and what it may use without asking (`--allowedTools`). */
+export const RUN_TOOLS = Object.freeze(['Read', 'Glob', 'Grep']);
+export const ALLOWED_TOOLS = Object.freeze([...RUN_TOOLS, 'mcp__wybe__remember', 'mcp__wybe__pending_questions']);
+
+/** Strict ISO 8601 UTC-or-offset timestamp; anything else from the node is dropped. */
+const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/;
+export const isIsoTimestamp = (s) => typeof s === 'string' && s.length <= 40 && ISO.test(s) && !Number.isNaN(Date.parse(s));
+const safePath = (s) => typeof s === 'string' && s.length > 0 && s.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(s);
+
+const HERE = import.meta.dirname;
+const PLUGIN_ROOT = join(HERE, '..');
 
 export const inDistilRun = (env = process.env) => env[DISTIL_ENV] === '1';
 
@@ -40,6 +57,8 @@ export function loadState(paths) {
   return {
     importHandled: typeof s?.importHandled === 'string' ? s.importHandled : null,
     lastRunAt: typeof s?.lastRunAt === 'string' ? s.lastRunAt : null,
+    lastFailureAt: typeof s?.lastFailureAt === 'string' ? s.lastFailureAt : null,
+    lastError: typeof s?.lastError === 'string' ? s.lastError : null,
     running: s?.running && typeof s.running === 'object' ? s.running : null,
     pending: Array.isArray(s?.pending) ? s.pending : [],
   };
@@ -47,18 +66,58 @@ export function loadState(paths) {
 
 const saveState = (paths, state) => writeJsonPrivate(statePath(paths), state);
 
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Runs fn() holding state/distil.lock (exclusive create). A lock older than LOCK_STALE_MS is a
+ * crashed holder's and is taken over. Busy after `tries` attempts → returns `busy`.
+ */
+export function withLock(paths, fn, { tries = 40, waitMs = 25, busy = null } = {}) {
+  mkdirSync(paths.state, { recursive: true, mode: 0o700 });
+  const lock = join(paths.state, 'distil.lock');
+  for (let i = 0; i < tries; i++) {
+    let fd;
+    try {
+      fd = openSync(lock, 'wx', 0o600);
+    } catch (err) {
+      if (err?.code !== 'EEXIST') throw err;
+      try {
+        if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) unlinkSync(lock);
+      } catch {
+        // gone already
+      }
+      pause(waitMs);
+      continue;
+    }
+    try {
+      return fn();
+    } finally {
+      closeSync(fd);
+      try {
+        unlinkSync(lock);
+      } catch {
+        // removed by a stale-lock takeover
+      }
+    }
+  }
+  return busy;
+}
+
 /** A hook saw this transcript: remember it for the next ongoing run (once per transcript). */
 export function noteSession(paths, { transcriptPath, sessionId = null, cwd = null, now = Date.now() }) {
-  if (typeof transcriptPath !== 'string' || !transcriptPath) return loadState(paths);
-  const state = loadState(paths);
-  const rest = state.pending.filter((p) => p.transcriptPath !== transcriptPath);
-  rest.push({ transcriptPath, sessionId, cwd, at: new Date(now).toISOString() });
-  state.pending = rest.slice(-MAX_PENDING);
-  saveState(paths, state);
-  return state;
+  if (!safePath(transcriptPath)) return loadState(paths);
+  return withLock(paths, () => {
+    const state = loadState(paths);
+    const rest = state.pending.filter((p) => p.transcriptPath !== transcriptPath);
+    rest.push({ transcriptPath, sessionId, cwd, at: new Date(now).toISOString() });
+    state.pending = rest.slice(-MAX_PENDING);
+    saveState(paths, state);
+    return state;
+  }, { busy: loadState(paths) });
 }
 
 const alive = (pid) => {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
     process.kill(pid, 0);
     return true;
@@ -68,90 +127,233 @@ const alive = (pid) => {
 };
 
 /**
- * What to run now, or null. An import the node asked for wins over the ongoing schedule; a run
- * still going (and younger than RUN_STALE_MS) blocks both.
+ * What to run now, or null. An import the node asked for wins over the ongoing schedule. A live
+ * run blocks both until RUN_STALE_MS; after that it is killed (plan.killPid) and replaced. A failed
+ * run backs off FAILURE_BACKOFF_MS.
  */
 export function planRun(state, { now = Date.now(), importRequestedAt = null, everyHours = DISTIL_EVERY_HOURS, isAlive = alive } = {}) {
-  if (state.running && now - Date.parse(state.running.startedAt) < RUN_STALE_MS && isAlive(state.running.pid)) return null;
-  if (typeof importRequestedAt === 'string' && importRequestedAt && importRequestedAt !== state.importHandled) {
-    return { mode: 'import', importOf: importRequestedAt };
+  let killPid = null;
+  if (state.running && isAlive(state.running.pid)) {
+    if (now - Date.parse(state.running.startedAt) < RUN_STALE_MS) return null;
+    killPid = state.running.pid;
+  }
+  if (state.lastFailureAt && now - Date.parse(state.lastFailureAt) < FAILURE_BACKOFF_MS) return null;
+  const extra = killPid ? { killPid } : {};
+  if (isIsoTimestamp(importRequestedAt) && importRequestedAt !== state.importHandled) {
+    return { mode: 'import', importOf: importRequestedAt, ...extra };
   }
   const due = !state.lastRunAt || now - Date.parse(state.lastRunAt) >= everyHours * 60 * 60 * 1000;
-  if (due && state.pending.length > 0) return { mode: 'ongoing', transcripts: state.pending.map((p) => p.transcriptPath) };
+  const transcripts = state.pending.map((p) => p.transcriptPath).filter(safePath);
+  if (due && transcripts.length > 0) return { mode: 'ongoing', transcripts, ...extra };
   return null;
 }
 
-export function buildPrompt(plan) {
-  if (plan.mode === 'import') {
-    return [
-      'Use the wybe-connect `distil` skill.',
-      'Mode: import (the person pressed «Importer» for this Claude Code in their Wybe portal).',
-      `import_of: ${plan.importOf}`,
-    ].join('\n');
-  }
-  return [
-    'Use the wybe-connect `distil` skill.',
-    'Mode: ongoing. Distil only these Claude Code transcripts:',
-    ...plan.transcripts.map((t) => `- ${t}`),
-  ].join('\n');
+/** The distil instructions, inlined: the run has no Skill tool (`--tools` is Read, Glob, Grep). */
+function skillText() {
+  const p = join(PLUGIN_ROOT, 'skills', 'distil', 'SKILL.md');
+  if (!existsSync(p)) return 'Distil the person\'s local Claude Code work into durable facts and send them with the `wybe` server\'s `remember` tool. Work only; never secrets, code, file contents or anything private.';
+  return readFileSync(p, 'utf8').replace(/^---[\s\S]*?---\s*/, '').trim();
 }
 
-/** argv for the headless run: read-only local tools plus the two Wybe tools, nothing else. */
-export function runArgs(plan, { model = process.env.WYBE_CONNECT_DISTIL_MODEL } = {}) {
-  const args = ['-p', buildPrompt(plan), '--allowedTools', ALLOWED_TOOLS.join(','), '--output-format', 'text'];
+export function buildPrompt(plan, { instructions = skillText() } = {}) {
+  const head = [instructions, '', '## This run'];
+  if (plan.mode === 'import') {
+    if (!isIsoTimestamp(plan.importOf)) throw new Error('import_of is not a timestamp');
+    return [...head, 'Mode: import (the person pressed «Importer» for this Claude Code in their Wybe portal).', `import_of: ${plan.importOf}`].join('\n');
+  }
+  const transcripts = plan.transcripts.filter(safePath);
+  return [...head, 'Mode: ongoing. Distil only these Claude Code transcripts:', ...transcripts.map((t) => `- ${t}`)].join('\n');
+}
+
+/** argv for the headless run: confined by the CLI, not by the prompt. */
+export function runArgs(plan, { model = process.env.WYBE_CONNECT_DISTIL_MODEL, mcpServer = join(PLUGIN_ROOT, 'bin', 'mcp-proxy.js'), instructions } = {}) {
+  const mcp = JSON.stringify({ mcpServers: { wybe: { command: process.execPath, args: [mcpServer] } } });
+  const args = [
+    '-p', buildPrompt(plan, instructions === undefined ? {} : { instructions }),
+    '--tools', RUN_TOOLS.join(','),
+    '--allowedTools', ALLOWED_TOOLS.join(','),
+    '--permission-mode', 'dontAsk',
+    '--strict-mcp-config', '--mcp-config', mcp,
+    '--max-turns', String(MAX_TURNS),
+    '--output-format', 'text',
+  ];
   if (model) args.push('--model', model);
   return args;
 }
 
-/** Starts the headless run detached (it outlives the hook or server that started it) and records it. */
-export function startRun(plan, { paths, now = Date.now(), spawnImpl = spawn, claudeBin = process.env.WYBE_CONNECT_CLAUDE_BIN || 'claude', cwd = homedir() } = {}) {
+/**
+ * How to start `claude` without a shell: WYBE_CONNECT_CLAUDE_BIN (a .js/.mjs runs under this Node),
+ * else `claude.exe` / `claude` on PATH, else the npm shim's cli.js run under this Node (Windows npm
+ * installs only claude.cmd, which cannot be spawned without a shell). Null when none is found.
+ */
+export function resolveClaude({ env = process.env, platform = process.platform, exists = existsSync } = {}) {
+  const bin = env.WYBE_CONNECT_CLAUDE_BIN;
+  if (bin) return /\.m?js$/i.test(bin) ? { cmd: process.execPath, pre: [bin] } : { cmd: bin, pre: [] };
+  const dirs = String(env.PATH ?? env.Path ?? '').split(delimiter).filter(Boolean);
+  const names = platform === 'win32' ? ['claude.exe'] : ['claude'];
+  for (const d of dirs) for (const n of names) if (exists(join(d, n))) return { cmd: join(d, n), pre: [] };
+  for (const d of dirs) {
+    if (!exists(join(d, platform === 'win32' ? 'claude.cmd' : 'claude'))) continue;
+    for (const cli of ['cli.js', 'cli.mjs']) {
+      const p = join(d, 'node_modules', '@anthropic-ai', 'claude-code', cli);
+      if (exists(p)) return { cmd: process.execPath, pre: [p] };
+    }
+  }
+  return null;
+}
+
+function pruneOld(paths, now) {
+  try {
+    for (const f of readdirSync(paths.state)) {
+      if (!/^distil-(?:\d|plan-)/.test(f)) continue;
+      const p = join(paths.state, f);
+      if (now - statSync(p).mtimeMs > LOG_KEEP_DAYS * 24 * 60 * 60 * 1000) unlinkSync(p);
+    }
+  } catch {
+    // housekeeping only
+  }
+}
+
+/**
+ * Starts the watchdog for `plan` (detached; it outlives the hook or server that started it) and
+ * records the run. Call under the lock. A run that could not be started is recorded as a failure,
+ * never as handled.
+ */
+export function startRun(plan, { paths, now = Date.now(), spawnImpl = spawn, runner = join(PLUGIN_ROOT, 'bin', 'distil-run.js'), kill = (pid) => process.kill(pid) } = {}) {
   const stamp = new Date(now).toISOString().replace(/[:.]/g, '-');
   mkdirSync(paths.state, { recursive: true, mode: 0o700 });
+  pruneOld(paths, now);
+  if (plan.killPid) {
+    try {
+      kill(plan.killPid);
+    } catch {
+      // already gone
+    }
+  }
+  const planFile = join(paths.state, `distil-plan-${stamp}.json`);
   const logPath = join(paths.state, `distil-${stamp}.log`);
-  const fd = openSync(logPath, 'a', 0o600);
-  let child;
+  writeJsonPrivate(planFile, { plan: { mode: plan.mode, importOf: plan.importOf ?? null, transcripts: plan.transcripts ?? null }, log: logPath, root: paths.root });
+  let child = null;
   try {
-    // A .js/.mjs "binary" runs under this Node (a wrapper, or the tests' recorder; never the real claude in tests).
-    const script = /\.m?js$/i.test(claudeBin);
-    child = spawnImpl(script ? process.execPath : claudeBin, script ? [claudeBin, ...runArgs(plan)] : runArgs(plan), {
-      cwd,
-      detached: true,
-      windowsHide: true,
-      stdio: ['ignore', fd, fd],
-      env: { ...process.env, [DISTIL_ENV]: '1' },
-    });
-    child.on?.('error', () => {});
-    child.unref?.();
-  } finally {
-    closeSync(fd);
+    child = spawnImpl(process.execPath, [runner, planFile], { cwd: homedir(), detached: true, windowsHide: true, stdio: 'ignore', env: { ...process.env, WYBE_CONNECT_HOME: paths.root } });
+    child?.on?.('error', () => {});
+    child?.unref?.();
+  } catch {
+    child = null;
   }
   const state = loadState(paths);
-  state.running = { pid: child?.pid ?? null, startedAt: new Date(now).toISOString(), mode: plan.mode, log: logPath };
-  state.lastRunAt = new Date(now).toISOString();
-  if (plan.mode === 'import') state.importHandled = plan.importOf;
-  else state.pending = state.pending.filter((p) => !plan.transcripts.includes(p.transcriptPath));
+  if (!Number.isInteger(child?.pid)) {
+    state.lastFailureAt = new Date(now).toISOString();
+    state.lastError = 'could not start the distil runner';
+    saveState(paths, state);
+    return null;
+  }
+  state.running = { pid: child.pid, startedAt: new Date(now).toISOString(), mode: plan.mode, importOf: plan.importOf ?? null, transcripts: plan.transcripts ?? null, log: logPath };
+  if (plan.mode === 'ongoing') state.pending = state.pending.filter((p) => !plan.transcripts.includes(p.transcriptPath));
   saveState(paths, state);
   return state.running;
 }
 
-/** One call for every trigger: plan, and start when there is something to do. Never inside a run. */
-export function maybeRun({ paths, importRequestedAt = null, env = process.env, now = Date.now(), spawnImpl, isAlive, everyHours } = {}) {
+/** One call for every trigger: plan and start under the lock. Never inside a run. */
+export function maybeRun({ paths, importRequestedAt = null, env = process.env, now = Date.now(), spawnImpl, isAlive, everyHours, runner, kill } = {}) {
   if (inDistilRun(env)) return null;
-  const plan = planRun(loadState(paths), { now, importRequestedAt, isAlive, everyHours });
-  if (!plan) return null;
-  startRun(plan, { paths, now, spawnImpl });
-  return plan;
+  return withLock(paths, () => {
+    const plan = planRun(loadState(paths), { now, importRequestedAt, isAlive, everyHours });
+    if (!plan) return null;
+    return startRun(plan, { paths, now, spawnImpl, runner, kill }) ? plan : null;
+  });
 }
 
-/** The node's import request in a tool answer (structuredContent, or the JSON text), or null. */
+function killTree(pid, platform = process.platform) {
+  if (platform === 'win32') spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' });
+  else {
+    try {
+      process.kill(-pid, 'SIGKILL');
+    } catch {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // gone
+      }
+    }
+  }
+}
+
+/**
+ * The watchdog (bin/distil-run.js): runs `claude -p` for the plan, kills it after `timeoutMs`, and
+ * records the outcome under the lock. Resolves with { ok, code, error }.
+ */
+export function runWatchdog(planFile, { paths, spawnImpl = spawn, resolve = resolveClaude, timeoutMs = RUN_TIMEOUT_MS, now = Date.now, argsFor = runArgs } = {}) {
+  const { plan, log } = readJson(planFile);
+  const finish = (outcome) => {
+    withLock(paths, () => {
+      const state = loadState(paths);
+      if (state.running?.pid === process.pid) state.running = null;
+      state.lastRunAt = new Date(now()).toISOString();
+      if (outcome.ok) {
+        if (plan.mode === 'import') state.importHandled = plan.importOf;
+        state.lastFailureAt = null;
+        state.lastError = null;
+      } else {
+        state.lastFailureAt = new Date(now()).toISOString();
+        state.lastError = String(outcome.error ?? `exit ${outcome.code}`).slice(0, 200);
+        if (plan.mode === 'ongoing') {
+          const back = (plan.transcripts ?? []).filter(safePath).map((t) => ({ transcriptPath: t, sessionId: null, cwd: null, at: state.lastFailureAt }));
+          const known = new Set(state.pending.map((p) => p.transcriptPath));
+          state.pending = [...back.filter((b) => !known.has(b.transcriptPath)), ...state.pending].slice(-MAX_PENDING);
+        }
+      }
+      saveState(paths, state);
+    });
+    try {
+      unlinkSync(planFile);
+    } catch {
+      // kept for the log pruner
+    }
+    return outcome;
+  };
+  const claude = resolve();
+  if (!claude) return Promise.resolve(finish({ ok: false, error: 'claude not found on PATH (set WYBE_CONNECT_CLAUDE_BIN)' }));
+  return new Promise((done) => {
+    let fd = null;
+    let settled = false;
+    let timer = null;
+    const settle = (o) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (fd !== null) closeSync(fd);
+      done(finish(o));
+    };
+    let child;
+    try {
+      fd = openSync(log, 'a', 0o600);
+      child = spawnImpl(claude.cmd, [...claude.pre, ...argsFor(plan)], {
+        cwd: homedir(), windowsHide: true, detached: process.platform !== 'win32',
+        stdio: ['ignore', fd, fd], env: { ...process.env, [DISTIL_ENV]: '1', WYBE_CONNECT_HOME: paths.root },
+      });
+    } catch (err) {
+      settle({ ok: false, error: err instanceof Error ? err.message : String(err) });
+      return;
+    }
+    timer = setTimeout(() => {
+      if (Number.isInteger(child.pid)) killTree(child.pid);
+      settle({ ok: false, error: `timed out after ${Math.round(timeoutMs / 60000)} min` });
+    }, timeoutMs);
+    child.on('error', (err) => settle({ ok: false, error: err?.code ?? err?.message ?? 'spawn error' }));
+    child.on('exit', (code) => settle({ ok: code === 0, code }));
+  });
+}
+
+/** The node's import request in a tool answer (structuredContent, or the JSON text), or null. Only a strict timestamp passes. */
 export function importRequestOf(result) {
   const fromStructured = result?.structuredContent?.import_request?.requested_at;
-  if (typeof fromStructured === 'string') return fromStructured;
+  if (fromStructured !== undefined) return isIsoTimestamp(fromStructured) ? fromStructured : null;
   const text = Array.isArray(result?.content) ? result.content.find((c) => c?.type === 'text')?.text : undefined;
   if (typeof text === 'string') {
     try {
       const at = JSON.parse(text)?.import_request?.requested_at;
-      if (typeof at === 'string') return at;
+      return isIsoTimestamp(at) ? at : null;
     } catch {
       // prose, not JSON
     }
