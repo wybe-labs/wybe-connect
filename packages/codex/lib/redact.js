@@ -26,7 +26,12 @@ export const FAMILIES = Object.freeze([
   { name: 'github-token', reason: 'ghp_/gho_/ghu_/ghs_/ghr_ and github_pat_ tokens act as the person on GitHub', re: /\b(?:gh[opusr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})\b/g },
   { name: 'slack-token', reason: 'xox[abpors]-... are Slack bot/user/app tokens', re: /\bxox[abpors]-[A-Za-z0-9-]{10,}/g },
   { name: 'jwt', reason: 'three dot-separated base64url parts starting with eyJ is a signed bearer token', re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9_.-])/g },
+  { name: 'stripe-key', reason: 'sk_live_/sk_test_/rk_live_/rk_test_ are Stripe secret and restricted keys: they move money', re: new RegExp(`${B}(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}${E}`, 'g') },
+  { name: 'google-api-key', reason: 'AIza... is a Google API key (Maps, Gemini, Firebase) billed to its owner', re: new RegExp(`${B}AIza[0-9A-Za-z_-]{30,40}${E}`, 'g') },
+  { name: 'azure-key', reason: 'AccountKey=/SharedAccessKey= in an Azure connection string is the storage or bus key itself', re: /(?<keep>\b(?:AccountKey|SharedAccessKey)=)[A-Za-z0-9+/]{16,}={0,2}/g },
+  { name: 'basic-auth', reason: 'an Authorization: Basic value is base64 of user:password', re: /(?<keep>\bBasic\s+)(?=[A-Za-z0-9+/]*[0-9+/=])[A-Za-z0-9+/]{8,}={0,2}(?![A-Za-z0-9+/=])/g },
   { name: 'generic-secret', reason: 'a 32+ character hex or base64url value after a token/secret/key/password label is a credential whatever its vendor', re: /(?<keep>\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password|passwd|pwd|key)\b["']?\s*[:=]\s*["']?)(?:[A-Fa-f0-9]{32,}|[A-Za-z0-9_-]{32,})(?![A-Za-z0-9_-])/gi },
+  { name: 'password-assignment', reason: 'a password of any length after a password label (generic-secret only takes 32+ characters)', re: /(?<keep>\b(?:password|passwd|pwd|passord|passphrase)\b["']?\s*[:=]\s*["']?)[^\s"'<>,;]{6,}/gi, validate: (m) => !m.includes('[REDACTED:') },
   { name: 'fodselsnummer', reason: 'a Norwegian fodselsnummer identifies one person for life; only numbers whose two control digits verify are redacted', re: /(?<!\d)\d{6}\s?\d{5}(?!\d)/g, validate: isValidFodselsnummer },
   { name: 'email', reason: 'an e-mail address identifies a person (configurable: {emails: false} keeps them)', re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
 ]);
