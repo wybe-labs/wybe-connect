@@ -240,10 +240,12 @@ export function openBrowser(url, { platform = process.platform, spawnImpl = spaw
 /**
  * The whole flow. Returns credentials ready for saveCredentials(): node, endpoints, client id,
  * tokens, granted scopes. `log(line)` receives progress lines (no token ever passes through it).
+ * `onUrl(url)` receives the authorization URL (public challenge and state only) as soon as it is
+ * known, for a caller that shows it itself (lib/mcp-proxy.js).
  * `clientName` names the harness on the consent screen and in the node's pairing list; each
  * harness registers its own client (one pairing per assistant).
  */
-export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientName = 'wybe-connect (Claude Code)', fetchImpl = globalThis.fetch, spawnImpl = spawn, platform = process.platform, timeoutMs = 5 * 60_000, log = () => {}, now = Date.now } = {}) {
+export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientName = 'wybe-connect (Claude Code)', fetchImpl = globalThis.fetch, spawnImpl = spawn, platform = process.platform, timeoutMs = 5 * 60_000, log = () => {}, onUrl = () => {}, now = Date.now } = {}) {
   const d = await discover(nodeUrl, { fetchImpl });
   log(`authorization server: ${d.issuer}`);
   const state = randomBytes(16).toString('base64url');
@@ -258,6 +260,7 @@ export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientName = 'wybe
     throw err;
   }
   const url = authorizeUrl({ metadata: d.metadata, clientId, redirectUri, scopes, state, challenge, resource: d.resource });
+  onUrl(url);
   const opened = openBrowser(url, { platform, spawnImpl });
   log(opened ? `browser opened; if nothing appeared, open this URL yourself:\n${url}` : `open this URL in your browser:\n${url}`);
   const { code } = await loop.result;
