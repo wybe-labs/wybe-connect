@@ -193,16 +193,17 @@ test('F7: essence only: the one sign-in asks for `remember` and nothing else', a
   assert.ok(!/session deltas|sessions:full/.test(plugin), 'the description no longer promises session deltas');
 });
 
-test('R2-1: a remember carrying import_of is recorded as delivered only when the node answers import_done: true', async () => {
+test('ledger (QA R2-1/R3-3/R3-4): every remember in a run is recorded with whether the node took it and confirmed import_done', async () => {
   const AT = '2026-10-21T11:59:00.000Z';
-  const delivered = (p) => existsSync(join(p.state, 'import-delivered.json')) && JSON.parse(readFileSync(join(p.state, 'import-delivered.json'), 'utf8')).importOf;
+  const lines = (f) => (existsSync(f) ? readFileSync(f, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
   for (const [answer, expected] of [
-    [{ content: [{ type: 'text', text: JSON.stringify({ ok: true, stored: 1, import_done: true }) }] }, AT],
-    [{ content: [{ type: 'text', text: JSON.stringify({ ok: true, stored: 1 }) }] }, false],
-    [{ content: [{ type: 'text', text: 'refused' }], isError: true }, false],
+    [{ content: [{ type: 'text', text: JSON.stringify({ ok: true, stored: 1, import_done: true }) }] }, { tool: 'remember', ok: true, importOf: AT, importDone: true }],
+    [{ content: [{ type: 'text', text: JSON.stringify({ ok: true, stored: 1 }) }] }, { tool: 'remember', ok: true, importOf: AT, importDone: false }],
+    [{ content: [{ type: 'text', text: 'refused' }], isError: true }, { tool: 'remember', ok: false, importOf: AT, importDone: false }],
   ]) {
     const p = home();
     saveCredentials(creds(), p);
+    const ledger = join(p.root, 'run.jsonl');
     const fetchImpl = async (url, init = {}) => {
       if (init.method === 'DELETE') return new Response('', { status: 200 });
       const msg = JSON.parse(init.body);
@@ -210,13 +211,18 @@ test('R2-1: a remember carrying import_of is recorded as delivered only when the
       if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
       return json({ jsonrpc: '2.0', id: msg.id, result: answer });
     };
-    const proxy = createProxy({ paths: p, fetchImpl });
+    const proxy = createProxy({ paths: p, fetchImpl, ledger });
     await proxy.handle(req(1, 'tools/call', { name: 'remember', arguments: { items: [{ content: 'x' }], import_of: AT } }));
-    assert.equal(delivered(p), expected, JSON.stringify(answer));
+    assert.deepEqual(lines(ledger), [expected], JSON.stringify(answer));
   }
   const unreachable = home();
   saveCredentials(creds(), unreachable);
-  const proxy = createProxy({ paths: unreachable, fetchImpl: async () => { throw new Error('ECONNREFUSED'); } });
-  await proxy.handle(req(1, 'tools/call', { name: 'remember', arguments: { items: [], import_of: AT } }));
-  assert.equal(delivered(unreachable), false, 'node unreachable: nothing delivered');
+  const ledger = join(unreachable.root, 'run.jsonl');
+  const proxy = createProxy({ paths: unreachable, fetchImpl: async () => { throw new Error('ECONNREFUSED'); }, ledger });
+  await proxy.handle(req(1, 'tools/call', { name: 'remember', arguments: { items: [] } }));
+  assert.deepEqual(lines(ledger), [{ tool: 'remember', ok: false, importOf: null, importDone: false }], 'node unreachable: recorded as not delivered');
+  const noRun = home();
+  saveCredentials(creds(), noRun);
+  await createProxy({ paths: noRun, fetchImpl: async () => { throw new Error('x'); } }).handle(req(1, 'tools/call', { name: 'remember', arguments: {} }));
+  assert.equal(existsSync(join(noRun.root, 'run.jsonl')), false, 'outside a run there is no ledger');
 });

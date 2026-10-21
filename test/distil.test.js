@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { paths } from '../lib/home.js';
 import {
   ALLOWED_TOOLS, DISTIL_ENV, FAILURE_BACKOFF_MS, RUN_STALE_MS, RUN_TOOLS, MAX_TURNS, MAX_RUN_TRANSCRIPTS,
-  markImportDelivered, distilProblem,
+  recordDelivery, ledgerFor, distilProblem,
   buildPrompt, importRequestOf, isIsoTimestamp, loadState, maybeRun, noteSession, planRun,
   resolveClaude, runArgs, runWatchdog, startRun, withLock,
 } from '../lib/distil.js';
@@ -185,7 +185,7 @@ test('R2-1: exit 0 without the node\'s import_done confirmation is a failure, no
 test('watchdog: exit 0 with the node\'s confirmation marks the import handled and clears the run; the run gets the distil marker', async () => {
   const p = home();
   startRun({ mode: 'import', importOf: AT }, { paths: p, now: T0, spawnImpl: recorder(process.pid).spawnImpl, runner: '/r.js' });
-  markImportDelivered(p, AT, T0);
+  recordDelivery(ledgerFor(planFileFor(p, { mode: 'import', importOf: AT, transcripts: null })), { tool: 'remember', ok: true, importOf: AT, importDone: true });
   const child = fakeChild();
   let started;
   const done = runWatchdog(planFileFor(p, { mode: 'import', importOf: AT, transcripts: null }), {

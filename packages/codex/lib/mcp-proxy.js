@@ -21,7 +21,7 @@ import { connect as defaultConnect, refreshTokens } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, writeJsonPrivate } from './home.js';
 import { redactValue } from './redact.js';
-import { importRequestOf, inDistilRun, maybeRun, markImportDelivered } from './distil.js';
+import { importRequestOf, inDistilRun, maybeRun, recordDelivery, LEDGER_ENV } from './distil.js';
 
 /** Did the node confirm a completed import (`import_done: true`, in structuredContent or the JSON text)? */
 function importDoneOf(result) {
@@ -63,7 +63,7 @@ const text = (t, isError = false) => ({ content: [{ type: 'text', text: t }], ..
  * handle(message) answers one JSON-RPC message (null for a notification); notify(message) is how
  * the proxy pushes notifications/tools/list_changed after a sign-in completes.
  */
-export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', notify = () => {}, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, onImportRequest = () => {} }) {
+export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', notify = () => {}, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, onImportRequest = () => {}, ledger = null }) {
   let pending = null; // { nodeUrl, url, done, error }
 
   const credentials = () => {
@@ -184,13 +184,15 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
         if (name === CONNECT_TOOL.name) return reply(await callConnect(params?.arguments));
         if (!credentials()) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
         const out = await upstream('tools/call', { name, arguments: redactValue(params?.arguments ?? {}).value });
+        const importOf = typeof params?.arguments?.import_of === 'string' ? params.arguments.import_of : null;
+        const delivered = out.ok && out.result?.isError !== true;
+        // Inside a distil run: one ledger line per remember, the run's verdict (lib/distil.js).
+        if (name === 'remember') recordDelivery(ledger, { tool: name, ok: delivered, importOf, importDone: delivered && importDoneOf(out.result) });
         if (!out.ok) {
           const why = out.kind === 'auth' ? 'the connection was refused (revoked or expired); call `connect` again' : `the AI colleague could not be reached (${out.kind}: ${out.message})`;
           return reply(text(`Not delivered: ${why}.`, true));
         }
         noticeAnswer(out.result);
-        const importOf = params?.arguments?.import_of;
-        if (name === 'remember' && typeof importOf === 'string' && out.result?.isError !== true && importDoneOf(out.result)) markImportDelivered(paths, importOf, now());
         return reply(out.result);
       }
       default:
@@ -208,7 +210,7 @@ export function runStdio({ paths, clientName, input = process.stdin, output = pr
   const onImportRequest = (requestedAt) => {
     if (!distilling) maybeRun({ paths, importRequestedAt: requestedAt, env });
   };
-  const proxy = createProxy({ paths, clientName, notify: write, onImportRequest });
+  const proxy = createProxy({ paths, clientName, notify: write, onImportRequest, ledger: env[LEDGER_ENV] || null });
   if (!distilling) {
     const tick = () => proxy.poll().catch(() => {});
     setTimeout(tick, 2_000).unref();

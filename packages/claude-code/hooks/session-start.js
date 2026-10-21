@@ -6,15 +6,17 @@
 import { readHookInput, failOpen } from '../lib/hook-io.js';
 import { paths, loadCredentials, readJson } from '../lib/home.js';
 import { buildContext } from '../lib/session-context.js';
-import { inDistilRun, distilProblem } from '../lib/distil.js';
+import { inDistilRun, distilProblem, markProblemShown } from '../lib/distil.js';
 
 try {
   await readHookInput();
   if (inDistilRun()) process.exit(0); // the background distil run needs no standing instruction
   const p = paths();
-  const context = buildContext({ credentials: loadCredentials(p), cached: readJson(p.openQuestions), problem: distilProblem(p) });
+  const problem = distilProblem(p);
+  const context = buildContext({ credentials: loadCredentials(p), cached: readJson(p.openQuestions), problem });
   if (context) {
     process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context } })}\n`);
+    if (problem) markProblemShown(p, problem.error); // told once per distinct error (QA R3-5)
   }
 } catch (err) {
   failOpen('session-start', err);
