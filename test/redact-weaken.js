@@ -1,5 +1,5 @@
 // Mutation harness for lib/redact.js: weakens ONE family's pattern at a time (replaces the
-// regex with /(?!)/, which matches nothing), runs test/redact.test.js, and demands that the run
+// regex with /(?!)/, which matches nothing), runs test/redact.test.js and the frozen table (test/redact-table.test.js), and demands that the run
 // goes RED. A suite that stays green through a weakening proves nothing about that family.
 // The file is restored byte-for-byte in `finally` and the restoration is verified.
 //
@@ -15,7 +15,7 @@ import { dirname, join } from 'node:path';
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const target = join(root, 'lib', 'redact.js');
-const suite = join(root, 'test', 'redact.test.js');
+const suites = [join(root, 'test', 'redact.test.js'), join(root, 'test', 'redact-table.test.js')];
 
 if (process.env.NODE_TEST_CONTEXT) {
   const { test } = await import('node:test');
@@ -74,7 +74,7 @@ async function main() {
 }
 
 function runSuite() {
-  const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', suite], { encoding: 'utf8', cwd: root });
+  const run = spawnSync(process.execPath, ['--test', '--test-reporter=tap', ...suites], { encoding: 'utf8', cwd: root });
   const failed = [];
   for (const line of (run.stdout ?? '').split('\n')) {
     const m = /^\s*not ok \d+ - (.*)$/.exec(line);

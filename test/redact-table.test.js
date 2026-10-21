@@ -3,9 +3,11 @@ import assert from 'node:assert/strict';
 import { redact } from '../lib/redact.js';
 
 // The frozen table (QA round 3's suggestion, and the lesson of classifier PRs that ping-pong round
-// by round): every input QA rounds 1-3 used, with its exact expected output after redaction.
+// by round): every input QA rounds 1-4 used, with its exact expected output after redaction.
 // Grow this table; never patch a pattern without adding the row that proves it. Secrets in the
-// inputs are fabricated and assembled from parts, so the repo's own secret scanners stay quiet.
+// inputs are fabricated and assembled from parts, so the repo's own secret scanners stay quiet;
+// vendor-shaped bodies say FAKE. test/redact-weaken.js runs this table too: each family must turn
+// at least one row red when it is switched off.
 const j = (...p) => p.join('');
 const JWT = [j('eyJhbGciOiJI', 'UzI1NiJ9'), j('eyJzdWIiOiJkZW1v', 'LXVzZXIifQ'), j('c2lnbmF0dXJl', 'LXBhcnQtZmFrZQ')].join('.');
 
@@ -14,10 +16,10 @@ const SAME = Symbol('same');
 
 /** [what, input, exact expected output, or SAME] */
 const TABLE = [
-  ["stripe sk_live", j('sk', '_live_', '51HqTzQKx9vPq2Lm7Rt8Yw3Nb'), "[REDACTED:stripe-key]"],
-  ["stripe rk_test", j('rk', '_test_', '51HqTzQKx9vPq2Lm7Rt8Yw3Nb'), "[REDACTED:stripe-key]"],
+  ["stripe sk_live", j('sk', '_live_', 'FAKE0fake0FAKE0fake0FAKE0'), "[REDACTED:stripe-key]"],
+  ["stripe rk_test", j('rk', '_test_', 'FAKE0fake0FAKE0fake0FAKE0'), "[REDACTED:stripe-key]"],
   ["stripe whsec_", j('whsec', '_', 'MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw'), "[REDACTED:stripe-key]"],
-  ["google AIza", j('AIza', 'SyD3k9QxLm2Pv7Rt8Yw3NbZc4Hj6Ks0Ue1'), "[REDACTED:google-api-key]"],
+  ["google AIza", j('AIza', 'SyFAKEfakeFAKEfakeFAKEfakeFAKEfa'), "[REDACTED:google-api-key]"],
   ["google GOCSPX-", j('GOCSPX', '-', 'aB3dE5fG7hI9jK1lM3nO5pQ7rS9t'), "[REDACTED:google-api-key]"],
   ["azure AccountKey", j('DefaultEndpointsProtocol=https;AccountName=demo;Account', 'Key=', 'q8Zr3Lm2Pv7Rt8Yw3NbZc4Hj6Ks0Ue1Xa9Bc2==', ';EndpointSuffix=core.windows.net'), "DefaultEndpointsProtocol=https;AccountName=demo;AccountKey=[REDACTED:azure-key];EndpointSuffix=core.windows.net"],
   ["azure SAS sig=", j('https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sp=r&sig=', 'q8Zr3Lm2Pv7Rt8Yw3NbZc4Hj6Ks0Ue1Xa9B%3D'), "https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sp=r&sig=[REDACTED:azure-key]"],
@@ -66,9 +68,33 @@ const TABLE = [
   ["scp-style git remote", 'git clone git@github.com:wybe-labs/wybe-connect.git', SAME],
   ["git remote -v line", 'origin\tgit@github.com:wybe-labs/wybe-connect.git (fetch)', SAME],
   ["https git URL", 'https://github.com/wybe-labs/wybe-connect.git', SAME],
-  ["publishable pk_live", j('pk', '_live_', '51HqTzQKx9vPq2Lm7Rt8Yw3Nb'), SAME],
+  ["publishable pk_live", j('pk', '_live_', 'FAKE0fake0FAKE0fake0FAKE0'), SAME],
   ["plain uuid", 'request 123e4567-e89b-12d3-a456-426614174000 failed', SAME],
   ["long hex sha", 'commit 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08 landed', SAME],
+  // --- QA round 4. R4-1: leaks (expected outputs written by hand before the fix).
+  ["R4-1 YAML block scalar password: |", j('db:\n  pass', 'word: |\n    fake-multi', '-line-pw\n'), j('db:\n  pass', 'word: |\n    [REDACTED:secret-block]\n')],
+  ["R4-1 YAML folded scalar password: >-", j('db:\n  pass', 'word: >-\n    fake-folded', '-pw-123\n'), j('db:\n  pass', 'word: >-\n    [REDACTED:secret-block]\n')],
+  ["R4-1 YAML block of two lines, next key kept", j('app:\n  client_', 'secret: |\n    line-one-FAKE\n    line-two-FAKE\n  name: demo\n'), j('app:\n  client_', 'secret: |\n    [REDACTED:secret-block]\n  name: demo\n')],
+  ["R4-1 YAML block with CRLF", j('db:\r\n  pass', 'word: |-\r\n    fake-crlf-pw\r\n  port: 5432\r\n'), j('db:\r\n  pass', 'word: |-\r\n    [REDACTED:secret-block]\r\n  port: 5432\r\n')],
+  ["R4-1 export DB_PASSWORD=\"x y\"", j('export DB_PASS', 'WORD="x y"'), j('export DB_PASS', 'WORD=[REDACTED:password-assignment]')],
+  ["R4-1 one-character quoted password", j('pass', "word: 'x'"), j('pass', 'word: [REDACTED:password-assignment]')],
+  ["R4-1 AWS_SESSION_TOKEN env, whole token", j('AWS_SESSION_TOKEN=', j('IQoJb3JpZ2luX2VjEFAKEaCXVzLWVhc3QtMSJHMEUCIQ', '/FAKEfakeFAKEfake0123456789+FAKEfakeFAKEfake', '/FAKEfakeFAKEfake0123456789+FAKEfakeFAKEfake', '/FAKEfakeFAKEfake0123456789==')), "AWS_SESSION_TOKEN=[REDACTED:generic-secret]"],
+  ["R4-1 aws_session_token in ~/.aws/credentials", j('aws_session_token = ', j('IQoJb3JpZ2luX2VjEFAKEaCXVzLWVhc3QtMSJHMEUCIQ', '/FAKEfakeFAKEfake0123456789+FAKEfakeFAKEfake', '/FAKEfakeFAKEfake0123456789+FAKEfakeFAKEfake', '/FAKEfakeFAKEfake0123456789==')), "aws_session_token = [REDACTED:generic-secret]"],
+  ["R4-1 SessionToken in aws sts JSON", j('"SessionToken": "', j('IQoJb3JpZ2luX2VjEFAKEaCXVzLWVhc3QtMSJHMEUCIQ', '/FAKEfakeFAKEfake0123456789+FAKEfakeFAKEfake', '/FAKEfakeFAKEfake0123456789+FAKEfakeFAKEfake', '/FAKEfakeFAKEfake0123456789=='), '"'), "\"SessionToken\": \"[REDACTED:generic-secret]\""],
+  ["R4-1 base64 with / and + after a secret label", j('JWT_SECRET=', 'Q7vXk2Lm9PzR/4tWy8NbC3dFh6JsA1eGu+FAKEfake0123/FAKE='), "JWT_SECRET=[REDACTED:generic-secret]"],
+  ["R4-1 npm legacy _auth=", j('_auth=', Buffer.from(j('demo:', 'fakepw'), 'utf8').toString('base64')), "_auth=[REDACTED:npm-token]"],
+  ["R4-1 .npmrc registry _auth=", j('//registry.npmjs.org/:_auth=', Buffer.from(j('demo:', 'fakepw'), 'utf8').toString('base64')), "//registry.npmjs.org/:_auth=[REDACTED:npm-token]"],
+  ["R4-1 bare npm_ token", j('npm publish failed with token npm_', 'FakeFakeFakeFakeFakeFakeFakeFake1234'), "npm publish failed with token [REDACTED:npm-token]"],
+  ["R4-1 ordinary: YAML block that is not a secret", 'description: |\n  the password is rotated monthly\n', SAME],
+  ["R4-1 ordinary: a path after a token label", 'token: /home/person/projects/wybe-connect/packages/claude-code/lib', SAME],
+  ["R4-1 ordinary: npm_config_cache", 'npm reads npm_config_cache from the environment', SAME],
+  // --- QA round 4. R4-2: round 3's check inputs, exact.
+  ["R4-2 PEM then CRLF after END", j('-----BEGIN RSA ', 'PRIVATE KEY-----\r\nMIIEowIBAAKCAQEA', 'Q7vXk2Lm9P', 'zR4tWy8NbC', '\r\n-----END RSA ', 'PRIVATE KEY-----\r\n'), "[REDACTED:pem-private-key]\r\n"],
+  ["R4-2 JWT as a URL path segment", j('https://app.example.test/verify/', JWT), "https://app.example.test/verify/[REDACTED:jwt]"],
+  ["R4-2 password = \"a b c\"", j('pass', 'word = "a b c"'), j('pass', 'word = [REDACTED:password-assignment]')],
+  ["R4-2 github_pat_ in its real <22>_<59> shape", j('token github_', 'pat_', '11ABCDEFG0abcdefghijkl', '_mnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789abcdefghij'), "token [REDACTED:github-token]"],
+  ["R4-2 prose: Basic authentication", 'Basic authentication is deprecated', SAME],
+  ["R4-2 git push origin <branch>", 'git push origin feat/import-distil', SAME],
 ];
 
 for (const [what, input, expected] of TABLE) {

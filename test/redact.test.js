@@ -232,7 +232,7 @@ test('redactValue throws on a value it does not understand rather than passing i
 });
 
 test('every family has a name, a one-line reason and a global regex', () => {
-  assert.equal(FAMILIES.length, 20);
+  assert.equal(FAMILIES.length, 22);
   for (const f of FAMILIES) {
     assert.match(f.name, /^[a-z-]+$/);
     assert.ok(f.reason.length > 20 && !f.reason.includes('\n'), `${f.name} reason`);
