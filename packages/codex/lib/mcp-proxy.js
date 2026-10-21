@@ -21,7 +21,18 @@ import { connect as defaultConnect, refreshTokens } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, writeJsonPrivate } from './home.js';
 import { redactValue } from './redact.js';
-import { importRequestOf, inDistilRun, maybeRun } from './distil.js';
+import { importRequestOf, inDistilRun, maybeRun, markImportDelivered } from './distil.js';
+
+/** Did the node confirm a completed import (`import_done: true`, in structuredContent or the JSON text)? */
+function importDoneOf(result) {
+  if (result?.structuredContent?.import_done === true) return true;
+  const text = Array.isArray(result?.content) ? result.content.find((c) => c?.type === 'text')?.text : undefined;
+  try {
+    return typeof text === 'string' && JSON.parse(text)?.import_done === true;
+  } catch {
+    return false;
+  }
+}
 
 export const POLL_MINUTES = 5;
 /**
@@ -178,6 +189,8 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
           return reply(text(`Not delivered: ${why}.`, true));
         }
         noticeAnswer(out.result);
+        const importOf = params?.arguments?.import_of;
+        if (name === 'remember' && typeof importOf === 'string' && out.result?.isError !== true && importDoneOf(out.result)) markImportDelivered(paths, importOf, now());
         return reply(out.result);
       }
       default:

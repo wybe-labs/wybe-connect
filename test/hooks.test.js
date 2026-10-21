@@ -187,3 +187,14 @@ test('F5: eight Stop/SessionEnd hooks at once start the headless run only once (
   assert.equal(state.pending.length + inRun >= 1, true);
   assert.ok(state.pending.length <= N - 1, 'every other noted transcript waits for the next run');
 });
+
+test('R2-3: SessionStart tells Claude, once per session, that the background distil could not run', async () => {
+  const { home } = sandbox();
+  writeCredentials(home, REFUSED, ['remember']);
+  mkdirSync(join(home, 'state'), { recursive: true });
+  writeFileSync(join(home, 'state', 'distil.json'), JSON.stringify({ lastFailureAt: new Date().toISOString(), lastError: 'claude not found on PATH (set WYBE_CONNECT_CLAUDE_BIN)', pending: [] }));
+  const start = await runHook('session-start.js', { session_id: 's', hook_event_name: 'SessionStart', source: 'startup' }, home);
+  const ctx = JSON.parse(start.stdout).hookSpecificOutput.additionalContext;
+  assert.match(ctx, /could not run its background distil .*claude not found/);
+  assert.match(ctx, /WYBE_CONNECT_CLAUDE_BIN/);
+});

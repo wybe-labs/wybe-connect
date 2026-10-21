@@ -12,7 +12,7 @@
 
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync, unlinkSync } from 'node:fs';
 
 export function homePath() {
   return process.env.WYBE_CONNECT_HOME || join(homedir(), '.wybe-connect');
@@ -53,17 +53,41 @@ export function readJson(path) {
   }
 }
 
-/** Writes atomically (temp + rename) with owner-only permissions. */
+const RENAME_TRIES = 20;
+const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/**
+ * Writes atomically (temp + rename) with owner-only permissions. On Windows a rename over a file
+ * another process has open fails with EPERM/EACCES/EBUSY (QA round 2, R2-7/R2-8): it is retried for
+ * up to ~0.5 s, and if the reader still holds the file the content is written in place (the
+ * callers that write shared state hold distil.lock, so writers never interleave).
+ */
 export function writeJsonPrivate(path, value) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  const data = JSON.stringify(value, null, 2);
   const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
+  writeFileSync(tmp, data, { mode: 0o600 });
   try {
     chmodSync(tmp, 0o600);
   } catch {
     // Windows without POSIX modes: the profile directory ACL is the protection
   }
-  renameSync(tmp, path);
+  for (let i = 0; ; i++) {
+    try {
+      renameSync(tmp, path);
+      return;
+    } catch (err) {
+      if (!['EPERM', 'EACCES', 'EBUSY'].includes(err?.code)) throw err;
+      if (i >= RENAME_TRIES) break;
+      pause(25);
+    }
+  }
+  writeFileSync(path, data, { mode: 0o600 });
+  try {
+    unlinkSync(tmp);
+  } catch {
+    // left for the next write to replace
+  }
 }
 
 export function loadCredentials(p = paths()) {

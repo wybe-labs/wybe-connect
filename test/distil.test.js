@@ -1,12 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, existsSync, writeFileSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, existsSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { paths } from '../lib/home.js';
 import {
-  ALLOWED_TOOLS, DISTIL_ENV, FAILURE_BACKOFF_MS, RUN_STALE_MS, RUN_TOOLS, MAX_TURNS,
+  ALLOWED_TOOLS, DISTIL_ENV, FAILURE_BACKOFF_MS, RUN_STALE_MS, RUN_TOOLS, MAX_TURNS, MAX_RUN_TRANSCRIPTS,
+  markImportDelivered, distilProblem,
   buildPrompt, importRequestOf, isIsoTimestamp, loadState, maybeRun, noteSession, planRun,
   resolveClaude, runArgs, runWatchdog, startRun, withLock,
 } from '../lib/distil.js';
@@ -77,18 +78,46 @@ test('planRun: import beats the schedule; handled once; ongoing every 6 h; a rec
   assert.ok(planRun(failed, { now: T0 + FAILURE_BACKOFF_MS, importRequestedAt: AT, isAlive: dead }), 'after it, retried');
 });
 
-test('F4: a live run blocks until RUN_STALE_MS; after that it is killed and replaced, never joined', () => {
+test('R2-4: a live run blocks until RUN_STALE_MS; after that its record is ignored, and NOTHING is killed by pid', () => {
   const running = { ...empty(), running: { pid: 4242, startedAt: new Date(T0).toISOString() } };
   assert.equal(planRun(running, { now: T0 + 10 * 60_000, importRequestedAt: AT, isAlive: () => true }), null);
-  assert.deepEqual(planRun(running, { now: T0 + RUN_STALE_MS, importRequestedAt: AT, isAlive: () => true }), { mode: 'import', importOf: AT, killPid: 4242 });
+  assert.deepEqual(planRun(running, { now: T0 + RUN_STALE_MS, importRequestedAt: AT, isAlive: () => true }), { mode: 'import', importOf: AT });
   const p = home();
-  const r = recorder(5151);
-  const killed = [];
   startRun({ mode: 'import', importOf: AT }, { paths: p, now: T0, spawnImpl: recorder(4242).spawnImpl, runner: '/r.js' });
-  const plan = maybeRun({ paths: p, importRequestedAt: '2026-10-21T15:00:00Z', env: {}, now: T0 + 3 * H, spawnImpl: r.spawnImpl, isAlive: () => true, runner: '/r.js', kill: (pid) => killed.push(pid) });
-  assert.equal(plan.mode, 'import');
-  assert.deepEqual(killed, [4242], 'the hung run is killed before the next starts');
+  const realKill = process.kill;
+  const killed = [];
+  process.kill = (pid, sig) => { if (sig !== 0 && sig !== undefined) killed.push(pid); if (sig === undefined) killed.push(pid); return true; };
+  try {
+    const plan = maybeRun({ paths: p, importRequestedAt: '2026-10-21T15:00:00Z', env: {}, now: T0 + 3 * H, spawnImpl: recorder(5151).spawnImpl, isAlive: () => true, runner: '/r.js' });
+    assert.equal(plan.mode, 'import');
+  } finally {
+    process.kill = realKill;
+  }
+  assert.deepEqual(killed, [], 'a recorded pid may belong to an unrelated process after a reboot: never killed');
   assert.equal(loadState(p).running.pid, 5151);
+});
+
+test('R2-8: the run is recorded BEFORE its watchdog starts; a run being started blocks the next for RESERVE_MS', () => {
+  const p = home();
+  noteSession(p, { transcriptPath: '/t/a.jsonl', now: T0 });
+  let seenAtSpawn = null;
+  const spawnImpl = () => { seenAtSpawn = loadState(p).running; return { pid: 7777, on() {}, unref() {} }; };
+  startRun({ mode: 'ongoing', transcripts: ['/t/a.jsonl'] }, { paths: p, now: T0, spawnImpl, runner: '/r.js' });
+  assert.ok(seenAtSpawn && seenAtSpawn.pid === null && seenAtSpawn.mode === 'ongoing', 'recorded before the spawn');
+  assert.equal(loadState(p).running.pid, 7777);
+  const reserved = { ...empty(), pending: [{ transcriptPath: '/t/b.jsonl' }], running: { pid: null, startedAt: new Date(T0).toISOString() } };
+  assert.equal(planRun(reserved, { now: T0 + 60_000, isAlive: dead }), null);
+  assert.ok(planRun(reserved, { now: T0 + 3 * 60_000, isAlive: dead }), 'a reservation that never got a pid expires');
+});
+
+test('R2-2: an ongoing run takes at most MAX_RUN_TRANSCRIPTS, oldest first; its argv stays far under the Windows limit', () => {
+  const p = home();
+  const proj = 'C--Users-person-work-repositories--trinity-worktrees-w-feature-branch-some-repo-x';
+  for (let i = 0; i < 195; i++) noteSession(p, { transcriptPath: `C:\\Users\\person\\.claude\\projects\\${proj}\\00000000-0000-4000-8000-${String(i).padStart(12, '0')}.jsonl`, now: T0 + i });
+  const plan = planRun(loadState(p), { now: T0 + H, isAlive: dead });
+  assert.equal(plan.transcripts.length, MAX_RUN_TRANSCRIPTS);
+  assert.ok(plan.transcripts[0].endsWith('000000000000.jsonl'), 'oldest first');
+  assert.ok(runArgs(plan, { instructions: 'x'.repeat(4000) }).join(' ').length < 16000);
 });
 
 test('startRun: starts the detached watchdog with the plan file; records the run, not the import as handled', () => {
@@ -141,9 +170,22 @@ function planFileFor(p, plan) {
 }
 const fakeChild = () => Object.assign(new EventEmitter(), { pid: undefined });
 
-test('watchdog: exit 0 marks the import handled and clears the run; the run gets the distil marker', async () => {
+test('R2-1: exit 0 without the node\'s import_done confirmation is a failure, not handled; retried later', async () => {
+  const p = home();
+  const child = fakeChild();
+  const out = await runWatchdog(planFileFor(p, { mode: 'import', importOf: AT, transcripts: null }), {
+    paths: p, resolve: () => ({ cmd: 'claude', pre: [] }), argsFor: () => [], spawnImpl: () => { setTimeout(() => child.emit('exit', 0), 5); return child; },
+  });
+  assert.equal(out.ok, false);
+  assert.match(out.error, /without the node confirming/);
+  assert.equal(loadState(p).importHandled, null);
+  assert.ok(loadState(p).lastFailureAt);
+});
+
+test('watchdog: exit 0 with the node\'s confirmation marks the import handled and clears the run; the run gets the distil marker', async () => {
   const p = home();
   startRun({ mode: 'import', importOf: AT }, { paths: p, now: T0, spawnImpl: recorder(process.pid).spawnImpl, runner: '/r.js' });
+  markImportDelivered(p, AT, T0);
   const child = fakeChild();
   let started;
   const done = runWatchdog(planFileFor(p, { mode: 'import', importOf: AT, transcripts: null }), {
@@ -196,4 +238,39 @@ test('maybeRun never starts a run from inside a run', () => {
   const r = recorder();
   assert.equal(maybeRun({ paths: p, importRequestedAt: AT, env: { [DISTIL_ENV]: '1' }, now: T0, spawnImpl: r.spawnImpl }), null);
   assert.equal(r.spawns.length, 0);
+});
+
+test('R2-3: a recent failure is offered to SessionStart; an old one or none is not', () => {
+  const p = home();
+  assert.equal(distilProblem(p, T0), null);
+  withLock(p, () => {});
+  const q = home();
+  maybeRun({ paths: q, importRequestedAt: AT, env: {}, now: T0, spawnImpl: () => ({ pid: undefined, on() {}, unref() {} }), isAlive: dead, runner: '/r.js' });
+  assert.match(distilProblem(q, T0 + H).error, /could not start/);
+  assert.equal(distilProblem(q, T0 + 8 * 24 * H), null);
+});
+
+test('R2-7: a delete-pending lock and a reader holding distil.json open never crash noteSession, and the note lands', { skip: process.platform !== 'win32' && 'Windows sharing semantics' }, () => {
+  const p = home();
+  mkdirSync(p.state, { recursive: true });
+  const lock = join(p.state, 'distil.lock');
+  closeSync(openSync(lock, 'wx'));
+  const held = openSync(lock, 'r');
+  unlinkSync(lock); // delete pending while `held` is open: a new open('wx') gets EPERM, not EEXIST
+  let threw = null;
+  try {
+    noteSession(p, { transcriptPath: 'C:\\t\\a.jsonl', now: T0 });
+  } catch (e) {
+    threw = e.code;
+  }
+  closeSync(held);
+  assert.equal(threw, null, 'busy, not a crash');
+  noteSession(p, { transcriptPath: 'C:\\t\\a.jsonl', now: T0 });
+  const reader = openSync(join(p.state, 'distil.json'), 'r'); // a reader outside the lock
+  try {
+    noteSession(p, { transcriptPath: 'C:\\t\\b.jsonl', now: T0 + 1 });
+  } finally {
+    closeSync(reader);
+  }
+  assert.deepEqual(loadState(p).pending.map((x) => x.transcriptPath), ['C:\\t\\a.jsonl', 'C:\\t\\b.jsonl']);
 });

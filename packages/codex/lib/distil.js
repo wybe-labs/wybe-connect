@@ -35,6 +35,11 @@ export const FAILURE_BACKOFF_MS = 30 * 60 * 1000;
 export const MAX_TURNS = 40;
 export const MAX_PENDING = 200;
 export const LOCK_STALE_MS = 30 * 1000;
+/** How long a run being started (recorded, no pid yet) blocks the next one. */
+export const RESERVE_MS = 2 * 60 * 1000;
+export const MAX_RUN_TRANSCRIPTS = 40;
+/** How long a failed run is mentioned at SessionStart (QA R2-3). */
+export const PROBLEM_SHOWN_DAYS = 7;
 export const LOG_KEEP_DAYS = 14;
 /** Built-in tools the run has at all (`--tools`), and what it may use without asking (`--allowedTools`). */
 export const RUN_TOOLS = Object.freeze(['Read', 'Glob', 'Grep']);
@@ -80,7 +85,9 @@ export function withLock(paths, fn, { tries = 40, waitMs = 25, busy = null } = {
     try {
       fd = openSync(lock, 'wx', 0o600);
     } catch (err) {
-      if (err?.code !== 'EEXIST') throw err;
+      // EPERM/EACCES on Windows: the lock was just unlinked while another waiter held a handle
+      // (delete pending). Same meaning as EEXIST: someone else, retry (QA R2-7).
+      if (!['EEXIST', 'EPERM', 'EACCES', 'EBUSY'].includes(err?.code)) throw err;
       try {
         if (Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) unlinkSync(lock);
       } catch {
@@ -105,7 +112,9 @@ export function withLock(paths, fn, { tries = 40, waitMs = 25, busy = null } = {
 
 /** A hook saw this transcript: remember it for the next ongoing run (once per transcript). */
 export function noteSession(paths, { transcriptPath, sessionId = null, cwd = null, now = Date.now() }) {
-  if (!safePath(transcriptPath)) return loadState(paths);
+  if (!safePath(transcriptPath)) return null;
+  // Nothing is read outside the lock (QA R2-7: a lock-free read held distil.json open while the
+  // holder renamed over it). Busy → null; the next Stop hook notes the same transcript again.
   return withLock(paths, () => {
     const state = loadState(paths);
     const rest = state.pending.filter((p) => p.transcriptPath !== transcriptPath);
@@ -113,7 +122,7 @@ export function noteSession(paths, { transcriptPath, sessionId = null, cwd = nul
     state.pending = rest.slice(-MAX_PENDING);
     saveState(paths, state);
     return state;
-  }, { busy: loadState(paths) });
+  }, { tries: 200 });
 }
 
 const alive = (pid) => {
@@ -127,23 +136,27 @@ const alive = (pid) => {
 };
 
 /**
- * What to run now, or null. An import the node asked for wins over the ongoing schedule. A live
- * run blocks both until RUN_STALE_MS; after that it is killed (plan.killPid) and replaced. A failed
- * run backs off FAILURE_BACKOFF_MS.
+ * What to run now, or null. An import the node asked for wins over the ongoing schedule. A live run
+ * blocks both until RUN_STALE_MS, a run being started (no pid yet) for RESERVE_MS; after that the
+ * record is ignored, never acted on: a recorded pid is never killed (QA R2-4: after a reboot or a
+ * crash it may belong to an unrelated process; a live run's own watchdog ends it at RUN_TIMEOUT_MS).
+ * A failed run backs off FAILURE_BACKOFF_MS. An ongoing run takes at most MAX_RUN_TRANSCRIPTS, oldest
+ * first, so its argv stays far below the Windows command-line limit (QA R2-2).
  */
 export function planRun(state, { now = Date.now(), importRequestedAt = null, everyHours = DISTIL_EVERY_HOURS, isAlive = alive } = {}) {
-  // QA round 2 (R2-4): never kill by a recorded pid. After a reboot or crash it may belong to an
-  // unrelated process. A stale run is ignored; its own watchdog ends it at RUN_TIMEOUT_MS.
-  const killPid = null;
-  if (state.running && isAlive(state.running.pid) && now - Date.parse(state.running.startedAt) < RUN_STALE_MS) return null;
+  const r = state.running;
+  if (r) {
+    const age = now - Date.parse(r.startedAt);
+    if (r.pid == null && age < RESERVE_MS) return null;
+    if (r.pid != null && isAlive(r.pid) && age < RUN_STALE_MS) return null;
+  }
   if (state.lastFailureAt && now - Date.parse(state.lastFailureAt) < FAILURE_BACKOFF_MS) return null;
-  const extra = killPid ? { killPid } : {};
   if (isIsoTimestamp(importRequestedAt) && importRequestedAt !== state.importHandled) {
-    return { mode: 'import', importOf: importRequestedAt, ...extra };
+    return { mode: 'import', importOf: importRequestedAt };
   }
   const due = !state.lastRunAt || now - Date.parse(state.lastRunAt) >= everyHours * 60 * 60 * 1000;
-  const transcripts = state.pending.map((p) => p.transcriptPath).filter(safePath);
-  if (due && transcripts.length > 0) return { mode: 'ongoing', transcripts, ...extra };
+  const transcripts = state.pending.map((p) => p.transcriptPath).filter(safePath).slice(0, MAX_RUN_TRANSCRIPTS);
+  if (due && transcripts.length > 0) return { mode: 'ongoing', transcripts };
   return null;
 }
 
@@ -215,23 +228,22 @@ function pruneOld(paths, now) {
 
 /**
  * Starts the watchdog for `plan` (detached; it outlives the hook or server that started it) and
- * records the run. Call under the lock. A run that could not be started is recorded as a failure,
- * never as handled.
+ * records the run. Call under the lock. The run is recorded BEFORE the spawn (QA R2-8: a save that
+ * failed after the spawn left a live run unrecorded, and the next hook started a second one); a
+ * failed record throws before anything starts. Nothing is ever killed here (QA R2-4). A run that
+ * could not be started is recorded as a failure, never as handled.
  */
-export function startRun(plan, { paths, now = Date.now(), spawnImpl = spawn, runner = join(PLUGIN_ROOT, 'bin', 'distil-run.js'), kill = (pid) => process.kill(pid) } = {}) {
+export function startRun(plan, { paths, now = Date.now(), spawnImpl = spawn, runner = join(PLUGIN_ROOT, 'bin', 'distil-run.js') } = {}) {
   const stamp = new Date(now).toISOString().replace(/[:.]/g, '-');
   mkdirSync(paths.state, { recursive: true, mode: 0o700 });
   pruneOld(paths, now);
-  if (plan.killPid) {
-    try {
-      kill(plan.killPid);
-    } catch {
-      // already gone
-    }
-  }
   const planFile = join(paths.state, `distil-plan-${stamp}.json`);
   const logPath = join(paths.state, `distil-${stamp}.log`);
   writeJsonPrivate(planFile, { plan: { mode: plan.mode, importOf: plan.importOf ?? null, transcripts: plan.transcripts ?? null }, log: logPath, root: paths.root });
+  const state = loadState(paths);
+  state.running = { pid: null, startedAt: new Date(now).toISOString(), mode: plan.mode, importOf: plan.importOf ?? null, transcripts: plan.transcripts ?? null, log: logPath };
+  if (plan.mode === 'ongoing') state.pending = state.pending.filter((p) => !plan.transcripts.includes(p.transcriptPath));
+  saveState(paths, state);
   let child = null;
   try {
     child = spawnImpl(process.execPath, [runner, planFile], { cwd: homedir(), detached: true, windowsHide: true, stdio: 'ignore', env: { ...process.env, WYBE_CONNECT_HOME: paths.root } });
@@ -240,27 +252,56 @@ export function startRun(plan, { paths, now = Date.now(), spawnImpl = spawn, run
   } catch {
     child = null;
   }
-  const state = loadState(paths);
   if (!Number.isInteger(child?.pid)) {
+    state.running = null;
+    if (plan.mode === 'ongoing') state.pending = [...plan.transcripts.map((t) => ({ transcriptPath: t, sessionId: null, cwd: null, at: new Date(now).toISOString() })), ...state.pending].slice(-MAX_PENDING);
     state.lastFailureAt = new Date(now).toISOString();
     state.lastError = 'could not start the distil runner';
     saveState(paths, state);
     return null;
   }
-  state.running = { pid: child.pid, startedAt: new Date(now).toISOString(), mode: plan.mode, importOf: plan.importOf ?? null, transcripts: plan.transcripts ?? null, log: logPath };
-  if (plan.mode === 'ongoing') state.pending = state.pending.filter((p) => !plan.transcripts.includes(p.transcriptPath));
+  state.running.pid = child.pid;
   saveState(paths, state);
   return state.running;
 }
 
 /** One call for every trigger: plan and start under the lock. Never inside a run. */
-export function maybeRun({ paths, importRequestedAt = null, env = process.env, now = Date.now(), spawnImpl, isAlive, everyHours, runner, kill } = {}) {
+export function maybeRun({ paths, importRequestedAt = null, env = process.env, now = Date.now(), spawnImpl, isAlive, everyHours, runner } = {}) {
   if (inDistilRun(env)) return null;
   return withLock(paths, () => {
     const plan = planRun(loadState(paths), { now, importRequestedAt, isAlive, everyHours });
     if (!plan) return null;
-    return startRun(plan, { paths, now, spawnImpl, runner, kill }) ? plan : null;
+    return startRun(plan, { paths, now, spawnImpl, runner }) ? plan : null;
   });
+}
+
+/**
+ * QA R2-1: an import counts as handled only when the node confirmed it. The plugin's MCP server
+ * (inside the run) records the timestamp when a `remember` carrying `import_of` came back with
+ * `import_done: true`; the watchdog reads it when the run ends.
+ */
+const deliveredPath = (paths) => join(paths.state, 'import-delivered.json');
+export function markImportDelivered(paths, importOf, now = Date.now()) {
+  if (isIsoTimestamp(importOf)) writeJsonPrivate(deliveredPath(paths), { importOf, at: new Date(now).toISOString() });
+}
+export function importDelivered(paths, importOf) {
+  try {
+    return readJson(deliveredPath(paths))?.importOf === importOf;
+  } catch {
+    return false;
+  }
+}
+
+/** QA R2-3: the last failure, for SessionStart to tell the person; null when there is none recent. */
+export function distilProblem(paths, now = Date.now()) {
+  try {
+    const s = loadState(paths);
+    if (!s.lastError || !s.lastFailureAt) return null;
+    if (now - Date.parse(s.lastFailureAt) > PROBLEM_SHOWN_DAYS * 24 * 60 * 60 * 1000) return null;
+    return { error: s.lastError, at: s.lastFailureAt };
+  } catch {
+    return null;
+  }
 }
 
 function killTree(pid, platform = process.platform) {
@@ -289,6 +330,9 @@ export function runWatchdog(planFile, { paths, spawnImpl = spawn, resolve = reso
       const state = loadState(paths);
       if (state.running?.pid === process.pid) state.running = null;
       state.lastRunAt = new Date(now()).toISOString();
+      if (outcome.ok && plan.mode === 'import' && !importDelivered(paths, plan.importOf)) {
+        outcome = { ok: false, code: outcome.code, error: 'the run ended without the node confirming the import (import_done); retried later' };
+      }
       if (outcome.ok) {
         if (plan.mode === 'import') state.importHandled = plan.importOf;
         state.lastFailureAt = null;
@@ -303,7 +347,7 @@ export function runWatchdog(planFile, { paths, spawnImpl = spawn, resolve = reso
         }
       }
       saveState(paths, state);
-    });
+    }, { tries: 400 });
     try {
       unlinkSync(planFile);
     } catch {

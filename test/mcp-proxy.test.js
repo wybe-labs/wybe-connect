@@ -192,3 +192,31 @@ test('F7: essence only: the one sign-in asks for `remember` and nothing else', a
   const plugin = JSON.parse(readFileSync(join(import.meta.dirname, '..', 'packages', 'claude-code', '.claude-plugin', 'plugin.json'), 'utf8')).description;
   assert.ok(!/session deltas|sessions:full/.test(plugin), 'the description no longer promises session deltas');
 });
+
+test('R2-1: a remember carrying import_of is recorded as delivered only when the node answers import_done: true', async () => {
+  const AT = '2026-10-21T11:59:00.000Z';
+  const delivered = (p) => existsSync(join(p.state, 'import-delivered.json')) && JSON.parse(readFileSync(join(p.state, 'import-delivered.json'), 'utf8')).importOf;
+  for (const [answer, expected] of [
+    [{ content: [{ type: 'text', text: JSON.stringify({ ok: true, stored: 1, import_done: true }) }] }, AT],
+    [{ content: [{ type: 'text', text: JSON.stringify({ ok: true, stored: 1 }) }] }, false],
+    [{ content: [{ type: 'text', text: 'refused' }], isError: true }, false],
+  ]) {
+    const p = home();
+    saveCredentials(creds(), p);
+    const fetchImpl = async (url, init = {}) => {
+      if (init.method === 'DELETE') return new Response('', { status: 200 });
+      const msg = JSON.parse(init.body);
+      if (msg.method === 'initialize') return json({ jsonrpc: '2.0', id: msg.id, result: {} }, 200, { 'mcp-session-id': 's1' });
+      if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
+      return json({ jsonrpc: '2.0', id: msg.id, result: answer });
+    };
+    const proxy = createProxy({ paths: p, fetchImpl });
+    await proxy.handle(req(1, 'tools/call', { name: 'remember', arguments: { items: [{ content: 'x' }], import_of: AT } }));
+    assert.equal(delivered(p), expected, JSON.stringify(answer));
+  }
+  const unreachable = home();
+  saveCredentials(creds(), unreachable);
+  const proxy = createProxy({ paths: unreachable, fetchImpl: async () => { throw new Error('ECONNREFUSED'); } });
+  await proxy.handle(req(1, 'tools/call', { name: 'remember', arguments: { items: [], import_of: AT } }));
+  assert.equal(delivered(unreachable), false, 'node unreachable: nothing delivered');
+});
