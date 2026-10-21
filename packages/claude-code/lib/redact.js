@@ -25,17 +25,17 @@ export const FAMILIES = Object.freeze([
   { name: 'aws-secret', reason: 'a 30-40 character secret after an aws secret label, or after SecretAccessKey as aws-cli prints it, is the matching AWS secret key', re: /(?<keep>\b(?:aws[_-]?)?secret[_-]?access[_-]?key\b["']?\s*[:=]\s*["']?|\baws[_-]?secret[_-]?key\b["']?\s*[:=]\s*["']?)[A-Za-z0-9/+]{30,40}(?![A-Za-z0-9/+])/gi },
   { name: 'github-token', reason: 'ghp_/gho_/ghu_/ghs_/ghr_ and github_pat_ tokens act as the person on GitHub', re: /\b(?:gh[opusr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})\b/g },
   { name: 'slack-token', reason: 'xox[abpors]-... are Slack bot/user/app tokens', re: /\bxox[abpors]-[A-Za-z0-9-]{10,}/g },
-  { name: 'jwt', reason: 'three dot-separated base64url parts starting with eyJ is a signed bearer token', re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9_.-])/g },
+  { name: 'jwt', reason: 'three dot-separated base64url parts starting with eyJ is a signed bearer token', re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9_-])/g },
   { name: 'stripe-key', reason: 'sk_live_/sk_test_/rk_ keys move money and whsec_ signs Stripe webhooks', re: new RegExp(`${B}(?:(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,})${E}`, 'g') },
   { name: 'google-api-key', reason: 'AIza... is a Google API key and GOCSPX-... a Google OAuth client secret', re: new RegExp(`${B}(?:AIza[0-9A-Za-z_-]{30,40}|GOCSPX-[A-Za-z0-9_-]{20,})${E}`, 'g') },
   { name: 'azure-key', reason: 'AccountKey=/SharedAccessKey= in a connection string and sig= in a SAS URL are the storage or bus key, or a signature that grants access by itself', re: /(?<keep>\b(?:AccountKey|SharedAccessKey)=|[?&]sig=)[A-Za-z0-9+/%]{16,}={0,2}/g },
   { name: 'basic-auth', reason: 'an Authorization: Basic value is base64 of user:password (redacted when it decodes to text with a colon, so the word "Basic" in prose stays)', re: /(?<keep>\bBasic\s+)[A-Za-z0-9+/]{8,}={0,2}(?![A-Za-z0-9+/=])/g, validate: isBasicCredential },
   { name: 'curl-user', reason: 'curl -u/--user user:password puts the password on the command line', re: /(?<keep>\bcurl\b[^\n]*?\s(?:-u|--user)[ =]+["']?[^\s:"']+:)[^\s"']+/g, validate: (m) => !m.includes('[REDACTED:') },
   { name: 'slack-webhook', reason: 'a Slack incoming-webhook URL lets anyone post to that channel', re: /(?<keep>\bhttps:\/\/hooks\.slack\.com\/(?:services|workflows)\/)[A-Za-z0-9/_-]{20,}/g },
-  { name: 'generic-secret', reason: 'a 32+ character hex or base64url value after a token/secret/password label or an <x>_key / <x>-key label is a credential whatever its vendor (a bare "key", as in "idempotency key", is not a label)', re: /(?<keep>\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|[a-z]+[_-]key|token|secret|password|passwd|pwd)\b["']?\s*[:=]\s*["']?)(?:[A-Fa-f0-9]{32,}|[A-Za-z0-9_-]{32,})(?![A-Za-z0-9_-])/gi },
-  { name: 'password-assignment', reason: 'a password of any length after a password label, quoted ones with spaces too (generic-secret only takes 32+); type names and placeholders such as string or <password> are not secrets', re: /(?<keep>\b(?:password|passwd|pwd|passord|passphrase)\b["']?\s*[:=]\s*)(?:"[^"\n]{4,}"|'[^'\n]{4,}'|[^\s"'<>,;]{4,})/gi, validate: isPasswordValue },
+  { name: 'generic-secret', reason: 'a 32+ character hex or base64url value after a token/secret/password label or an <x>_key / <x>-key label is a credential whatever its vendor (a bare "key", as in "idempotency key", is not a label)', re: /(?<keep>(?<![A-Za-z0-9])[A-Za-z0-9_]*?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|[a-z]+[_-]key|token|secret|password|passwd|pwd)\b["']?\s*[:=]\s*["']?)(?:[A-Fa-f0-9]{32,}|[A-Za-z0-9_-]{32,})(?![A-Za-z0-9_-])/gi },
+  { name: 'password-assignment', reason: 'a password of any length after a password label, quoted ones with spaces too (generic-secret only takes 32+); type names and placeholders such as string or <password> are not secrets', re: /(?<keep>(?<![A-Za-z0-9])[A-Za-z0-9_]*?(?:password|passwd|pwd|passord|passphrase)\b["']?\s*[:=]\s*)(?:"[^"\n]{4,}"|'[^'\n]{4,}'|[^\s"'<>,;]{4,})/gi, validate: isPasswordValue },
   { name: 'fodselsnummer', reason: 'a Norwegian fodselsnummer identifies one person for life; only numbers whose two control digits verify are redacted', re: /(?<!\d)\d{6}\s?\d{5}(?!\d)/g, validate: isValidFodselsnummer },
-  { name: 'email', reason: 'an e-mail address identifies a person (configurable: {emails: false} keeps them); the user@host of a URL such as ssh://git@github.com is not one', re: /(?<![\w.%+-]|:\/\/)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
+  { name: 'email', reason: 'an e-mail address identifies a person (configurable: {emails: false} keeps them); the user@host of a URL such as ssh://git@github.com is not one', re: /(?<![\w.%+-]|:\/\/)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b(?!:[^\s])/g },
 ]);
 
 const FAMILY_NAMES = new Set(FAMILIES.map((f) => f.name));
@@ -50,11 +50,11 @@ function isBasicCredential(match) {
   const b64 = match.replace(/^Basic\s+/i, '');
   let text;
   try {
-    text = Buffer.from(b64, 'base64').toString('latin1');
+    text = Buffer.from(b64, 'base64').toString('utf8');
   } catch {
     return false;
   }
-  return text.includes(':') && /^[\x20-\x7e]+$/.test(text);
+  return text.includes(':') && !text.includes('\uFFFD') && /^[^\u0000-\u001f\u007f]+$/u.test(text);
 }
 
 /** password-assignment: not a type name, placeholder, variable or an earlier tag. */
@@ -63,6 +63,7 @@ function isPasswordValue(match) {
   if (match.includes('[REDACTED:')) return false;
   const value = match.replace(/^[^:=]*[:=]\s*/, '');
   if (NOT_A_PASSWORD.test(value)) return false;
+  if (/[([]/.test(value) || /^["']?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+["']?;?$/.test(value)) return false;
   return !/^["']?(?:\$\{?\w|\{\{|<[^>]*>|process\.env|os\.environ|env\.)/.test(value);
 }
 
