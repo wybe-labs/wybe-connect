@@ -4,7 +4,7 @@
 //   loopback   a one-shot http server on 127.0.0.1:<random port> receives the code
 //   register   RFC 7591 dynamic registration with exactly that loopback redirect_uri
 //   browser    opened by spawning the platform opener with the URL as an argument (never a shell)
-//   exchange   code + verifier -> access + refresh tokens (RFC 8707 `resource` = the node)
+//   exchange   code + verifier -> access + refresh tokens (RFC 8707 `resource` = the node's /mcp endpoint)
 //   refresh    rotating refresh token
 // Tokens are returned to the caller; this module stores nothing and logs nothing but the URL to
 // open (which carries the public challenge and state, never a token).
@@ -30,20 +30,36 @@ export async function discover(nodeUrl, { fetchImpl = globalThis.fetch, fallback
   }
   const mcpEndpoint = `${origin}/mcp`;
   let issuer = fallbackIssuer;
+  // RFC 8707 `resource`: the MCP endpoint, exactly as the node's RFC 9728 document names it. The node
+  // accepts only a token issued for `<origin>/mcp`; one issued for the bare origin is refused (401).
+  let resource = mcpEndpoint;
   let resourceScopes = null;
+  let prm = null;
   try {
-    const prm = await getJson(fetchImpl, `${origin}/.well-known/oauth-protected-resource`, timeoutMs);
-    if (Array.isArray(prm.authorization_servers) && typeof prm.authorization_servers[0] === 'string') issuer = prm.authorization_servers[0];
-    if (Array.isArray(prm.scopes_supported)) resourceScopes = prm.scopes_supported;
+    prm = await getJson(fetchImpl, `${origin}/.well-known/oauth-protected-resource`, timeoutMs);
   } catch {
     // an older node without the document: the issuer is the ruled one
+  }
+  if (prm) {
+    if (typeof prm.resource === 'string') {
+      let named = null;
+      try {
+        named = new URL(prm.resource);
+      } catch {
+        // not a URL: refused below
+      }
+      if (!named || named.origin !== origin) throw new Error("the node's protected-resource metadata names a resource on another origin");
+      resource = prm.resource;
+    }
+    if (Array.isArray(prm.authorization_servers) && typeof prm.authorization_servers[0] === 'string') issuer = prm.authorization_servers[0];
+    if (Array.isArray(prm.scopes_supported)) resourceScopes = prm.scopes_supported;
   }
   const metadata = await getJson(fetchImpl, `${issuer.replace(/\/$/, '')}/.well-known/oauth-authorization-server`, timeoutMs);
   for (const k of REQUIRED_METADATA) {
     if (!(k in metadata)) throw new Error(`authorization server metadata lacks ${k}`);
   }
   if (!metadata.code_challenge_methods_supported.includes('S256')) throw new Error('authorization server does not support PKCE S256');
-  return { resource: origin, mcpEndpoint, issuer: metadata.issuer, metadata, resourceScopes };
+  return { nodeUrl: origin, resource, mcpEndpoint, issuer: metadata.issuer, metadata, resourceScopes };
 }
 
 export function pkcePair() {
@@ -247,7 +263,8 @@ export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientName = 'wybe
   const { code } = await loop.result;
   const tokens = await exchangeCode({ metadata: d.metadata, clientId, code, verifier, redirectUri, resource: d.resource, requestedScopes: scopes, fetchImpl, now: now() });
   return {
-    nodeUrl: d.resource,
+    nodeUrl: d.nodeUrl,
+    resource: d.resource,
     mcpEndpoint: d.mcpEndpoint,
     issuer: d.issuer,
     tokenEndpoint: d.metadata.token_endpoint,
