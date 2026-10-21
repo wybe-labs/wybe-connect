@@ -407,7 +407,9 @@ function decide(s, now) {
   if (s.running) return null;
   const backoff = Number.isFinite(ms(s.lastFailureAt)) && now - ms(s.lastFailureAt) < BACKOFF_MS;
   if (backoff) return null;
-  const runId = `${iso(now).replace(/[:.]/g, '-')}-${randomBytes(4).toString('hex')}`;
+  // 128 random bits: the node keeps a key once per PERSON across all their assistants and machines
+  // (wybe-node#844), and every key derives from the run id, so two runs must never share one.
+  const runId = `${iso(now).replace(/[:.]/g, '-')}-${randomBytes(16).toString('hex')}`;
   if (s.outbox) return { runId: s.outbox.runId, mode: 'deliver', importOf: s.outbox.importOf, transcripts: [] };
   if (s.importRequest && s.importRequest !== s.importHandled) {
     return { runId, mode: 'import', importOf: s.importRequest, transcripts: pick(s) };
@@ -422,7 +424,9 @@ function decide(s, now) {
 
 // ------------------------------------------------------------------ the outbox (written by the run's MCP server)
 
-const keyOf = (runId, seq) => createHash('sha256').update(`${runId}:${seq}`).digest('hex').slice(0, 32);
+// One key per outbox record. A record never changes once written, and a redone distil is a new run
+// with new keys, so a key is never reused for new content (the node would replay the old answer).
+const keyOf = (runId, seq) => `wc1-${createHash('sha256').update(`${runId}:${seq}`).digest('hex')}`;
 
 function outboxRecords(p, runId) {
   return readRecords(distilPaths(p).outbox(runId));

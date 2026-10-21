@@ -265,7 +265,7 @@ test('R4-4: an answer lost past the timeout is re-sent with the same idempotency
   node.close();
   assert.equal(r2.outcome.ok, true);
   assert.equal(node.sends.length, 2);
-  assert.ok(/^[0-9a-f]{32}$/.test(node.sends[0].idempotency_key));
+  assert.match(node.sends[0].idempotency_key, /^wc1-[0-9a-f]{64}$/, 'within wybe-node#844\'s 1-200 characters');
   assert.equal(node.sends[0].idempotency_key, node.sends[1].idempotency_key);
   assert.deepEqual(node.stored, ['Fact 1 of 1.']);
 });
@@ -289,6 +289,23 @@ test('wybe-node#844: an import whose answer was lost is confirmed by the replaye
   const s = D.loadState(p);
   assert.equal(s.importHandled, at);
   assert.equal(s.lastError, null, 'no "import not confirmed" notice');
+});
+
+test('a key is never reused for new content: a run redone after a failed distil gets new keys, and run ids carry 128 random bits', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ dedupe: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files, T - 7 * H);
+  const r1 = await cycle(p, { now: T, env: { FAKE_DONE: '0' } }); // spooled call 1, never finished: nothing sent
+  assert.equal(r1.outcome.ok, false);
+  const r2 = await cycle(p, { now: T + 31 * MIN });
+  node.close();
+  assert.equal(r2.outcome.ok, true);
+  assert.notEqual(r1.plan.runId, r2.plan.runId);
+  assert.match(r2.plan.runId, /-[0-9a-f]{32}$/, 'the run id ends in 16 random bytes');
+  assert.equal(node.sends.length, 1);
+  assert.deepEqual(node.stored, ['Fact 1 of 1.'], 'the redone run was stored, not replayed away');
 });
 
 test('each outbox record has its own key, and the key is what goes to the node', async () => {
