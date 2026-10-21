@@ -15,6 +15,7 @@ import { createInterface } from 'node:readline';
 import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, writeJsonPrivate } from './home.js';
+import { redactValue } from './redact.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'wybe', version: '0.2.0' });
 
@@ -141,7 +142,15 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
         const name = params?.name;
         if (name === CONNECT_TOOL.name) return reply(await callConnect(params?.arguments));
         if (!credentials()) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
-        const out = await upstream('tools/call', { name, arguments: params?.arguments ?? {} });
+        // Every argument passes through redactValue before it leaves the machine (QA R5-1); one the
+        // walker cannot read is refused rather than forwarded.
+        let args;
+        try {
+          args = redactValue(params?.arguments ?? {}).value;
+        } catch {
+          return reply(text('Not delivered: the arguments could not be checked for secrets, so nothing was sent.', true));
+        }
+        const out = await upstream('tools/call', { name, arguments: args });
         if (!out.ok) {
           const why = out.kind === 'auth' ? 'the connection was refused (revoked or expired); call `connect` again' : `the AI colleague could not be reached (${out.kind}: ${out.message})`;
           return reply(text(`Not delivered: ${why}.`, true));
