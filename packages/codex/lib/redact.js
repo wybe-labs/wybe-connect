@@ -16,19 +16,28 @@ const E = '(?![A-Za-z0-9_-])'; // right boundary tolerant of trailing base64url 
 
 /** @type {ReadonlyArray<{name: string, reason: string, re: RegExp, validate?: (m: string) => boolean}>} */
 export const FAMILIES = Object.freeze([
-  { name: 'pem-private-key', reason: 'a private key block is a credential in full, whole block goes', re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
-  { name: 'url-userinfo', reason: 'DSNs and URLs carry passwords in the userinfo part (postgres://user:pw@host)', re: /(?<keep>\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@"'`<>]+(?=@)/gi, validate: notAlreadyRedacted },
-  { name: 'bearer', reason: 'an Authorization: Bearer value is a live access token', re: /(?<keep>\bBearer\s+)[A-Za-z0-9_\-.~+/=]{8,}/gi },
+  { name: 'pem-private-key', reason: 'a private key block (PEM or PGP) is a credential in full; the whole block goes, to the end of the text when its END line is missing', re: /-----BEGIN [A-Z ]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY(?: BLOCK)?-----|$(?![\s\S]))/g },
+  { name: 'secret-block', reason: 'a YAML block or folded scalar (| or >) under a password/secret/token/<x>_key label carries the value on the indented lines below it; the label line stays', re: /(?<keep>^([ \t]*)[A-Za-z0-9_]*?(?:password|passwd|pwd|passord|passphrase|secret|token|[a-z]+[_-]key)["']?[ \t]*:[ \t]*[|>][-+0-9]*[ \t]*\r?\n\2[ \t]+)[^\r\n]*(?:\r?\n\2[ \t]+[^\r\n]*)*/gim, validate: (m) => !/\n[ \t]+\[REDACTED:[a-z-]+\]$/.test(m) },
+  { name: 'url-userinfo', reason: 'DSNs and URLs carry passwords (user:pw@) or tokens (long-token@) in the userinfo part; a bare short user name such as git@ is not a secret', re: /(?<keep>\b[a-z][a-z0-9+.-]*:\/\/)[^\s/@"'`<>]+(?=@)/gi, validate: (m) => notAlreadyRedacted(m) && /:\/\/(?:[^:@]*:|[^:@]{20,}@?$)/.test(m) },
+  { name: 'bearer', reason: 'an Authorization: Bearer (or Token) value is a live access token; prose such as "uses Bearer authentication" is not', re: /(?<keep>\bBearer\s+|\bAuthorization:\s*Token\s+)[A-Za-z0-9_\-.~+/=]{8,}/gi, validate: (m) => /[0-9_\-.~+/=]/.test(m.replace(/^\S+\s+(?:Token\s+)?/i, '')) },
   { name: 'wybe-credential', reason: 'wnc_/wbt_/wpc_/wat_/wrt_/wac_/wcl_ are Wybe credentials with different lifetimes but the same blast radius when leaked', re: new RegExp(`${B}w(?:nc|bt|pc|at|rt|ac|cl)_[A-Za-z0-9_-]{16,}${E}`, 'g') },
   { name: 'openai-key', reason: 'sk-... keys (OpenAI style, and sk-ant-... for Anthropic) grant paid API access', re: new RegExp(`${B}sk-(?:ant-)?[A-Za-z0-9_-]{20,}${E}`, 'g') },
-  { name: 'aws-access-key', reason: 'AKIA... is an AWS access key id', re: /\bAKIA[0-9A-Z]{16}\b/g },
-  { name: 'aws-secret', reason: 'a 40-character secret after an aws secret label is the matching AWS secret key', re: /(?<keep>\baws[_-]?secret(?:[_-]?access)?[_-]?key\b\s*["']?\s*[:=]\s*["']?)[A-Za-z0-9/+]{40}(?![A-Za-z0-9/+])/gi },
+  { name: 'aws-access-key', reason: 'AKIA... (long-lived) and ASIA... (temporary) are AWS access key ids', re: /\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g },
+  { name: 'aws-secret', reason: 'a 30-40 character secret after an aws secret label, or after SecretAccessKey as aws-cli prints it, is the matching AWS secret key', re: /(?<keep>\b(?:aws[_-]?)?secret[_-]?access[_-]?key\b["']?\s*[:=]\s*["']?|\baws[_-]?secret[_-]?key\b["']?\s*[:=]\s*["']?)[A-Za-z0-9/+]{30,40}(?![A-Za-z0-9/+])/gi },
   { name: 'github-token', reason: 'ghp_/gho_/ghu_/ghs_/ghr_ and github_pat_ tokens act as the person on GitHub', re: /\b(?:gh[opusr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{22,})\b/g },
+  { name: 'npm-token', reason: 'an npm access token (npm_ and 36 characters) or the legacy .npmrc _auth= value (base64 of user:password) publishes packages as the person', re: /(?<keep>(?<![A-Za-z0-9])_auth\s*=\s*["']?)[A-Za-z0-9+/]{8,}={0,2}|\bnpm_[A-Za-z0-9]{36}\b/g },
   { name: 'slack-token', reason: 'xox[abpors]-... are Slack bot/user/app tokens', re: /\bxox[abpors]-[A-Za-z0-9-]{10,}/g },
-  { name: 'jwt', reason: 'three dot-separated base64url parts starting with eyJ is a signed bearer token', re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9_.-])/g },
-  { name: 'generic-secret', reason: 'a 32+ character hex or base64url value after a token/secret/key/password label is a credential whatever its vendor', re: /(?<keep>\b(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|token|secret|password|passwd|pwd|key)\b["']?\s*[:=]\s*["']?)(?:[A-Fa-f0-9]{32,}|[A-Za-z0-9_-]{32,})(?![A-Za-z0-9_-])/gi },
+  { name: 'jwt', reason: 'three dot-separated base64url parts starting with eyJ is a signed bearer token', re: /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?![A-Za-z0-9_-])/g },
+  { name: 'stripe-key', reason: 'sk_live_/sk_test_/rk_ keys move money and whsec_ signs Stripe webhooks', re: new RegExp(`${B}(?:(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,}|whsec_[A-Za-z0-9]{16,})${E}`, 'g') },
+  { name: 'google-api-key', reason: 'AIza... is a Google API key and GOCSPX-... a Google OAuth client secret', re: new RegExp(`${B}(?:AIza[0-9A-Za-z_-]{30,40}|GOCSPX-[A-Za-z0-9_-]{20,})${E}`, 'g') },
+  { name: 'azure-key', reason: 'AccountKey=/SharedAccessKey= in a connection string and sig= in a SAS URL are the storage or bus key, or a signature that grants access by itself', re: /(?<keep>\b(?:AccountKey|SharedAccessKey)=|[?&]sig=)[A-Za-z0-9+/%]{16,}={0,2}/g },
+  { name: 'basic-auth', reason: 'an Authorization: Basic value is base64 of user:password (redacted when it decodes to text with a colon, so the word "Basic" in prose stays)', re: /(?<keep>\bBasic\s+)[A-Za-z0-9+/]{8,}={0,2}(?![A-Za-z0-9+/=])/g, validate: isBasicCredential },
+  { name: 'curl-user', reason: 'curl -u/--user user:password puts the password on the command line', re: /(?<keep>\bcurl\b[^\n]*?\s(?:-u|--user)[ =]+["']?[^\s:"']+:)[^\s"']+/g, validate: (m) => !m.includes('[REDACTED:') },
+  { name: 'slack-webhook', reason: 'a Slack incoming-webhook URL lets anyone post to that channel', re: /(?<keep>\bhttps:\/\/hooks\.slack\.com\/(?:services|workflows)\/)[A-Za-z0-9/_-]{20,}/g },
+  { name: 'generic-secret', reason: 'a 32+ character hex, base64 or base64url value (/ and + included, so a token is never cut at its first slash) after a token/secret/password label or an <x>_key / <x>-key label is a credential whatever its vendor (a bare "key", as in "idempotency key", is not a label)', re: /(?<keep>(?<![A-Za-z0-9])[A-Za-z0-9_]*?(?:api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret|[a-z]+[_-]key|token|secret|password|passwd|pwd)\b["']?\s*[:=]\s*["']?)[A-Za-z0-9_+-][A-Za-z0-9_+/-]{31,}={0,2}(?![A-Za-z0-9_+/=-])/gi },
+  { name: 'password-assignment', reason: 'a password after a password label, 4+ characters, or any length when quoted (spaces too) (generic-secret only takes 32+); type names and placeholders such as string or <password> are not secrets', re: /(?<keep>(?<![A-Za-z0-9])[A-Za-z0-9_]*?(?:password|passwd|pwd|passord|passphrase)\b["']?\s*[:=]\s*)(?:"[^"\n]+"|'[^'\n]+'|[^\s"'<>,;]{4,})/gi, validate: isPasswordValue },
   { name: 'fodselsnummer', reason: 'a Norwegian fodselsnummer identifies one person for life; only numbers whose two control digits verify are redacted', re: /(?<!\d)\d{6}\s?\d{5}(?!\d)/g, validate: isValidFodselsnummer },
-  { name: 'email', reason: 'an e-mail address identifies a person (configurable: {emails: false} keeps them)', re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/g },
+  { name: 'email', reason: 'an e-mail address identifies a person (configurable: {emails: false} keeps them); the user@host of a URL such as ssh://git@github.com is not one', re: /(?<![\w.%+-]|:\/\/)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b(?!:[^\s])/g },
 ]);
 
 const FAMILY_NAMES = new Set(FAMILIES.map((f) => f.name));
@@ -38,6 +47,28 @@ const FAMILY_NAMES = new Set(FAMILIES.map((f) => f.name));
  * a new secret, so a second pass leaves it alone and counts nothing. Anything more than the bare
  * tag (a password hiding behind one) is still redacted. Hoisted, so FAMILIES above can name it.
  */
+/** basic-auth: the base64 must decode to printable text containing a colon (user:password). */
+function isBasicCredential(match) {
+  const b64 = match.replace(/^Basic\s+/i, '');
+  let text;
+  try {
+    text = Buffer.from(b64, 'base64').toString('utf8');
+  } catch {
+    return false;
+  }
+  return text.includes(':') && !text.includes('\uFFFD') && /^[^\u0000-\u001f\u007f]+$/u.test(text);
+}
+
+/** password-assignment: not a type name, placeholder, variable or an earlier tag. */
+const NOT_A_PASSWORD = /^(?:["']?)(?:string|number|boolean|any|unknown|null|undefined|none|optional|required|true|false|secret|hidden|redacted|changeme|example|x{3,}|\*{3,}|\.{3,})(?:["']?)[;,)]?$/i;
+function isPasswordValue(match) {
+  if (match.includes('[REDACTED:')) return false;
+  const value = match.replace(/^[^:=]*[:=]\s*/, '');
+  if (NOT_A_PASSWORD.test(value)) return false;
+  if (/[([]/.test(value) || /^["']?[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)+["']?;?$/.test(value)) return false;
+  return !/^["']?(?:\$\{?\w|\{\{|<[^>]*>|process\.env|os\.environ|env\.)/.test(value);
+}
+
 function notAlreadyRedacted(match) {
   return !match.endsWith('://[REDACTED:url-userinfo]');
 }
