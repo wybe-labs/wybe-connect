@@ -5,16 +5,23 @@ export const STANDING_INSTRUCTION = 'Before you finish, call the `wybe` MCP serv
 
 export const MAX_QUESTIONS = 3;
 
+/** An open question's text: the node sends { id, question }; `text` is the older shape. */
+export function questionText(q) {
+  if (typeof q?.question === 'string') return q.question;
+  if (typeof q?.text === 'string') return q.text;
+  return null;
+}
+
 export function buildContext({ credentials, cached }) {
   if (!credentials) return null;
   const lines = [
     `You are connected to this person's Wybe colleague at ${credentials.nodeUrl} (granted scopes: ${credentials.scopes.join(', ')}).`,
     STANDING_INSTRUCTION,
   ];
-  const questions = Array.isArray(cached?.open_questions) ? cached.open_questions.filter((q) => q && typeof q.text === 'string') : [];
+  const questions = Array.isArray(cached?.open_questions) ? cached.open_questions.filter((q) => questionText(q) !== null) : [];
   if (questions.length) {
     lines.push('The colleague has open questions for this person. When it fits naturally, ask one and pass the answer to `remember` with `answers: [<question id>]`:');
-    for (const q of questions.slice(0, MAX_QUESTIONS)) lines.push(`- (${q.id ?? '?'}) ${q.text}`);
+    for (const q of questions.slice(0, MAX_QUESTIONS)) lines.push(`- (${q.id ?? '?'}) ${questionText(q)}`);
   }
   return lines.join('\n');
 }

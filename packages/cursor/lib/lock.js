@@ -10,10 +10,11 @@
 //   fence    the holder gets stillHeld(): true while the lock file still carries its token. A
 //            holder checks it right before it writes, so a holder whose lock was taken over never
 //            overwrites the new holder's work, and on release it deletes only its own lock.
-// A takeover renames the lock aside first and re-reads what it moved, so two contenders reaping
-// the same dead lock cannot delete a live one; a live lock moved by mistake is linked back.
+// A takeover renames the lock aside first and checks that what it moved is the very file it
+// judged (same inode), so two contenders reaping the same dead lock, or a reaper racing a fresh
+// holder, cannot delete a live one; a live lock moved by mistake is linked back.
 
-import { openSync, writeSync, closeSync, readFileSync, unlinkSync, renameSync, linkSync, statSync, mkdirSync } from 'node:fs';
+import { openSync, writeSync, closeSync, readFileSync, unlinkSync, renameSync, linkSync, statSync, fstatSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -32,21 +33,36 @@ export function isAlive(pid) {
   }
 }
 
+/** What a lock file says, read through ONE handle: its identity (inode), age and content always belong to the same file. */
 function readHolder(file) {
+  let fd;
   try {
-    const st = statSync(file);
+    fd = openSync(file, 'r');
+  } catch (err) {
+    if (err?.code === 'ENOENT' || err?.code === 'EPERM' || err?.code === 'EBUSY') return null;
+    throw err;
+  }
+  try {
+    const st = fstatSync(fd, { bigint: true });
     let holder = null;
     try {
-      holder = JSON.parse(readFileSync(file, 'utf8'));
+      holder = JSON.parse(readFileSync(fd, 'utf8'));
     } catch {
       // empty or half-written: no pid to judge by
     }
-    return { holder, mtimeMs: st.mtimeMs };
-  } catch (err) {
-    if (err?.code === 'ENOENT') return null;
-    throw err;
+    return { holder, mtimeMs: Number(st.mtimeMs), ino: st.ino };
+  } finally {
+    closeSync(fd);
   }
 }
+
+const inoOf = (file) => {
+  try {
+    return statSync(file, { bigint: true }).ino;
+  } catch {
+    return null;
+  }
+};
 
 function reapable(seen, now, alive) {
   const { holder, mtimeMs } = seen;
@@ -65,13 +81,9 @@ function reap(file, seen) {
     if (err?.code === 'ENOENT' || err?.code === 'EPERM' || err?.code === 'EBUSY') return;
     throw err;
   }
-  let moved = null;
-  try {
-    moved = JSON.parse(readFileSync(aside, 'utf8'));
-  } catch {
-    // unreadable: the one we judged
-  }
-  const same = (moved?.token ?? null) === (seen.holder?.token ?? null);
+  // Same file only by identity: a new holder's lock that is still empty has the same (null) token
+  // as an old empty one, but never the same inode (#4's second R4-7 race).
+  const same = seen.ino !== undefined && inoOf(aside) === seen.ino;
   if (!same) {
     try {
       linkSync(aside, file); // put the live lock back, unless a third process already took the name
@@ -145,6 +157,8 @@ export function acquire(file, { tries = 50, waitMs = 100, alive = isAlive, now =
   };
   return { stillHeld, release };
 }
+
+export const _internals = { readHolder, reapable, reap };
 
 /** Runs fn({ stillHeld }) under the lock and returns its value; see acquire for the options. */
 export function withLock(file, fn, opts = {}) {

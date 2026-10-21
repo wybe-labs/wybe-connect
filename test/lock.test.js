@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, existsSync, readFileSync, utimesSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, existsSync, readFileSync, utimesSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { pathToFileURL } from 'node:url';
-import { withLock, LOCK_UNREADABLE_MS } from '../lib/lock.js';
+import { withLock, LOCK_UNREADABLE_MS, _internals } from '../lib/lock.js';
 
 const fresh = () => join(mkdtempSync(join(tmpdir(), 'wybe-connect-lock-')), 'distil.lock');
 const LOCK_URL = pathToFileURL(join(import.meta.dirname, '..', 'lib', 'lock.js')).href;
@@ -76,6 +76,20 @@ test('fencing: a holder whose lock was replaced sees it, so it can refuse to wri
   assert.deepEqual(seen, [true, false]);
   assert.ok(existsSync(file), 'the holder that lost its lock does not delete the new holder\'s lock');
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).token, 'someone-else');
+});
+
+test('a reaper that judged an old empty lock never deletes the new, still-empty lock that replaced it (#4\'s second R4-7 race)', () => {
+  const file = fresh();
+  writeFileSync(file, '');
+  const old = (Date.now() - LOCK_UNREADABLE_MS - 1000) / 1000;
+  utimesSync(file, old, old);
+  const seen = _internals.readHolder(file);
+  assert.ok(_internals.reapable(seen, Date.now(), () => false), 'precondition: the old empty lock is reapable');
+  // The old holder lets go; the next one creates the lock and has not written its pid yet.
+  unlinkSync(file);
+  writeFileSync(file, '');
+  _internals.reap(file, seen);
+  assert.ok(existsSync(file), 'the new holder\'s lock is still there');
 });
 
 test('an unreadable lock is busy while young and taken over once old (a holder that died before writing its pid)', () => {

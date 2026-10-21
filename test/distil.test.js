@@ -43,14 +43,15 @@ function sandbox(n = 3) {
 
 /**
  * An MCP node over real HTTP. `answers[i]` is the reply to the i-th remember: 'ok', a status code
- * (NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it keeps each
- * idempotency_key once, as the node is asked to. `sends` lists every remember it saw.
+ * (NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is wybe-node#844:
+ * a repeat of an idempotency_key on the connection stores nothing and replays the WHOLE first
+ * answer (import_done included). `sends` lists every remember it saw.
  */
 async function httpNode({ answers = [], dedupe = false, importDone = true } = {}) {
   let n = 0;
   const stored = [];
   const sends = [];
-  const keys = new Set();
+  const first = new Map();
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -66,12 +67,14 @@ async function httpNode({ answers = [], dedupe = false, importDone = true } = {}
       sends.push(args);
       const a = answers[n++] ?? 'ok';
       if (typeof a === 'number') { res.writeHead(a); return res.end('upstream error'); }
-      const dup = dedupe && keys.has(args.idempotency_key);
-      if (!dup) {
-        if (args.idempotency_key) keys.add(args.idempotency_key);
+      const key = dedupe ? args.idempotency_key : undefined;
+      let answer = key !== undefined ? first.get(key) : undefined;
+      if (!answer) {
         for (const it of args.items ?? []) stored.push(it.content);
+        answer = { ok: true, stored: (args.items ?? []).length, answered: 0, open_questions: [], ...(args.import_of && importDone ? { import_done: true } : {}) };
+        if (key !== undefined) first.set(key, answer);
       }
-      const reply = () => json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify({ ok: true, stored: dup ? 0 : (args.items ?? []).length, answered: 0, open_questions: [], ...(args.import_of && importDone ? { import_done: true } : {}) }) }] } });
+      const reply = () => json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify(answer) }] } });
       if (a?.delayMs) setTimeout(reply, a.delayMs); else reply();
     });
   });
@@ -265,6 +268,27 @@ test('R4-4: an answer lost past the timeout is re-sent with the same idempotency
   assert.ok(/^[0-9a-f]{32}$/.test(node.sends[0].idempotency_key));
   assert.equal(node.sends[0].idempotency_key, node.sends[1].idempotency_key);
   assert.deepEqual(node.stored, ['Fact 1 of 1.']);
+});
+
+test('wybe-node#844: an import whose answer was lost is confirmed by the replayed first answer, stored once', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ answers: [{ delayMs: 1500 }], dedupe: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  const r1 = await cycle(p, { now: T, timeoutMs: 500 });
+  assert.equal(r1.outcome.ok, false);
+  await new Promise((r) => setTimeout(r, 1600));
+  const r2 = await cycle(p, { now: T + 31 * MIN, timeoutMs: 5000 });
+  node.close();
+  assert.equal(r2.outcome.ok, true);
+  assert.equal(r2.outcome.importDone, true);
+  assert.deepEqual(node.stored, ['Fact 1 of 1.']);
+  const s = D.loadState(p);
+  assert.equal(s.importHandled, at);
+  assert.equal(s.lastError, null, 'no "import not confirmed" notice');
 });
 
 test('each outbox record has its own key, and the key is what goes to the node', async () => {
