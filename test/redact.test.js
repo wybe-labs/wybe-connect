@@ -232,7 +232,7 @@ test('redactValue throws on a value it does not understand rather than passing i
 });
 
 test('every family has a name, a one-line reason and a global regex', () => {
-  assert.equal(FAMILIES.length, 13);
+  assert.equal(FAMILIES.length, 20);
   for (const f of FAMILIES) {
     assert.match(f.name, /^[a-z-]+$/);
     assert.ok(f.reason.length > 20 && !f.reason.includes('\n'), `${f.name} reason`);
@@ -257,4 +257,82 @@ test('TRAP: a userinfo that only STARTS with a redaction tag is still redacted',
   const r = redact(`https://${tag('url-userinfo')}:${pw}@db.example.internal/x`);
   assert.ok(!r.text.includes(pw), 'a password hiding behind a tag leaked');
   assert.deepEqual(r.hits, [{ family: 'url-userinfo', count: 1 }]);
+});
+
+// QA round 1 (F6): forwarded arguments let these reach the node. Every bait is assembled from parts.
+test('Stripe secret and restricted keys are redacted; a publishable pk_ key is not a secret', () => {
+  for (const k of [j('sk', '_live_', '51HqTzQKx9vPq2Lm7Rt8Yw3Nb'), j('rk', '_test_', '51HqTzQKx9vPq2Lm7Rt8Yw3Nb')]) {
+    const r = redact(`STRIPE=${k}`);
+    assert.ok(!r.text.includes(k.slice(8)), k.slice(0, 8));
+    assert.deepEqual(r.hits, [{ family: 'stripe-key', count: 1 }]);
+  }
+  assert.deepEqual(redact(j('pk', '_live_', '51HqTzQKx9vPq2Lm7Rt8Yw3Nb')).hits, []);
+});
+
+test('a Google AIza... API key is redacted', () => {
+  const k = j('AIza', 'SyD3k9QxLm2Pv7Rt8Yw3NbZc4Hj6Ks0Ue1');
+  const r = redact(`maps key ${k}`);
+  assert.equal(r.text, `maps key ${tag('google-api-key')}`);
+});
+
+test('an Azure connection string loses AccountKey= and SharedAccessKey= values, keeps the label', () => {
+  const v = j('q8Zr3Lm2Pv7Rt8Yw3NbZc4Hj6Ks0Ue1Xa9Bc2Df5Gh7Jk1Mn3Pq5', '==');
+  const r = redact(`DefaultEndpointsProtocol=https;AccountName=demo;AccountKey=${v};EndpointSuffix=core.windows.net`);
+  assert.ok(!r.text.includes(v.slice(0, 20)));
+  assert.ok(r.text.includes(`AccountKey=${tag('azure-key')};EndpointSuffix`));
+  assert.deepEqual(redact(`SharedAccessKey=${v}`).hits, [{ family: 'azure-key', count: 1 }]);
+});
+
+test('Authorization: Basic loses its base64 value; the English word "Basic" is left alone', () => {
+  const v = j('ZGVtbzpQbDRud', 'GVkLVB3');
+  assert.equal(redact(`Authorization: Basic ${v}`).text, `Authorization: Basic ${tag('basic-auth')}`);
+  for (const t of ['Basic usage of the API', 'Basic configuration needed', 'Use Basic auth here']) assert.equal(redact(t).text, t);
+});
+
+test('a short password after a password label is redacted (generic-secret only takes 32+); prose about passwords is not', () => {
+  const pw = j('Som', 'mer', '20', '26', '!');
+  for (const s of [`password=${pw}`, `passord: ${pw}`, `"password": "${pw}"`]) {
+    const r = redact(s);
+    assert.ok(!r.text.includes(pw), s);
+    assert.deepEqual(r.hits, [{ family: 'password-assignment', count: 1 }], s);
+  }
+  assert.equal(redact('the password is in the vault').text, 'the password is in the vault');
+  assert.deepEqual(redact(redact(`password=${pw}`).text).hits, [], 'idempotent: a second pass finds nothing new');
+});
+
+// QA round 2 (R2-5): near variants that reached the node. Each value is assembled from parts.
+test('R2-5: near variants of the secret families are redacted', () => {
+  const cases = {
+    'basic-auth': [j('Authorization: Basic ', 'dXNlcjpwYXNz'), 'dXNlcjpwYXNz'],
+    'password-assignment (quoted, spaces)': [j('passphrase: "', 'correct horse battery staple', '"'), 'horse battery'],
+    'password-assignment (5 chars)': [j('pwd=', 'ab12x'), 'ab12x'],
+    'pem-private-key (PGP)': [j('-----BEGIN PGP ', 'PRIVATE KEY BLOCK-----\nlQOYBF0SECRETBODYxyz\n-----END PGP ', 'PRIVATE KEY BLOCK-----'), 'SECRETBODY'],
+    'pem-private-key (no END line)': [j('-----BEGIN ', 'PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQEFAASC'), 'MIIEvQIBADANBgkq'],
+    'aws-secret (aws-cli JSON)': [j('"SecretAccessKey": "', 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYFAKEKEY1', '"'), 'wJalrXUtnFEMI'],
+    'aws-access-key (ASIA)': [j('AS', 'IA', 'QAFAKEKEYID00001'), 'QAFAKEKEYID00001'],
+    'azure-key (SAS sig=)': [j('https://acct.blob.core.windows.net/c/f?sv=2022-11-02&sp=r&sig=', 'q8Zr3Lm2Pv7Rt8Yw3NbZc4Hj6Ks0Ue1Xa9B%3D'), 'q8Zr3Lm2Pv7Rt8Yw3NbZc4'],
+    'stripe-key (whsec_)': [j('whsec', '_', 'MfKQ9r8GKYqrTwjUPD8ILPZIo2LaLaSw'), 'MfKQ9r8GKYqrTwjUPD8'],
+    'google-api-key (GOCSPX-)': [j('GOCSPX', '-', 'aB3dE5fG7hI9jK1lM3nO5pQ7rS9t'), 'aB3dE5fG7hI9jK1'],
+    'bearer (Authorization: Token)': [j('Authorization: Token ', '9944b09199c62bcf9418ad846dd0e4bbdfc6ee4b'), '9944b09199c62bcf'],
+    'curl-user': [j('curl -u admin:', 'Hunter22x', ' https://api.example.test'), 'Hunter22x'],
+    'slack-webhook': [j('https://hooks.slack.com/services/', 'T0FAKE000/B0FAKE000/QAfakeQAfakeQAfakeQAfake'), 'QAfakeQAfakeQAfake'],
+  };
+  for (const [name, [text, needle]] of Object.entries(cases)) {
+    const r = redact(`Deploy note: ${text}`);
+    assert.ok(!r.text.includes(needle), `${name}: ${r.text}`);
+    assert.ok(r.hits.length > 0, name);
+  }
+});
+
+// QA round 2 (R2-6): ordinary work facts must survive untouched.
+test('R2-6: ordinary facts are not rewritten (prose, types, git remotes, request ids)', () => {
+  for (const fact of [
+    'The node API uses Bearer authentication through Atlas',
+    'type Login = { password: string; remember: boolean }',
+    'remote is ssh://git@github.com/wybe-labs/wybe-connect.git',
+    'idempotency key: 123e4567-e89b-12d3-a456-426614174000',
+    'set password: <your password> in the form',
+    'password=${DB_PASSWORD}',
+    'Basic usage of the API',
+  ]) assert.equal(redact(fact).text, fact, fact);
 });

@@ -21,7 +21,7 @@ const METADATA = {
 const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
 
 /** A fake authorization server + node discovery document. Records requests; token responses are configurable. */
-function fakeAs({ metadata = METADATA, prm = { resource: NODE, authorization_servers: [ISSUER], scopes_supported: [...ALL_SCOPES] }, tokenAnswer, registerStatus = 201 } = {}) {
+function fakeAs({ metadata = METADATA, prm = { resource: `${NODE}/mcp`, authorization_servers: [ISSUER], scopes_supported: [...ALL_SCOPES] }, tokenAnswer, registerStatus = 201 } = {}) {
   const calls = [];
   const fetchImpl = async (url, init = {}) => {
     const rec = { url: String(url), method: init.method ?? 'GET', headers: init.headers ?? {}, body: init.body ?? null };
@@ -51,7 +51,8 @@ test('pkcePair: a 43-char base64url verifier and its S256 challenge', () => {
 test('discover: the node names its authorization server, whose metadata names the endpoints', async () => {
   const as = fakeAs();
   const d = await discover(`${NODE}/some/path`, { fetchImpl: as.fetchImpl });
-  assert.equal(d.resource, NODE);
+  assert.equal(d.nodeUrl, NODE);
+  assert.equal(d.resource, `${NODE}/mcp`, 'RFC 8707 resource = the /mcp endpoint the node names, never the bare origin');
   assert.equal(d.mcpEndpoint, `${NODE}/mcp`);
   assert.equal(d.issuer, ISSUER);
   assert.deepEqual(d.metadata, METADATA);
@@ -62,11 +63,19 @@ test('discover: without a protected-resource document the ruled issuer is used; 
   const as = fakeAs({ prm: null });
   const d = await discover(NODE, { fetchImpl: as.fetchImpl });
   assert.equal(d.issuer, DEFAULT_ISSUER);
+  assert.equal(d.resource, `${NODE}/mcp`, 'without the document the resource is still the /mcp endpoint');
   const weak = fakeAs({ metadata: { ...METADATA, code_challenge_methods_supported: ['plain'] } });
   await assert.rejects(discover(NODE, { fetchImpl: weak.fetchImpl }), /S256/);
   const missing = fakeAs({ metadata: { issuer: ISSUER } });
   await assert.rejects(discover(NODE, { fetchImpl: missing.fetchImpl }), /lacks authorization_endpoint/);
   await assert.rejects(discover('http://demo.wybe.me', { fetchImpl: as.fetchImpl }), /must be https/);
+});
+
+test('discover: a document naming a resource on another origin is refused (RFC 9728 3.3)', async () => {
+  for (const resource of ['https://evil.example/mcp', 'not a url']) {
+    const as = fakeAs({ prm: { resource, authorization_servers: [ISSUER] } });
+    await assert.rejects(discover(NODE, { fetchImpl: as.fetchImpl }), /another origin/);
+  }
 });
 
 test('register: posts a public-client registration with exactly the loopback redirect_uri', async () => {
@@ -183,15 +192,18 @@ test('connect: the whole flow end to end against a fake AS and a real loopback; 
   };
   const now = () => Date.parse('2026-09-22T12:00:00Z');
   const creds = await connect(NODE, { fetchImpl: as.fetchImpl, spawnImpl, platform: 'linux', log: (l) => log.push(l), now, timeoutMs: 5000 });
-  assert.deepEqual(Object.keys(creds).sort(), ['accessToken', 'clientId', 'connectedAt', 'expiresAt', 'issuer', 'mcpEndpoint', 'nodeUrl', 'refreshToken', 'scopes', 'tokenEndpoint']);
+  assert.deepEqual(Object.keys(creds).sort(), ['accessToken', 'clientId', 'connectedAt', 'expiresAt', 'issuer', 'mcpEndpoint', 'nodeUrl', 'refreshToken', 'resource', 'scopes', 'tokenEndpoint']);
   assert.equal(creds.accessToken, ACCESS);
   assert.equal(creds.refreshToken, REFRESH);
   assert.equal(creds.mcpEndpoint, `${NODE}/mcp`);
+  assert.equal(creds.nodeUrl, NODE);
+  assert.equal(creds.resource, `${NODE}/mcp`);
   assert.equal(creds.clientId, 'dcr_client_1');
   assert.equal(creds.connectedAt, '2026-09-22T12:00:00.000Z');
   const tokenForm = Object.fromEntries(new URLSearchParams(as.calls.find((c) => c.url === METADATA.token_endpoint).body));
   assert.equal(tokenForm.code, 'wac_e2e');
-  assert.equal(tokenForm.resource, NODE);
+  assert.equal(tokenForm.resource, `${NODE}/mcp`, 'the token is asked for the /mcp endpoint the node accepts');
+  assert.equal(new URL(log.find((l) => l.includes('/oauth/authorize')).split('\n')[1]).searchParams.get('resource'), `${NODE}/mcp`);
   assert.equal(createHash('sha256').update(tokenForm.code_verifier).digest('base64url'), new URL(log.find((l) => l.includes('/oauth/authorize')).split('\n')[1]).searchParams.get('code_challenge'));
   const joined = log.join('\n');
   assert.ok(joined.length > 0, 'the log captured lines');

@@ -59,21 +59,23 @@ itself (it is sent as a header to your node, and to nothing else).
 
 ## Getting started (Claude Code)
 
-In Claude Code:
+One command in a terminal (Claude Code 2.1.292 or newer):
 
 ```
-/plugin marketplace add wybe-labs/wybe-connect
-/plugin install wybe-connect@wybe-connect
+claude plugin install wybe-connect --marketplace wybe-labs/wybe-connect
 ```
 
+(or, inside Claude Code: `/plugin install wybe-connect --marketplace wybe-labs/wybe-connect`).
 Then paste one of these with your own node address:
 
 > Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
 
 > Connect me to my Wybe AI colleague at https://dittfirma.wybe.me
 
-Claude runs the `connect` skill: a browser opens on `auth.wybe.me`, you log in with your
-passkey and tick the scopes, and Claude runs the first sync (the opening kit: projects, how you
+Claude runs the `connect` skill, which calls the plugin's own `wybe` MCP server: a browser
+opens on `auth.wybe.me`, you log in with your passkey and tick the scopes. That one sign-in
+serves both the hooks and the `remember` tool; nothing to copy, no `claude mcp add`. Claude
+then runs the first sync (the opening kit: projects, how you
 work, tools, ideas, research, recurring tasks; work only). From then on the hooks do the rest.
 
 Revoking the pairing (under "Mine koblinger" on your node) stops the flow. Erasing what the
@@ -191,10 +193,12 @@ discovery, dynamic client registration with a loopback `redirect_uri`, browser, 
 and stores it in `~/.wybe-connect/credentials.json` (owner-only). The hooks then speak MCP's
 Streamable HTTP transport directly (`initialize`, `notifications/initialized`, `tools/call`)
 with `fetch`. The interactive tools (`remember`, `import_conversation`, `pending_questions`)
-go through Claude Code's own MCP client, added with `claude mcp add --transport http wybe
-<url>`, which drives its own consent. Two grants, one person, same scopes screen. The plugin
-ships no `.mcp.json` because the node URL is per person and a marketplace install cannot inject
-it.
+go through the plugin's own MCP server (`.mcp.json` → `bin/mcp-proxy.js`, a stdio server):
+before you connect it offers only `connect(node_url)`, which runs the same OAuth flow and stores
+the same `credentials.json`; after that it lists the node's own tools and forwards each call to
+the node's `/mcp` with that grant (one refresh on 401). One grant, one sign-in; the node URL is
+never in `.mcp.json`, so a marketplace install works for everyone. (`bin/connect.js` still runs
+the flow from a terminal.)
 
 **Open questions.** A hook cannot call `pending_questions`. Every tool response carries
 `open_questions[]`; `flush.js` caches the last set and `session-start.js` hands it to Claude
