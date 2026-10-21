@@ -147,6 +147,9 @@ test('R4-7: four real Stop hooks during a live holder\'s 6 s critical section ke
   const { home, project } = sandbox();
   writeCredentials(home, REFUSED, ['remember']);
   const p = paths(home);
+  // A recent failure: the back-off keeps a hook that gets the lock after the holder from starting a run.
+  mkdirSync(join(home, 'state'), { recursive: true });
+  writeFileSync(join(home, 'state', 'distil.json'), JSON.stringify({ version: 2, lastFailureAt: new Date().toISOString(), lastError: { class: 'node-unreachable', message: 'x', at: new Date().toISOString() } }));
   const holder = spawn(process.execPath, [HOLDER, home, '6000'], { stdio: ['ignore', 'pipe', 'inherit'], windowsHide: true });
   const exited = new Promise((r) => holder.on('exit', r));
   let out = '';

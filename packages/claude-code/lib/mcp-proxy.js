@@ -254,8 +254,15 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
         const name = params?.name;
         if (name === CONNECT_TOOL.name) return reply(await callConnect(params?.arguments));
         if (!credentials()) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
-        // Every argument is redacted on this machine before it leaves (lib/redact.js).
-        const out = await upstream('tools/call', { name, arguments: redactValue(params?.arguments ?? {}).value });
+        // Every argument passes through redactValue before it leaves the machine (QA R5-1); one the
+        // walker cannot read is refused rather than forwarded.
+        let args;
+        try {
+          args = redactValue(params?.arguments ?? {}).value;
+        } catch {
+          return reply(text('Not delivered: the arguments could not be checked for secrets, so nothing was sent.', true));
+        }
+        const out = await upstream('tools/call', { name, arguments: args });
         if (!out.ok) {
           const why = out.kind === 'auth' ? 'the connection was refused (revoked or expired); call `connect` again' : `the AI colleague could not be reached (${out.kind}: ${out.message})`;
           return reply(text(`Not delivered: ${why}.`, true));

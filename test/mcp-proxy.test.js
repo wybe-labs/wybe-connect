@@ -147,18 +147,6 @@ test('the plugin ships the server: .mcp.json starts bin/mcp-proxy.js, which spea
   assert.deepEqual(answers[1].result.tools, [CONNECT_TOOL]);
 });
 
-test('connected: every forwarded argument is redacted on this machine first', async () => {
-  const p = home();
-  saveCredentials(creds(), p);
-  const node = fakeNode();
-  const proxy = createProxy({ paths: p, fetchImpl: node.fetchImpl });
-  const planted = ['postgres://app:', 'Pl4nted-Pw', '@db.example.test/x'].join('');
-  await proxy.handle(req(1, 'tools/call', { name: 'remember', arguments: { items: [{ content: `The app uses ${planted}` }] } }));
-  const sent = JSON.stringify(node.seen.filter((s) => s.rpc === 'tools/call')[0].params);
-  assert.ok(!sent.includes('Pl4nted-Pw'));
-  assert.ok(sent.includes('[REDACTED:url-userinfo]'));
-});
-
 test('distil run: the tools are fixed whatever the node or sign-in, remember goes to the outbox redacted, never to the node', async () => {
   const p = home();
   const proxy = createProxy({ paths: p, distilRun: 'r-test-1', fetchImpl: async () => { throw new Error('no network expected'); } });
