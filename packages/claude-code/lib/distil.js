@@ -132,11 +132,10 @@ const alive = (pid) => {
  * run backs off FAILURE_BACKOFF_MS.
  */
 export function planRun(state, { now = Date.now(), importRequestedAt = null, everyHours = DISTIL_EVERY_HOURS, isAlive = alive } = {}) {
-  let killPid = null;
-  if (state.running && isAlive(state.running.pid)) {
-    if (now - Date.parse(state.running.startedAt) < RUN_STALE_MS) return null;
-    killPid = state.running.pid;
-  }
+  // QA round 2 (R2-4): never kill by a recorded pid. After a reboot or crash it may belong to an
+  // unrelated process. A stale run is ignored; its own watchdog ends it at RUN_TIMEOUT_MS.
+  const killPid = null;
+  if (state.running && isAlive(state.running.pid) && now - Date.parse(state.running.startedAt) < RUN_STALE_MS) return null;
   if (state.lastFailureAt && now - Date.parse(state.lastFailureAt) < FAILURE_BACKOFF_MS) return null;
   const extra = killPid ? { killPid } : {};
   if (isIsoTimestamp(importRequestedAt) && importRequestedAt !== state.importHandled) {
