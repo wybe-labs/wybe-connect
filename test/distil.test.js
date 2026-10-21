@@ -362,6 +362,34 @@ test('R4-8: a torn ack line means that call is re-sent, never that the run succe
   assert.deepEqual(node.stored, ['A.', 'B.'], 'and the node kept it once by its key');
 });
 
+test('an HTTP 200 that is a JSON-RPC error, an isError result, an HTML page, an empty body or ok without stored is never an ack', async () => {
+  const bodies = {
+    'json-rpc error': (id) => ({ type: 'application/json', body: JSON.stringify({ jsonrpc: '2.0', id, error: { code: -32000, message: 'x' } }) }),
+    'isError result': (id) => ({ type: 'application/json', body: JSON.stringify({ jsonrpc: '2.0', id, result: { isError: true, content: [{ type: 'text', text: 'could not store' }] } }) }),
+    'html page': () => ({ type: 'text/html', body: '<html>proxy</html>' }),
+    'empty body': () => ({ type: 'application/json', body: '' }),
+    'ok without stored': (id) => ({ type: 'application/json', body: JSON.stringify({ jsonrpc: '2.0', id, result: { content: [{ type: 'text', text: '{"ok":true}' }] } }) }),
+  };
+  for (const [label, make] of Object.entries(bodies)) {
+    const { p } = sandbox(0);
+    saveCredentials(creds('https://node.example.test/mcp'), p);
+    const fetchImpl = async (url, init = {}) => {
+      if (init.method === 'DELETE') return new Response('', { status: 200 });
+      const msg = JSON.parse(init.body);
+      if (msg.method === 'initialize') return new Response(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} }), { status: 200, headers: { 'content-type': 'application/json', 'mcp-session-id': 's1' } });
+      if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
+      const { type, body } = make(msg.id);
+      return new Response(body, { status: 200, headers: { 'content-type': type } });
+    };
+    const runId = `r-${label.replace(/\W+/g, '-')}`;
+    D.spoolRemember(p, runId, { items: [{ content: 'A.' }] });
+    D.spoolDone(p, runId);
+    const out = await D.deliver(p, { runId, mode: 'ongoing' }, { fetchImpl });
+    assert.equal(out.ok, false, label);
+    assert.equal(readRecords(D.distilPaths(p).acks(runId)).records.length, 0, `${label}: no ack written`);
+  }
+});
+
 // ------------------------------------------------------------------ R4-5: told once per kind
 test('R4-5: one continuing outage is told once, whatever number of calls each run made', async () => {
   const { p, files } = sandbox();

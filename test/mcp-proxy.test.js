@@ -6,6 +6,8 @@ import { join } from 'node:path';
 import { spawn } from 'node:child_process';
 import { createProxy, CONNECT_TOOL } from '../lib/mcp-proxy.js';
 import { paths, saveCredentials, loadCredentials } from '../lib/home.js';
+import { distilPaths } from '../lib/distil.js';
+import { readRecords } from '../lib/ledger.js';
 
 const NODE = 'https://demo.wybe.me';
 const TOKEN_ENDPOINT = 'https://auth.wybe.me/oauth/token';
@@ -143,4 +145,58 @@ test('the plugin ships the server: .mcp.json starts bin/mcp-proxy.js, which spea
   assert.equal(answers.length, 2, 'one answer per request, none for the notification');
   assert.equal(answers[0].result.serverInfo.name, 'wybe');
   assert.deepEqual(answers[1].result.tools, [CONNECT_TOOL]);
+});
+
+test('connected: every forwarded argument is redacted on this machine first', async () => {
+  const p = home();
+  saveCredentials(creds(), p);
+  const node = fakeNode();
+  const proxy = createProxy({ paths: p, fetchImpl: node.fetchImpl });
+  const planted = ['postgres://app:', 'Pl4nted-Pw', '@db.example.test/x'].join('');
+  await proxy.handle(req(1, 'tools/call', { name: 'remember', arguments: { items: [{ content: `The app uses ${planted}` }] } }));
+  const sent = JSON.stringify(node.seen.filter((s) => s.rpc === 'tools/call')[0].params);
+  assert.ok(!sent.includes('Pl4nted-Pw'));
+  assert.ok(sent.includes('[REDACTED:url-userinfo]'));
+});
+
+test('distil run: the tools are fixed whatever the node or sign-in, remember goes to the outbox redacted, never to the node', async () => {
+  const p = home();
+  const proxy = createProxy({ paths: p, distilRun: 'r-test-1', fetchImpl: async () => { throw new Error('no network expected'); } });
+  assert.deepEqual((await proxy.handle(req(1, 'tools/list'))).result.tools.map((t) => t.name), ['remember', 'distil_done', 'pending_questions']);
+  const planted = ['postgres://app:', 'Pl4nted-Pw', '@db.example.test/x'].join('');
+  const r = await proxy.handle(req(2, 'tools/call', { name: 'remember', arguments: { items: [{ content: `Moved the app to ${planted}`, subject: 'project', extra: 'dropped' }], import_of: '2026-10-21T10:00:00.000Z', nope: 1 } }));
+  assert.match(r.result.content[0].text, /Queued 1 item\(s\) as call 1/);
+  const bad = await proxy.handle(req(3, 'tools/call', { name: 'remember', arguments: { items: [] } }));
+  assert.equal(bad.result.isError, true);
+  const q = await proxy.handle(req(4, 'tools/call', { name: 'pending_questions', arguments: {} }));
+  assert.equal(q.result.content[0].text, '{"ok":true,"open_questions":[]}', 'not signed in: no questions, no error');
+  assert.match((await proxy.handle(req(5, 'tools/call', { name: 'distil_done', arguments: {} }))).result.content[0].text, /1 remember call/);
+  const late = await proxy.handle(req(6, 'tools/call', { name: 'remember', arguments: { items: [{ content: 'late' }] } }));
+  assert.equal(late.result.isError, true, 'nothing joins an outbox after distil_done');
+  const { records, torn } = readRecords(distilPaths(p).outbox('r-test-1'));
+  assert.equal(torn, 0);
+  assert.equal(records.length, 2);
+  assert.deepEqual(records[0].args, { items: [{ content: 'Moved the app to postgres://[REDACTED:url-userinfo]@db.example.test/x', subject: 'project' }], import_of: '2026-10-21T10:00:00.000Z' });
+  assert.deepEqual(records[1], { kind: 'done', items: 1 });
+});
+
+test('import: a node answer carrying import_request is handed on, and pollImport is one pending_questions call', async () => {
+  const p = home();
+  saveCredentials(creds(), p);
+  const seen = [];
+  const at = '2026-10-21T10:00:00.000Z';
+  const fetchImpl = async (url, init = {}) => {
+    if (init.method === 'DELETE') return new Response('', { status: 200 });
+    const msg = JSON.parse(init.body);
+    if (msg.method === 'initialize') return json({ jsonrpc: '2.0', id: msg.id, result: {} }, 200, { 'mcp-session-id': 's1' });
+    if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
+    seen.push(msg.params?.name);
+    return json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: JSON.stringify({ ok: true, open_questions: [], import_request: { requested_at: at } }) }] } });
+  };
+  const handed = [];
+  const proxy = createProxy({ paths: p, fetchImpl, onImportRequest: (x) => handed.push(x) });
+  await proxy.handle(req(1, 'tools/call', { name: 'remember', arguments: { items: [{ content: 'x' }] } }));
+  assert.equal(await proxy.pollImport(), at);
+  assert.deepEqual(seen, ['remember', 'pending_questions']);
+  assert.deepEqual(handed, [at, at]);
 });
