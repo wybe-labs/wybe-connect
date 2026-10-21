@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { paths } from '../lib/home.js';
 import {
   ALLOWED_TOOLS, DISTIL_ENV, FAILURE_BACKOFF_MS, RUN_STALE_MS, RUN_TOOLS, MAX_TURNS, MAX_RUN_TRANSCRIPTS,
-  recordDelivery, ledgerFor, distilProblem,
+  recordDelivery, ledgerFor, distilProblem, markProblemShown,
   buildPrompt, importRequestOf, isIsoTimestamp, loadState, maybeRun, noteSession, planRun,
   resolveClaude, runArgs, runWatchdog, startRun, withLock,
 } from '../lib/distil.js';
@@ -273,4 +273,24 @@ test('R2-7: a delete-pending lock and a reader holding distil.json open never cr
     closeSync(reader);
   }
   assert.deepEqual(loadState(p).pending.map((x) => x.transcriptPath), ['C:\\t\\a.jsonl', 'C:\\t\\b.jsonl']);
+});
+
+test('R3-5/R3-6: the SessionStart notice is shown once per error and clears when the fault clears', async () => {
+  const p = home();
+  const failed = await runWatchdog(planFileFor(p, { mode: 'ongoing', importOf: null, transcripts: ['/t/a.jsonl'] }), { paths: p, resolve: () => null });
+  assert.equal(failed.ok, false);
+  const problem = distilProblem(p, Date.now());
+  assert.match(problem.error, /claude not found/);
+  markProblemShown(p, problem.error);
+  assert.equal(distilProblem(p, Date.now()), null, 'told once');
+  assert.equal(loadState(p).lastRunAt, null, 'a failure does not move the schedule');
+  const child = fakeChild();
+  const fixed = await runWatchdog(planFileFor(p, { mode: 'ongoing', importOf: null, transcripts: ['/t/a.jsonl'] }), {
+    paths: p, resolve: () => ({ cmd: 'claude', pre: [] }), argsFor: () => [], spawnImpl: () => { setTimeout(() => child.emit('exit', 0), 5); return child; },
+  });
+  assert.equal(fixed.ok, true);
+  const st = loadState(p);
+  assert.equal(st.lastError, null, 'the fault cleared');
+  assert.equal(st.problemShown, null);
+  assert.equal(distilProblem(p, Date.now()), null);
 });
