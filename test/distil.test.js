@@ -1,13 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
-import { mkdtempSync, existsSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync } from 'node:fs';
+import { mkdtempSync, existsSync, writeFileSync, mkdirSync, openSync, closeSync, unlinkSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { paths } from '../lib/home.js';
 import {
-  ALLOWED_TOOLS, DISTIL_ENV, FAILURE_BACKOFF_MS, RUN_STALE_MS, RUN_TOOLS, MAX_TURNS, MAX_RUN_TRANSCRIPTS,
-  recordDelivery, ledgerFor, distilProblem, markProblemShown,
+  ALLOWED_TOOLS, DISTIL_ENV, LOCK_MAX_MS, FAILURE_BACKOFF_MS, RUN_STALE_MS, RUN_TOOLS, MAX_TURNS, MAX_RUN_TRANSCRIPTS,
+  recordDelivery, ledgerFor, readLedger, ledgerVerdict, backoffMs, MAX_PENDING, distilProblem, markProblemShown,
   buildPrompt, importRequestOf, isIsoTimestamp, loadState, maybeRun, noteSession, planRun,
   resolveClaude, runArgs, runWatchdog, startRun, withLock,
 } from '../lib/distil.js';
@@ -173,11 +173,14 @@ const fakeChild = () => Object.assign(new EventEmitter(), { pid: undefined });
 test('R2-1: exit 0 without the node\'s import_done confirmation is a failure, not handled; retried later', async () => {
   const p = home();
   const child = fakeChild();
-  const out = await runWatchdog(planFileFor(p, { mode: 'import', importOf: AT, transcripts: null }), {
+  const plan = planFileFor(p, { mode: 'import', importOf: AT, transcripts: null });
+  recordDelivery(ledgerFor(plan), { tool: 'pending_questions', ok: true, importOf: null, importDone: false }); // the node was reached
+  const out = await runWatchdog(plan, {
     paths: p, resolve: () => ({ cmd: 'claude', pre: [] }), argsFor: () => [], spawnImpl: () => { setTimeout(() => child.emit('exit', 0), 5); return child; },
   });
   assert.equal(out.ok, false);
   assert.match(out.error, /without the node confirming/);
+  assert.equal(out.kind, 'import-unconfirmed');
   assert.equal(loadState(p).importHandled, null);
   assert.ok(loadState(p).lastFailureAt);
 });
@@ -233,6 +236,31 @@ test('F5: withLock is exclusive; a held lock makes the second caller wait, then 
   assert.equal(withLock(p, () => 'free again'), 'free again');
 });
 
+test('R4-7: an old lock is taken over only when its holder is gone; an empty one (being written) and a live one are kept', () => {
+  const lockAt = (p, text, ageMs) => {
+    mkdirSync(p.state, { recursive: true });
+    const lock = join(p.state, 'distil.lock');
+    writeFileSync(lock, text);
+    const t = new Date(Date.now() - ageMs);
+    utimesSync(lock, t, t);
+    return lock;
+  };
+  const dead = home();
+  lockAt(dead, '99999999', 6000);
+  assert.equal(withLock(dead, () => 'taken', { tries: 3, waitMs: 1, busy: 'busy' }), 'taken', 'a dead pid frees the lock');
+  const live = home();
+  lockAt(live, String(process.pid), 6000);
+  assert.equal(withLock(live, () => 'taken', { tries: 3, waitMs: 1, busy: 'busy' }), 'busy', 'a live slow holder keeps it');
+  // QA R4-7 round 5: a waiter that saw the old lock's age read the next holder's fresh, still empty
+  // lock and deleted it. An empty lock is never judged dead before LOCK_MAX_MS.
+  const fresh = home();
+  lockAt(fresh, '', 6000);
+  assert.equal(withLock(fresh, () => 'taken', { tries: 3, waitMs: 1, busy: 'busy' }), 'busy', 'an empty lock is kept');
+  const ancient = home();
+  lockAt(ancient, String(process.pid), LOCK_MAX_MS + 1000);
+  assert.equal(withLock(ancient, () => 'taken', { tries: 3, waitMs: 1, busy: 'busy' }), 'taken', 'past LOCK_MAX_MS it is taken whatever');
+});
+
 test('maybeRun never starts a run from inside a run', () => {
   const p = home();
   const r = recorder();
@@ -281,11 +309,13 @@ test('R3-5/R3-6: the SessionStart notice is shown once per error and clears when
   assert.equal(failed.ok, false);
   const problem = distilProblem(p, Date.now());
   assert.match(problem.error, /claude not found/);
-  markProblemShown(p, problem.error);
+  markProblemShown(p, problem.kind);
   assert.equal(distilProblem(p, Date.now()), null, 'told once');
   assert.equal(loadState(p).lastRunAt, null, 'a failure does not move the schedule');
   const child = fakeChild();
-  const fixed = await runWatchdog(planFileFor(p, { mode: 'ongoing', importOf: null, transcripts: ['/t/a.jsonl'] }), {
+  const fixedPlan = planFileFor(p, { mode: 'ongoing', importOf: null, transcripts: ['/t/a.jsonl'] });
+  recordDelivery(ledgerFor(fixedPlan), { tool: 'pending_questions', ok: true, importOf: null, importDone: false });
+  const fixed = await runWatchdog(fixedPlan, {
     paths: p, resolve: () => ({ cmd: 'claude', pre: [] }), argsFor: () => [], spawnImpl: () => { setTimeout(() => child.emit('exit', 0), 5); return child; },
   });
   assert.equal(fixed.ok, true);
@@ -293,4 +323,57 @@ test('R3-5/R3-6: the SessionStart notice is shown once per error and clears when
   assert.equal(st.lastError, null, 'the fault cleared');
   assert.equal(st.problemShown, null);
   assert.equal(distilProblem(p, Date.now()), null);
+});
+
+test('R4-3: a run that never reached the node (empty ledger) fails closed; its transcripts stay', async () => {
+  const p = home();
+  noteSession(p, { transcriptPath: '/t/a.jsonl', now: T0 });
+  startRun({ mode: 'ongoing', transcripts: ['/t/a.jsonl'] }, { paths: p, now: T0, spawnImpl: recorder(process.pid).spawnImpl, runner: '/r.js' });
+  const child = fakeChild();
+  const out = await runWatchdog(planFileFor(p, { mode: 'ongoing', importOf: null, transcripts: ['/t/a.jsonl'] }), {
+    paths: p, resolve: () => ({ cmd: 'claude', pre: [] }), argsFor: () => [], spawnImpl: () => { setTimeout(() => child.emit('exit', 0), 5); return child; },
+  });
+  assert.equal(out.ok, false);
+  assert.equal(out.kind, 'no-ack');
+  assert.deepEqual(loadState(p).pending.map((x) => x.transcriptPath), ['/t/a.jsonl']);
+});
+
+test('R4-8: a torn ledger line counts as an undelivered call, never as nothing', () => {
+  const p = home();
+  mkdirSync(p.state, { recursive: true });
+  const ledger = ledgerFor(join(p.state, 'distil-plan-torn.json'));
+  recordDelivery(ledger, { tool: 'pending_questions', ok: true, importOf: null, importDone: false });
+  writeFileSync(ledger, '{"tool":"remember","ok":tr', { flag: 'a' });
+  assert.equal(ledgerVerdict({ mode: 'ongoing' }, readLedger(ledger)).kind, 'not-delivered');
+});
+
+test('R4-6: the transcripts of a failed run are never the ones cut when pending is full; the drop is counted', async () => {
+  const p = home();
+  mkdirSync(p.state, { recursive: true });
+  const full = Array.from({ length: MAX_PENDING }, (_, i) => ({ transcriptPath: `/old/${i}.jsonl`, sessionId: null, cwd: null, at: new Date(T0).toISOString() }));
+  writeFileSync(join(p.state, 'distil.json'), JSON.stringify({ pending: full }));
+  const run = full.slice(0, 40).map((x) => x.transcriptPath);
+  startRun({ mode: 'ongoing', transcripts: run }, { paths: p, now: T0, spawnImpl: recorder(process.pid).spawnImpl, runner: '/r.js' });
+  for (let i = 0; i < 40; i++) noteSession(p, { transcriptPath: `/new/${i}.jsonl`, now: T0 + i });
+  await runWatchdog(planFileFor(p, { mode: 'ongoing', importOf: null, transcripts: run }), { paths: p, resolve: () => null });
+  const st = loadState(p);
+  const known = new Set(st.pending.map((x) => x.transcriptPath));
+  assert.ok(run.every((t) => known.has(t)), 'every transcript of the failed run is still pending');
+  assert.ok(st.pending.length <= MAX_PENDING);
+  assert.equal(st.dropped, 40, 'the 40 oldest others were dropped, and counted');
+});
+
+test('R4-5: one outage is told once, whatever the call count in its message (keyed on the kind)', () => {
+  const p = home();
+  mkdirSync(p.state, { recursive: true });
+  const at = new Date().toISOString();
+  for (const n of [1, 2, 3]) {
+    writeFileSync(join(p.state, 'distil.json'), JSON.stringify({ lastFailureAt: at, lastError: `${n} remember call(s) did not reach the node; retried later`, lastErrorKind: 'not-delivered', problemShown: n === 1 ? null : 'not-delivered', pending: [] }));
+    const shown = distilProblem(p, Date.now());
+    assert.equal(Boolean(shown), n === 1, `outage with ${n} call(s)`);
+  }
+});
+
+test('back-off grows per failure in a row: 30 min, 1 h, 2 h ... at most 6 h', () => {
+  assert.deepEqual([1, 2, 3, 4, 5, 9].map((n) => backoffMs(n) / 60_000), [30, 60, 120, 240, 360, 360]);
 });

@@ -16,7 +16,7 @@ try {
   const context = buildContext({ credentials: loadCredentials(p), cached: readJson(p.openQuestions), problem });
   if (context) {
     process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context } })}\n`);
-    if (problem) markProblemShown(p, problem.error); // told once per distinct error (QA R3-5)
+    if (problem) markProblemShown(p, problem.kind); // told once per distinct error (QA R3-5)
   }
 } catch (err) {
   failOpen('session-start', err);
