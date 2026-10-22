@@ -2,13 +2,18 @@
 // WYBE_CONNECT_HOME, which tests use to get a private directory each). Claude Code uses the root;
 // Codex and Cursor use ~/.wybe-connect/codex and ~/.wybe-connect/cursor (see harnessHome), each
 // with the same layout:
-//   credentials.json          the OAuth grant for the node, mode 600 (chmod is best effort on
+//   connections/<name>/       one per node or account (lib/connections.js), each holding:
+//     credentials.json        the OAuth grant for the node, mode 600 (chmod is best effort on
 //                             Windows, where the profile directory's ACL is the protection)
+//     queue/                  payloads the node has not taken yet (see queue.js for the bounds)
+//     open-questions.json     the node's open questions from the last tool response
+//     surfaced-questions.json (Cursor) question ids already put to the person, and when
+//   connections.json          which connection is the default (lib/connections.js)
 //   state/<transcript-id>.json  the flush cursor per transcript (Cursor: per conversation)
-//   state/open-questions.json   the node's open questions from the last tool response
-//   state/surfaced-questions.json  (Cursor) question ids already put to the person, and when
-//   queue/                    payloads the node has not taken yet (see queue.js for the bounds)
+//   state/sessions/<id>.json  the connection a session uses
 //   spool/                    (Cursor) redacted hook records of a conversation not yet flushed
+// paths() below is the single-connection layout of 0.1 (credentials.json, queue/ and the caches in
+// the root), which connections.js migrates from and builds on.
 
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
@@ -45,6 +50,7 @@ export function paths(root = homePath()) {
 }
 
 export function readJson(path) {
+  if (!path) return null; // a session without a connection has no credentials or caches (connections.js)
   try {
     return JSON.parse(readFileSync(path, 'utf8'));
   } catch (err) {

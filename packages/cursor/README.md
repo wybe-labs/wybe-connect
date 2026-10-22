@@ -16,7 +16,7 @@ and run `node packages/cursor/bin/connect.js https://dittfirma.wybe.me` yourself
 |---|---|
 | `hooks/hooks.json` | seven Cursor hooks, all running `hooks/on-event.js` (it dispatches on `hook_event_name`) |
 | `hooks/on-event.js` | `sessionStart` -> standing line + cached open questions as `additional_context`; `beforeSubmitPrompt`, `afterFileEdit`, `afterAgentResponse`, `postToolUse` -> one redacted spool record; `stop` -> flush, then maybe a `followup_message`; `sessionEnd` -> flush into the local queue |
-| `bin/connect.js` | the one-time OAuth flow as client `wybe-connect (Cursor)`; stores the grant in `~/.wybe-connect/cursor/credentials.json` |
+| `bin/connect.js` | the one-time OAuth flow as client `wybe-connect (Cursor)`; stores the grant as a connection under `~/.wybe-connect/cursor/connections/<name>/`; also `list`, `use`, `remove` |
 | `mcp.json.snippet` | the `wybe` entry for `~/.cursor/mcp.json`, for the interactive tools |
 | `lib/` | a byte-identical copy of the repository's `lib/` (`npm run sync-lib`; a test guards it) |
 

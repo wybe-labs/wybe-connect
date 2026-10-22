@@ -105,6 +105,14 @@ sends. Details: `packages/cursor/README.md`.
 Each harness is its own pairing with its own grant: Claude Code keeps `~/.wybe-connect/`, Codex
 and Cursor use `~/.wybe-connect/codex/` and `~/.wybe-connect/cursor/`.
 
+**Several nodes or accounts.** Within a harness, each connect is its own connection
+(`connections/<name>/`: grant, queue, question cache), keyed by the node host or by `--name`, so
+a second node never replaces the first and one node's queue is never sent to another. A session
+uses the connection its first hook found: one it was moved to (`connect.js use <name> --session
+<id>`), else `WYBE_CONNECT_NODE=<name>` in the harness's environment, else the default (the one
+connected or `use`d last, or the only one). `connect.js list` and `connect.js remove <name>`
+manage them. A 0.1 `credentials.json` moves under its node on the first hook, queue included.
+
 ## Claude Desktop, claude.ai and ChatGPT (no hooks)
 
 These assistants call the node from their vendor's cloud, through a custom connector at
@@ -177,9 +185,9 @@ Claude Code ──hook stdin (transcript_path)──▶ hooks/flush.js
                                                 │ redaction (lib/redact.js)
                                                 ▼
                                     lib/post.js ── JSON-RPC tools/call report_session ──▶ https://<slug>.wybe.me/mcp
-                                                │ Bearer wat_… from ~/.wybe-connect/credentials.json
+                                                │ Bearer wat_… from ~/.wybe-connect/connections/<node>/credentials.json
                                                 │ 401 → one refresh → else queue
-                                                │ unreachable → ~/.wybe-connect/queue/ (7 days / 50 MB, oldest dropped)
+                                                │ unreachable → ~/.wybe-connect/connections/<node>/queue/ (7 days / 50 MB, oldest dropped)
                                                 ▼
                                     next flush drains the queue, oldest first
 ```
@@ -188,7 +196,7 @@ Claude Code ──hook stdin (transcript_path)──▶ hooks/flush.js
 and no access to Claude Code's own OAuth session. So the plugin obtains its **own** grant once
 (`bin/connect.js` runs the OAuth 2.1 authorization-code flow with PKCE against `auth.wybe.me`:
 discovery, dynamic client registration with a loopback `redirect_uri`, browser, code exchange)
-and stores it in `~/.wybe-connect/credentials.json` (owner-only). The hooks then speak MCP's
+and stores it in `~/.wybe-connect/connections/<node>/credentials.json` (owner-only). The hooks then speak MCP's
 Streamable HTTP transport directly (`initialize`, `notifications/initialized`, `tools/call`)
 with `fetch`. The interactive tools (`remember`, `import_conversation`, `pending_questions`)
 go through Claude Code's own MCP client, added with `claude mcp add --transport http wybe

@@ -23,7 +23,7 @@ The plugin root is the directory two levels above this `SKILL.md` (it holds `bin
    is none, ask: "Hvilken adresse har KI-kollegaen din i Wybe? (https://dittfirma.wybe.me)".
 
 2. **Run the OAuth flow** (stores the credential the hooks use in
-   `~/.wybe-connect/codex/credentials.json`, owner-only):
+   `~/.wybe-connect/codex/connections/<node>/credentials.json`, owner-only):
    ```
    node "<plugin root>/bin/connect.js" https://dittfirma.wybe.me
    ```
@@ -31,6 +31,10 @@ The plugin root is the directory two levels above this `SKILL.md` (it holds `bin
    share (`remember`, `conversations`, `sessions:light`, `sessions:full`). Wait for
    `Connected to ...`. If it prints a URL instead of opening a browser, show that URL.
    Never read or echo `credentials.json`.
+   Connecting a second node (or a second account, with `--name <name>`) keeps the first: each
+   is its own connection, and the newest becomes the default for new sessions. `connect.js list`
+   shows them, `connect.js use <name>` changes the default, `connect.js use <name> --session <id>`
+   moves one session, `connect.js remove <name>` deletes one locally.
 
 3. **Add the MCP server for the interactive tools** (`remember`, `import_conversation`,
    `pending_questions`), which use Codex's own OAuth sign-in:

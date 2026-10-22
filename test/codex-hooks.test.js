@@ -44,9 +44,12 @@ function sandbox(fixture = 'codex-rollout.jsonl') {
   return { dir, home, codexHome: join(home, 'codex'), project, rollout };
 }
 
+/** The one connection these tests use, in the layout of lib/connections.js. */
+const conn = (dir) => join(dir, 'connections', 'node');
+
 function writeCredentials(dir, endpointBase, scopes) {
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'credentials.json'), JSON.stringify({
+  mkdirSync(conn(dir), { recursive: true });
+  writeFileSync(join(conn(dir), 'credentials.json'), JSON.stringify({
     version: 1, nodeUrl: endpointBase, mcpEndpoint: `${endpointBase}/mcp`, issuer: REFUSED, tokenEndpoint: `${REFUSED}/oauth/token`,
     clientId: 'c-codex', accessToken: TOKEN, refreshToken: null, expiresAt: null, scopes,
   }));
@@ -83,13 +86,13 @@ test('codex Stop, node unreachable: exit 0, one stderr line, delta queued under 
   assert.equal(r.stderr.trim().split('\n').length, 1, r.stderr);
   assert.match(r.stderr, /node not reachable \(network\); 1 delta\(s\) queued locally/);
   assert.ok(!r.stderr.includes(TOKEN));
-  assert.equal(existsSync(join(home, 'queue')), false, 'Claude Code\'s queue is not touched');
+  assert.equal(existsSync(join(conn(home), 'queue')), false, 'Claude Code\'s queue is not touched');
 
   const cursor = JSON.parse(readFileSync(join(codexHome, 'state', `rollout-2026-09-22T09-00-00-${SID}.json`), 'utf8'));
   assert.equal(cursor.byteOffset, statSync(rollout).size);
-  const queued = readdirSync(join(codexHome, 'queue'));
+  const queued = readdirSync(join(conn(codexHome), 'queue'));
   assert.equal(queued.length, 1);
-  const payload = JSON.parse(readFileSync(join(codexHome, 'queue', queued[0]), 'utf8'));
+  const payload = JSON.parse(readFileSync(join(conn(codexHome), 'queue', queued[0]), 'utf8'));
   assert.equal(payload.harness, 'codex');
   assert.equal(payload.scope, 'sessions:light');
   assert.equal(payload.session_id, SID);
@@ -118,7 +121,7 @@ test('codex Stop with sessions:full against a node: sent, open questions cached,
     assert.ok(JSON.stringify(session).includes('PLANTED-ASSISTANT-SENTENCE'), 'POSITIVE CONTROL: sessions:full carries assistant text');
     assert.ok(!JSON.stringify(session).includes('PLANTED-THINKING'));
     for (const c of node.seen) assert.equal(c.auth, `Bearer ${TOKEN}`);
-    const cached = JSON.parse(readFileSync(join(codexHome, 'state', 'open-questions.json'), 'utf8'));
+    const cached = JSON.parse(readFileSync(join(conn(codexHome), 'open-questions.json'), 'utf8'));
     assert.deepEqual(cached.open_questions, [{ id: 'q-9', text: 'Hva bruker du Codex mest til?' }]);
 
     const start = await runHook('session-start.js', { session_id: SID, transcript_path: rollout, cwd: project, hook_event_name: 'SessionStart', model: 'gpt-5.5-codex', permission_mode: 'default', source: 'startup' }, home);
@@ -144,10 +147,10 @@ test('codex SessionEnd (--offline): queued without a single request, and the nex
     const end = await runHook('flush.js', { session_id: SID, transcript_path: rollout, cwd: project, hook_event_name: 'SessionEnd', reason: 'other' }, home, ['--offline']);
     assert.deepEqual(end, { code: 0, stdout: '', stderr: '' });
     assert.equal(node.seen.length, 0, 'SessionEnd must not touch the network');
-    assert.equal(readdirSync(join(codexHome, 'queue')).length, 1);
+    assert.equal(readdirSync(join(conn(codexHome), 'queue')).length, 1);
     const next = await runHook('flush.js', stopInput(rollout, project), home);
     assert.equal(next.code, 0);
-    assert.equal(readdirSync(join(codexHome, 'queue')).length, 0, 'the queue drained');
+    assert.equal(readdirSync(join(conn(codexHome), 'queue')).length, 0, 'the queue drained');
     const calls = node.seen.filter((c) => c.rpc === 'tools/call');
     assert.equal(calls.length, 1);
     assert.equal(calls[0].params.arguments.session.delta.event, 'SessionEnd');
@@ -160,14 +163,15 @@ test('codex: a subagent rollout, a subagent PreCompact (agent_id), no credential
   const sub = sandbox('codex-rollout-subagent.jsonl');
   writeCredentials(sub.codexHome, REFUSED, ['sessions:full']);
   assert.deepEqual(await runHook('flush.js', stopInput(sub.rollout, sub.project), sub.home), { code: 0, stdout: '', stderr: '' });
-  assert.equal(existsSync(join(sub.codexHome, 'queue')), false);
-  assert.equal(existsSync(join(sub.codexHome, 'state')), false);
+  assert.equal(existsSync(join(conn(sub.codexHome), 'queue')), false);
+  const cursors = existsSync(join(sub.codexHome, 'state')) ? readdirSync(join(sub.codexHome, 'state')).filter((f) => f.endsWith('.json')) : [];
+  assert.deepEqual(cursors, [], 'no cursor: nothing was built');
 
   const main = sandbox();
   writeCredentials(main.codexHome, REFUSED, ['sessions:full']);
   const pre = await runHook('flush.js', { ...stopInput(main.rollout, main.project), hook_event_name: 'PreCompact', trigger: 'auto', agent_id: 'a-1', agent_type: 'reviewer' }, main.home);
   assert.deepEqual(pre, { code: 0, stdout: '', stderr: '' });
-  assert.equal(existsSync(join(main.codexHome, 'queue')), false);
+  assert.equal(existsSync(join(conn(main.codexHome), 'queue')), false);
 
   const none = sandbox();
   assert.deepEqual(await runHook('flush.js', stopInput(none.rollout, none.project), none.home), { code: 0, stdout: '', stderr: '' });
@@ -176,7 +180,7 @@ test('codex: a subagent rollout, a subagent PreCompact (agent_id), no credential
   const noScope = sandbox();
   writeCredentials(noScope.codexHome, REFUSED, ['remember']);
   assert.deepEqual(await runHook('flush.js', stopInput(noScope.rollout, noScope.project), noScope.home), { code: 0, stdout: '', stderr: '' });
-  assert.equal(existsSync(join(noScope.codexHome, 'queue')), false);
+  assert.equal(existsSync(join(conn(noScope.codexHome), 'queue')), false);
 
   const bad = await runHook('flush.js', '{not json', none.home);
   assert.equal(bad.code, 0);
