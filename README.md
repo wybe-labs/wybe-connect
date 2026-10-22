@@ -20,10 +20,14 @@ Install and pairing take one pasted sentence; see "Getting started".
 
 | Scope | Consent label (nb) | What flows | When |
 |---|---|---|---|
-| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session |
+| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session; and (Claude Code) from the background distil: at most every 6 hours, and when you press «Importer» |
 | `conversations` | Samtalesammendrag | a title and a summary of a past chat, and its messages only if you ask for them | only when you explicitly ask Claude to import a conversation |
 | `sessions:light` | Arbeidsøkter — hva du ba om | per session: project name (the folder name), the **names** of your git remotes (never their URLs), branch, files Claude wrote or edited, start/end time, and **your own prompts**. Zero assistant text, zero tool output, zero thinking. Prompts written by Claude to its own subagents are excluded; text a hook injected into your prompt is stripped. | automatically at every stop, before every context compaction, and at session end |
 | `sessions:full` | Arbeidsøkter — alt innhold | everything in `sessions:light` plus Claude's replies and every tool call's input and output (each clipped to 4000 characters). Thinking blocks still never leave. | same as above |
+
+Claude Code sends no `sessions:*` payload: its hooks only note the session, and a background
+distil on your machine turns your sessions into short `remember` facts (see "The background
+distil"). The `sessions:*` rows apply to Codex and Cursor.
 
 With no `sessions:*` scope the hooks build nothing and send nothing. Every payload carries a
 `redaction.families` count (which families hit, how often, never the values) so a review can
@@ -74,9 +78,10 @@ Then paste one of these with your own node address:
 
 Claude runs the `connect` skill, which calls the plugin's own `wybe` MCP server: a browser
 opens on `auth.wybe.me`, you log in with your passkey and tick the scopes. That one sign-in
-serves both the hooks and the `remember` tool; nothing to copy, no `claude mcp add`. Claude
-then runs the first sync (the opening kit: projects, how you
-work, tools, ideas, research, recurring tasks; work only). From then on the hooks do the rest.
+serves both the hooks and the `remember` tool; nothing to copy, no `claude mcp add`. The first
+sync then runs by itself: the node asks for an import when the connection is made, and the
+plugin distils your recent sessions and memory in the background. There is no step for you.
+From then on the hooks do the rest.
 
 Revoking the pairing (under "Mine koblinger" on your node) stops the flow. Erasing what the
 node learned from this assistant is a separate, explicit action there. Both are stated on the
@@ -172,8 +177,49 @@ generated from `texts/standing.json`, the file the node's connect cards pin agai
 
 ## How it works
 
+### The background distil (Claude Code)
+
 ```
-Claude Code ──hook stdin (transcript_path)──▶ hooks/flush.js
+Stop / SessionEnd / PreCompact ─▶ hooks/flush.js ─ one note file per transcript (lock-free)
+                                        │ the scheduler (lib/distil.js maybeRun, under the distil lock)
+                                        ▼
+            bin/distil-run.js (detached watchdog, ends the run at 30 min)
+                │ claude -p  --tools Read,Glob,Grep  --strict-mcp-config (only the plugin's `wybe`)
+                │   reads the noted transcript ranges, calls remember … then distil_done
+                │   └▶ bin/mcp-proxy.js in distil mode: redacts, appends to the run's OUTBOX
+                ▼
+            delivery: each outbox record ─ remember + idempotency_key ─▶ the node
+                      each ack (ok and a numeric `stored`) ─▶ the run's ACKS file
+```
+
+It runs on your machine and on your own Claude subscription. Nothing raw leaves the machine:
+only the facts the run chose, redacted again by `lib/redact.js`. What makes it exactly once:
+
+- **Produce, then deliver.** The run never talks to the node. Until it calls `distil_done`,
+  nothing is sent, so a run that dies is simply redone. Once it has, its outbox is frozen: a
+  retry sends only the records without an ack, with the same `idempotency_key`, and claude never
+  runs again for them.
+- **Success is the node's acknowledgement.** A record counts only when the node answered
+  `ok: true` with a numeric `stored`. An import counts only with `import_done: true`. An empty
+  outbox, a run without `distil_done`, or claude's exit code is never a success.
+- **Checksummed, append-only files** (`lib/ledger.js`). Each line carries its own checksum. A
+  torn or altered line never counts: a torn outbox redoes the run, and a torn ack re-sends that
+  record.
+- **A real lock** (`lib/lock.js`). A live holder is never taken over, however slow. Only a dead
+  holder's lock is, and a holder checks its token before it writes. The hooks need no lock.
+- **Bounded, never silent.** Pending plus the run in flight hold at most 2000 transcripts.
+  Beyond that, notes wait on disk. A failed run's transcripts go back in their place. Past
+  20 000 waiting notes, a note is dropped with a count, and the next session start says so.
+- Each transcript is read from where its last delivered run stopped. A failure retries after
+  30 minutes. SessionStart tells Claude once per kind of problem.
+
+The node should keep each `idempotency_key` once. Until it does, a reply lost after the node
+stored the facts (beyond the 60 s delivery timeout) means that one record can be stored twice.
+
+### Codex and Cursor
+
+```
+Codex / Cursor ──hook stdin (transcript)──▶ hooks/flush.js
                                                 │ delta since the cursor (~/.wybe-connect/state/<id>.json)
                                                 │ scope-aware payload (lib/transcript.js)
                                                 │ redaction (lib/redact.js)
@@ -212,7 +258,8 @@ flush drains the queue. A queue older than 7 days or larger than 50 MB loses its
 
 ```
 lib/            shared, dependency-free: redact, transcript, codex-rollout, cursor-spool, post, oauth,
-                queue, home, flush, session-context, hook-io, connect-cli
+                queue, home, flush, session-context, hook-io, connect-cli, mcp-proxy,
+                distil (the background distil), ledger (checksummed records), lock
 packages/
   claude-code/  the Claude Code plugin (plugin.json, hooks/, bin/connect.js, skills/connect)
   codex/        the Codex plugin (.codex-plugin/, hooks/, bin/connect.js, skills/connect, AGENTS.md
