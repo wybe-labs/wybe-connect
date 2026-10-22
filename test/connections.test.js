@@ -3,11 +3,13 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import {
   NODE_ENV, connectionKey, connectionPaths, migrateLegacy, listConnections, defaultConnection,
-  findConnection, saveConnection, useConnection, removeConnection, resolveSession, sessionPaths,
+  findConnection, saveConnection, checkSave, useConnection, removeConnection, resolveSession, sessionPaths,
 } from '../lib/connections.js';
 import { loadCredentials } from '../lib/home.js';
+import { createDelivery, newSummary } from '../lib/flush.js';
 
 const TOKEN_A = ['wat_', 'a1Aa2Bb3Cc4Dd5Ee6Ff7Gg8Hh9Ii0Jj'].join('');
 const TOKEN_B = ['wat_', 'b1Kk2Ll3Mm4Nn5Oo6Pp7Qq8Rr9Ss0Tt'].join('');
@@ -112,7 +114,7 @@ test('resolveSession: WYBE_CONNECT_NODE picks for a new session; an unknown choi
   assert.equal(resolveSession(root, { sessionId: 'e1', env: {} }), 'dittfirma.wybe.me', 'the choice sticks to the session');
   assert.equal(resolveSession(root, { sessionId: 'e2', env: { [NODE_ENV]: 'https://dittfirma.wybe.me' } }), 'dittfirma.wybe.me');
   assert.equal(resolveSession(root, { sessionId: 'e3', env: { [NODE_ENV]: 'typo.wybe.me' } }), null);
-  assert.equal(resolveSession(root, { sessionId: 'e3', env: {} }), 'andrefirma.wybe.me', 'an unknown choice pins nothing');
+  assert.equal(resolveSession(root, { sessionId: 'e3', env: {} }), null, 'and the session stays unconnected, not on the default');
 });
 
 test('useConnection --session: switches one session only; unknown is refused', () => {
@@ -140,6 +142,108 @@ test('removeConnection: deletes the grant and its queue, the default falls to th
   assert.equal(resolveSession(root, { sessionId: 'r1', env: {} }), null, 'never moves a session to another node by itself');
   assert.equal(resolveSession(root, { sessionId: 'r2', env: {} }), 'dittfirma.wybe.me');
   assert.throws(() => removeConnection(root, 'andrefirma.wybe.me'), /no connection named/);
+});
+
+test('saveConnection: a name already held by another node is refused, so its grant and queue never pass to that node', () => {
+  const root = home();
+  saveConnection(root, creds('https://dittfirma.wybe.me', TOKEN_A));
+  assert.throws(() => saveConnection(root, creds('https://andrefirma.wybe.me', TOKEN_B), { name: 'dittfirma.wybe.me' }), /dittfirma\.wybe\.me is https:\/\/dittfirma\.wybe\.me; remove it first or choose another --name/);
+  assert.throws(() => checkSave(root, 'https://andrefirma.wybe.me', 'dittfirma.wybe.me'), /remove it first/, 'the CLI can refuse before the browser opens');
+  assert.equal(loadCredentials(connectionPaths(root, 'dittfirma.wybe.me')).accessToken, TOKEN_A);
+  assert.equal(saveConnection(root, creds('https://dittfirma.wybe.me/', TOKEN_B)), 'dittfirma.wybe.me', 'the same node again replaces its own grant');
+  assert.equal(loadCredentials(connectionPaths(root, 'dittfirma.wybe.me')).accessToken, TOKEN_B);
+});
+
+test('connectionKey: IPv6, very long hosts and a trailing dot still give a findable name', () => {
+  for (const url of ['http://[::1]:8443', `https://${'a'.repeat(63)}.example.com`, `https://${'b'.repeat(63)}.${'c'.repeat(63)}.${'d'.repeat(63)}.example.com`, 'https://dittfirma.wybe.me.']) {
+    const root = home();
+    const key = saveConnection(root, creds(url, TOKEN_A));
+    assert.deepEqual(listConnections(root).map((c) => c.key), [key], url);
+    assert.equal(findConnection(root, url), key, url);
+    assert.ok(key.length <= 120, url);
+  }
+  assert.equal(connectionKey('https://dittfirma.wybe.me.'), 'dittfirma.wybe.me');
+  assert.throws(() => saveConnection(home(), creds('https://x.wybe.me', TOKEN_A), { name: 'foo.' }), /connection name/, 'Windows drops a trailing dot');
+});
+
+test('migrateLegacy: an unreadable old credentials.json is set aside, not lost, and blocks nothing', () => {
+  const root = home();
+  writeFileSync(join(root, 'credentials.json'), '{"version":2,"nope":1}');
+  assert.doesNotThrow(() => saveConnection(root, creds('https://dittfirma.wybe.me', TOKEN_A)));
+  assert.equal(existsSync(join(root, 'credentials.json')), false);
+  assert.equal(readFileSync(join(root, 'credentials.unreadable.json'), 'utf8'), '{"version":2,"nope":1}');
+  assert.equal(listConnections(root).length, 1);
+  writeFileSync(join(root, 'credentials.json'), 'not json');
+  assert.equal(listConnections(root).length, 1);
+  assert.equal(readdirSync(root).filter((f) => f.startsWith('credentials.unreadable')).length, 2, 'a second one does not overwrite the first');
+});
+
+test('migrateLegacy: killed at any step, the next call finishes it with nothing stranded', () => {
+  for (let crashAt = 1; crashAt <= 5; crashAt++) {
+    const root = home();
+    writeFileSync(join(root, 'credentials.json'), JSON.stringify({ version: 1, ...creds('https://dittfirma.wybe.me', TOKEN_A) }));
+    mkdirSync(join(root, 'queue'));
+    writeFileSync(join(root, 'queue', '000000000000001-0-aa.json'), '{"n":1}');
+    writeFileSync(join(root, 'queue', '000000000000002-0-bb.json'), '{"n":2}');
+    mkdirSync(join(root, 'state'));
+    writeFileSync(join(root, 'state', 'open-questions.json'), '{"open_questions":[]}');
+    const r = spawnSync(process.execPath, [join(import.meta.dirname, 'fixtures', 'crash-migrate.mjs')], { env: { ...process.env, CRASH_AT: String(crashAt), MIGRATE_ROOT: root }, encoding: 'utf8' });
+    assert.ok(r.status === 9 || r.status === 0, `crash at ${crashAt}: ${r.stderr}`);
+    const key = resolveSession(root, { env: {} });
+    assert.equal(key, 'dittfirma.wybe.me', `crash at ${crashAt}`);
+    const p = connectionPaths(root, key);
+    assert.equal(loadCredentials(p).accessToken, TOKEN_A);
+    assert.deepEqual(readdirSync(p.queue).sort(), ['000000000000001-0-aa.json', '000000000000002-0-bb.json'], `crash at ${crashAt}`);
+    assert.ok(existsSync(p.openQuestions), `crash at ${crashAt}`);
+    assert.equal(existsSync(join(root, 'credentials.json')), false);
+    assert.deepEqual(existsSync(join(root, 'queue')) ? readdirSync(join(root, 'queue')) : [], [], `crash at ${crashAt}: old queue stranded`);
+  }
+});
+
+test('a session pinned to one node goes quiet when its name is reused for another node', () => {
+  const root = home();
+  saveConnection(root, creds('https://dittfirma.wybe.me', TOKEN_A), { name: 'work' });
+  saveConnection(root, creds('https://andrefirma.wybe.me', TOKEN_B));
+  assert.equal(resolveSession(root, { sessionId: 'w1', env: { [NODE_ENV]: 'work' } }), 'work');
+  removeConnection(root, 'work');
+  saveConnection(root, creds('https://tredjefirma.wybe.me', TOKEN_B), { name: 'work' });
+  assert.equal(resolveSession(root, { sessionId: 'w1', env: {} }), null);
+  useConnection(root, 'work', { sessionId: 'w1' });
+  assert.equal(resolveSession(root, { sessionId: 'w1', env: {} }), 'work', 'an explicit use re-pins it');
+});
+
+test('an unknown WYBE_CONNECT_NODE at a session\'s first hook keeps that session unconnected later too', () => {
+  const root = home();
+  saveConnection(root, creds('https://dittfirma.wybe.me', TOKEN_A));
+  assert.equal(resolveSession(root, { sessionId: 'x1', env: { [NODE_ENV]: 'typo' } }), null);
+  assert.equal(resolveSession(root, { sessionId: 'x1', env: {} }), null);
+  assert.equal(resolveSession(root, { sessionId: 'x2', env: {} }), 'dittfirma.wybe.me', 'a session without a choice still gets the default');
+  useConnection(root, 'dittfirma.wybe.me', { sessionId: 'x1' });
+  assert.equal(resolveSession(root, { sessionId: 'x1', env: {} }), 'dittfirma.wybe.me');
+});
+
+test('removing a connection while a flush refreshes its token does not bring it back', async () => {
+  const root = home();
+  saveConnection(root, { ...creds('https://dittfirma.wybe.me', TOKEN_A), refreshToken: 'wrt_x' });
+  const p = connectionPaths(root, 'dittfirma.wybe.me');
+  let calls = 0;
+  const fetchImpl = async (url) => {
+    calls += 1;
+    if (calls === 1) {
+      removeConnection(root, 'dittfirma.wybe.me');
+      return new Response('', { status: 401 });
+    }
+    if (String(url).endsWith('/oauth/token')) return new Response(JSON.stringify({ access_token: TOKEN_B, token_type: 'Bearer', refresh_token: 'wrt_y', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+    return new Response(JSON.stringify({ jsonrpc: '2.0', id: 1, result: { structuredContent: { open_questions: [{ id: 'q', text: 't' }] } } }), { status: 200, headers: { 'content-type': 'application/json', 'mcp-session-id': 's' } });
+  };
+  const summary = newSummary('Stop');
+  const d = createDelivery({ credentials: loadCredentials(p), paths: p, fetchImpl, summary });
+  await d.deliver({ scope: 'sessions:light', prompts: [] });
+  assert.equal(existsSync(join(root, 'connections', 'dittfirma.wybe.me')), false);
+
+  const gone = await createDelivery({ credentials: { ...creds('https://dittfirma.wybe.me', TOKEN_A) }, paths: p, fetchImpl: async () => new Response('', { status: 503 }), summary: newSummary('Stop') });
+  await gone.deliver({ scope: 'sessions:light', prompts: [] });
+  assert.equal(existsSync(join(root, 'connections', 'dittfirma.wybe.me')), false, 'nothing is queued for a removed connection');
 });
 
 test('sessionPaths: credentials, queue and question caches per connection; cursors and spool shared; none when not connected', () => {

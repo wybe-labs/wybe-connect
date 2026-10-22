@@ -6,6 +6,7 @@
 // here prints.
 
 import { basename } from 'node:path';
+import { existsSync } from 'node:fs';
 import { paths as defaultPaths, loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
 import { parseTranscript, readDelta, buildSession, gitRemoteNames } from './transcript.js';
 import { parseRollout, rolloutHead } from './codex-rollout.js';
@@ -47,6 +48,9 @@ export function newSummary(event) {
  */
 export function createDelivery({ credentials, paths, fetchImpl = globalThis.fetch, now = Date.now, summary }) {
   let creds = credentials;
+  // `connect remove` may delete the connection while this flush runs; writing a refreshed token, a
+  // question cache or a queue item afterwards would bring it back on disk
+  const removed = () => !existsSync(paths.credentials);
   const refresh = async (c) => {
     const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now() });
     if (!next) return null;
@@ -56,10 +60,10 @@ export function createDelivery({ credentials, paths, fetchImpl = globalThis.fetc
     const { outcome, credentials: after } = await reportSession({ credentials: creds, session, fetchImpl, refresh });
     if (after !== creds) {
       creds = after;
-      saveCredentials(creds, paths);
+      if (!removed()) saveCredentials(creds, paths);
     }
     if (outcome.ok) {
-      if (outcome.openQuestions.length) {
+      if (outcome.openQuestions.length && !removed()) {
         writeJsonPrivate(paths.openQuestions, { fetched_at: new Date(now()).toISOString(), open_questions: outcome.openQuestions });
         summary.openQuestions = outcome.openQuestions.length;
       }
@@ -79,6 +83,7 @@ export function createDelivery({ credentials, paths, fetchImpl = globalThis.fetc
       return;
     }
     if (offline) summary.lastOutcome = { kind: 'offline', message: 'queued without a network attempt' };
+    if (removed()) return;
     enqueue(paths.queue, redacted.value, { now: now() });
     summary.queued += 1;
   };

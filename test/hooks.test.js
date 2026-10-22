@@ -111,14 +111,18 @@ test('flush hook: unreachable node -> exit 0, one stderr line without the token,
 
 test('flush hook: once the node answers, the new delta is sent and the queue drains; open questions are cached', async () => {
   const { home, project, transcript } = sandbox();
-  writeCredentials(home, REFUSED, ['sessions:full']);
+  // the node is down for the first flush and back on the same address for the second
+  const node = await fakeNodeServer();
+  const port = node.server.address().port;
+  writeCredentials(home, node.base, ['sessions:full']);
+  await new Promise((resolve) => node.server.close(resolve));
   const first = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home);
   assert.equal(first.code, 0);
   assert.equal(readdirSync(join(conn(home), 'queue')).length, 1);
+  assert.equal(node.seen.length, 0);
 
-  const node = await fakeNodeServer();
+  await new Promise((resolve) => node.server.listen(port, '127.0.0.1', resolve));
   try {
-    writeCredentials(home, node.base, ['sessions:full']);
     appendFileSync(transcript, `${JSON.stringify({ type: 'user', uuid: 'u-9', timestamp: '2026-09-22T09:10:00.000Z', cwd: project, sessionId: 'sess', gitBranch: 'feat/retry', message: { role: 'user', content: 'And write the changelog line.' } })}\n`);
     const r = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'SessionEnd' }, home);
     assert.equal(r.code, 0);

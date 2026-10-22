@@ -11,7 +11,7 @@
 
 import { connect, ALL_SCOPES } from './oauth.js';
 import { harnessHome } from './home.js';
-import { connectionPaths, listConnections, saveConnection, useConnection, removeConnection, checkedName, NODE_ENV } from './connections.js';
+import { connectionPaths, listConnections, saveConnection, useConnection, removeConnection, checkedName, checkSave, NODE_ENV } from './connections.js';
 
 const USAGE = [
   'usage: connect.js <node-url> [--scopes remember,conversations,sessions:light,sessions:full] [--name <name>]',
@@ -100,6 +100,7 @@ export async function runConnect({ harness, clientName, nextSteps, argv = proces
       out.write('The pairing on the node stays until you revoke it there (the Wybe portal\'s list of connected assistants).\n');
       return 0;
     }
+    checkSave(root, parsed.nodeUrl, parsed.name ?? null); // a name another node holds is refused before the browser opens
     const credentials = await connectImpl(parsed.nodeUrl, { scopes: parsed.scopes, clientName, log: (line) => err.write(`${line}\n`) });
     const key = saveConnection(root, credentials, { name: parsed.name ?? null });
     const others = listConnections(root).filter((c) => c.key !== key).map((c) => c.key);
