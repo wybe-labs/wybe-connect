@@ -14,9 +14,11 @@ const FIXTURE = join(import.meta.dirname, 'fixtures', 'session.jsonl');
 const TOKEN = ['wat_', 'p0Oi9Uy8Tr7Ew6Qa5Sd4Fg3Hj2Kl1Zx0Cv9Bn8Mm'].join('');
 const REFUSED = 'http://127.0.0.1:9';
 
-function runHook(script, input, home) {
+function runHook(script, input, home, env = {}) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [join(HOOKS, script)], { env: { ...process.env, WYBE_CONNECT_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const base = { ...process.env };
+    delete base.WYBE_CONNECT_NODE;
+    const child = spawn(process.execPath, [join(HOOKS, script)], { env: { ...base, WYBE_CONNECT_HOME: home, ...env }, stdio: ['pipe', 'pipe', 'pipe'] });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => { stdout += d; });
@@ -38,9 +40,12 @@ function sandbox() {
   return { dir, home, project, transcript };
 }
 
+/** The one connection these tests use, in the layout of lib/connections.js. */
+const conn = (home) => join(home, 'connections', 'node');
+
 function writeCredentials(home, endpointBase, scopes) {
-  mkdirSync(home, { recursive: true });
-  writeFileSync(join(home, 'credentials.json'), JSON.stringify({
+  mkdirSync(conn(home), { recursive: true });
+  writeFileSync(join(conn(home), 'credentials.json'), JSON.stringify({
     version: 1, nodeUrl: endpointBase, mcpEndpoint: `${endpointBase}/mcp`, issuer: REFUSED, tokenEndpoint: `${REFUSED}/oauth/token`,
     clientId: 'c1', accessToken: TOKEN, refreshToken: null, expiresAt: null, scopes,
   }));
@@ -86,9 +91,9 @@ test('flush hook: unreachable node -> exit 0, one stderr line without the token,
   assert.equal(cursor.byteOffset, statSync(transcript).size);
   assert.equal(cursor.seq, 1);
 
-  const queued = readdirSync(join(home, 'queue'));
+  const queued = readdirSync(join(conn(home), 'queue'));
   assert.equal(queued.length, 1);
-  const payload = JSON.parse(readFileSync(join(home, 'queue', queued[0]), 'utf8'));
+  const payload = JSON.parse(readFileSync(join(conn(home), 'queue', queued[0]), 'utf8'));
   assert.equal(payload.scope, 'sessions:light');
   assert.deepEqual(payload.project, { name: 'project', git_remotes: ['origin'], branch: 'feat/retry' });
   assert.deepEqual(payload.delta, { seq: 1, event: 'Stop', byte_from: 0, byte_to: statSync(transcript).size, restarted: false });
@@ -100,25 +105,29 @@ test('flush hook: unreachable node -> exit 0, one stderr line without the token,
 
   const again = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'PreCompact' }, home);
   assert.equal(again.code, 0);
-  assert.equal(readdirSync(join(home, 'queue')).length, 1, 'nothing new to build, the queued item stays');
+  assert.equal(readdirSync(join(conn(home), 'queue')).length, 1, 'nothing new to build, the queued item stays');
   assert.equal(JSON.parse(readFileSync(join(home, 'state', '11111111-2222-4333-8444-555555555555.json'), 'utf8')).seq, 1);
 });
 
 test('flush hook: once the node answers, the new delta is sent and the queue drains; open questions are cached', async () => {
   const { home, project, transcript } = sandbox();
-  writeCredentials(home, REFUSED, ['sessions:full']);
+  // the node is down for the first flush and back on the same address for the second
+  const node = await fakeNodeServer();
+  const port = node.server.address().port;
+  writeCredentials(home, node.base, ['sessions:full']);
+  await new Promise((resolve) => node.server.close(resolve));
   const first = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home);
   assert.equal(first.code, 0);
-  assert.equal(readdirSync(join(home, 'queue')).length, 1);
+  assert.equal(readdirSync(join(conn(home), 'queue')).length, 1);
+  assert.equal(node.seen.length, 0);
 
-  const node = await fakeNodeServer();
+  await new Promise((resolve) => node.server.listen(port, '127.0.0.1', resolve));
   try {
-    writeCredentials(home, node.base, ['sessions:full']);
     appendFileSync(transcript, `${JSON.stringify({ type: 'user', uuid: 'u-9', timestamp: '2026-09-22T09:10:00.000Z', cwd: project, sessionId: 'sess', gitBranch: 'feat/retry', message: { role: 'user', content: 'And write the changelog line.' } })}\n`);
     const r = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'SessionEnd' }, home);
     assert.equal(r.code, 0);
     assert.equal(r.stderr, '');
-    assert.equal(readdirSync(join(home, 'queue')).length, 0, 'the queue drained');
+    assert.equal(readdirSync(join(conn(home), 'queue')).length, 0, 'the queue drained');
     const calls = node.seen.filter((c) => c.rpc === 'tools/call');
     assert.equal(calls.length, 2);
     for (const c of node.seen) assert.equal(c.auth, `Bearer ${TOKEN}`);
@@ -127,7 +136,7 @@ test('flush hook: once the node answers, the new delta is sent and the queue dra
     assert.equal(calls[0].params.arguments.session.prompts.at(-1).text, 'And write the changelog line.');
     assert.equal(calls[1].params.arguments.session.delta.seq, 1, 'then the queued one');
     assert.ok(JSON.stringify(calls[1].params.arguments.session).includes('PLANTED-ASSISTANT-SENTENCE'), 'sessions:full carries assistant text');
-    const cached = JSON.parse(readFileSync(join(home, 'state', 'open-questions.json'), 'utf8'));
+    const cached = JSON.parse(readFileSync(join(conn(home), 'open-questions.json'), 'utf8'));
     assert.deepEqual(cached.open_questions, [{ id: 'q-7', text: 'Hva bruker du Claude Code mest til?' }]);
 
     const start = await runHook('session-start.js', { session_id: 'sess2', hook_event_name: 'SessionStart', source: 'startup' }, home);
@@ -148,7 +157,7 @@ test('hooks without a credential do nothing and exit 0; malformed stdin exits 0 
   const { home, project, transcript } = sandbox();
   const f = await runHook('flush.js', { session_id: 's', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home);
   assert.deepEqual(f, { code: 0, stdout: '', stderr: '' });
-  assert.equal(existsSync(join(home, 'queue')), false);
+  assert.equal(existsSync(join(conn(home), 'queue')), false);
   const s = await runHook('session-start.js', { hook_event_name: 'SessionStart' }, home);
   assert.deepEqual(s, { code: 0, stdout: '', stderr: '' });
   const bad = await runHook('flush.js', '{not json', home);
@@ -157,11 +166,75 @@ test('hooks without a credential do nothing and exit 0; malformed stdin exits 0 
   assert.equal(bad.stderr.trim().split('\n').length, 1);
 });
 
+function writeConnection(home, name, endpointBase, token) {
+  mkdirSync(join(home, 'connections', name), { recursive: true });
+  writeFileSync(join(home, 'connections', name, 'credentials.json'), JSON.stringify({
+    version: 1, nodeUrl: endpointBase, mcpEndpoint: `${endpointBase}/mcp`, issuer: REFUSED, tokenEndpoint: `${REFUSED}/oauth/token`,
+    clientId: `c-${name}`, accessToken: token, refreshToken: null, expiresAt: null, scopes: ['sessions:light'],
+  }));
+}
+
+test('two connections: each session sends only to the node it uses; SessionStart says which and how to switch', async () => {
+  const { dir, home, project, transcript } = sandbox();
+  const transcript2 = join(dir, '66666666-7777-4888-9999-000000000000.jsonl');
+  copyFileSync(FIXTURE, transcript2);
+  const a = await fakeNodeServer();
+  const b = await fakeNodeServer();
+  try {
+    writeConnection(home, 'node-a', a.base, TOKEN);
+    writeConnection(home, 'node-b', b.base, `${TOKEN}B`);
+    writeFileSync(join(home, 'connections.json'), JSON.stringify({ version: 1, recent: ['node-b', 'node-a'] }));
+
+    const startA = await runHook('session-start.js', { session_id: 'sess-a', hook_event_name: 'SessionStart', source: 'startup' }, home, { WYBE_CONNECT_NODE: 'node-a' });
+    const ctxA = JSON.parse(startA.stdout).hookSpecificOutput.additionalContext;
+    assert.ok(ctxA.includes(`Wybe colleague at ${a.base}`), ctxA);
+    assert.match(ctxA, /This session sends to the connection node-a; the person is also connected to node-b\./);
+    assert.match(ctxA, /connect\.js" use <name> --session sess-a/);
+    assert.ok(!ctxA.includes(TOKEN));
+
+    // no WYBE_CONNECT_NODE from here on: sess-a keeps node-a, sess-b gets the default node-b
+    assert.equal((await runHook('flush.js', { session_id: 'sess-a', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home)).code, 0);
+    assert.equal((await runHook('flush.js', { session_id: 'sess-b', transcript_path: transcript2, cwd: project, hook_event_name: 'Stop' }, home)).code, 0);
+
+    const callsA = a.seen.filter((c) => c.rpc === 'tools/call');
+    const callsB = b.seen.filter((c) => c.rpc === 'tools/call');
+    assert.deepEqual(callsA.map((c) => c.params.arguments.session.transcript_id), ['11111111-2222-4333-8444-555555555555']);
+    assert.deepEqual(callsB.map((c) => c.params.arguments.session.transcript_id), ['66666666-7777-4888-9999-000000000000']);
+    for (const c of a.seen) assert.equal(c.auth, `Bearer ${TOKEN}`);
+    for (const c of b.seen) assert.equal(c.auth, `Bearer ${TOKEN}B`);
+    assert.ok(existsSync(join(home, 'connections', 'node-a', 'open-questions.json')));
+    assert.ok(existsSync(join(home, 'connections', 'node-b', 'open-questions.json')));
+  } finally {
+    a.server.close();
+    b.server.close();
+  }
+});
+
+test('an old single credentials.json keeps working: the first hook moves it and its queue under its node', async () => {
+  const { home, project, transcript } = sandbox();
+  mkdirSync(join(home, 'queue'), { recursive: true });
+  const node = await fakeNodeServer();
+  try {
+    writeFileSync(join(home, 'credentials.json'), JSON.stringify({
+      version: 1, nodeUrl: node.base, mcpEndpoint: `${node.base}/mcp`, issuer: REFUSED, tokenEndpoint: `${REFUSED}/oauth/token`,
+      clientId: 'c1', accessToken: TOKEN, refreshToken: null, expiresAt: null, scopes: ['sessions:light'],
+    }));
+    const r = await runHook('flush.js', { session_id: 'sess', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home);
+    assert.deepEqual(r, { code: 0, stdout: '', stderr: '' });
+    const key = new URL(node.base).host.replace(':', '_');
+    assert.equal(existsSync(join(home, 'credentials.json')), false);
+    assert.equal(JSON.parse(readFileSync(join(home, 'connections', key, 'credentials.json'), 'utf8')).accessToken, TOKEN);
+    assert.equal(node.seen.filter((c) => c.rpc === 'tools/call').length, 1);
+  } finally {
+    node.server.close();
+  }
+});
+
 test('a grant without a sessions scope never builds or sends anything', async () => {
   const { home, project, transcript } = sandbox();
   writeCredentials(home, REFUSED, ['remember']);
   const r = await runHook('flush.js', { session_id: 's', transcript_path: transcript, cwd: project, hook_event_name: 'Stop' }, home);
   assert.deepEqual(r, { code: 0, stdout: '', stderr: '' });
-  assert.equal(existsSync(join(home, 'queue')), false);
-  assert.equal(existsSync(join(home, 'state')), false);
+  assert.equal(existsSync(join(conn(home), 'queue')), false);
+  assert.equal(existsSync(join(home, 'state', '11111111-2222-4333-8444-555555555555.json')), false, 'no cursor: nothing was built');
 });

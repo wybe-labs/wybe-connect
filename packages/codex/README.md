@@ -20,7 +20,7 @@ only after you have reviewed and trusted them once.
 | `hooks/hooks.json` | `SessionStart` -> `session-start.js`; `Stop` and `PreCompact` -> `flush.js`; `SessionEnd` -> `flush.js --offline` |
 | `hooks/session-start.js` | hands the model the standing "remember work facts" line and the cached open questions (`hookSpecificOutput.additionalContext`) |
 | `hooks/flush.js` | rollout delta -> scope-aware payload (`lib/codex-rollout.js` + `lib/transcript.js`) -> redaction -> `report_session`, or the local queue |
-| `bin/connect.js` | the one-time OAuth flow as client `wybe-connect (Codex)`; stores the grant in `~/.wybe-connect/codex/credentials.json` |
+| `bin/connect.js` | the one-time OAuth flow as client `wybe-connect (Codex)`; stores the grant as a connection under `~/.wybe-connect/codex/connections/<name>/`; also `list`, `use`, `remove` |
 | `AGENTS.snippet.md` | the standing line for `~/.codex/AGENTS.md`, for sessions where the hooks are not trusted yet |
 | `config.toml.snippet` | the MCP entry (`[mcp_servers.wybe] url = ...`) for the interactive tools; then `codex mcp login wybe` |
 | `lib/` | a byte-identical copy of the repository's `lib/` (`npm run sync-lib`; a test guards it) |

@@ -10,7 +10,9 @@
 // Exit 0 always, one JSON object on stdout, at most one line on stderr, never a secret.
 
 import { readHookInput, failOpen, queueNotice } from '../lib/hook-io.js';
-import { paths as pathsOf, harnessHome, loadCredentials, readJson } from '../lib/home.js';
+import { fileURLToPath } from 'node:url';
+import { harnessHome, loadCredentials, readJson } from '../lib/home.js';
+import { sessionPaths, sessionNote } from '../lib/connections.js';
 import { buildContext } from '../lib/session-context.js';
 import { record, flushConversation, followupFor, conversationIdOf } from '../lib/cursor-spool.js';
 
@@ -19,10 +21,15 @@ let event = null;
 try {
   const input = await readHookInput();
   event = typeof input.hook_event_name === 'string' ? input.hook_event_name : null;
-  const paths = pathsOf(harnessHome('cursor'));
+  // every event resolves the conversation's own connection (lib/connections.js)
+  const root = harnessHome('cursor');
+  const sessionId = conversationIdOf(input);
+  const paths = sessionPaths(root, { sessionId });
   switch (event) {
     case 'sessionStart': {
-      const context = buildContext({ credentials: loadCredentials(paths), cached: readJson(paths.openQuestions) });
+      let context = buildContext({ credentials: loadCredentials(paths), cached: readJson(paths.openQuestions) });
+      const note = context && sessionNote(root, paths.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
+      if (note) context += `\n${note}`;
       if (context) out = { additional_context: context };
       break;
     }

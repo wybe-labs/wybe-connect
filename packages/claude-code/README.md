@@ -17,7 +17,7 @@ The `connect` skill takes it from there (see `skills/connect/SKILL.md`).
 |---|---|
 | `hooks/session-start.js` | hands Claude the standing "remember work facts" instruction and the node's cached open questions |
 | `hooks/flush.js` | Stop / SessionEnd / PreCompact: transcript delta -> scope-aware payload -> redaction -> `report_session` (or the local queue) |
-| `bin/connect.js` | the one-time OAuth flow; stores the grant in `~/.wybe-connect/credentials.json` |
+| `bin/connect.js` | the one-time OAuth flow; stores the grant as a connection under `~/.wybe-connect/connections/<name>/`; also `list`, `use`, `remove` |
 | `lib/` | a byte-identical copy of the repository's `lib/` (Claude Code copies only this directory on install; `npm run sync-lib` refreshes it and a test guards it) |
 
 What leaves your machine, per scope, is in the root `README.md`.

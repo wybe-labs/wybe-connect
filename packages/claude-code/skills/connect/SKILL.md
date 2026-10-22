@@ -30,7 +30,7 @@ start; the person is granting access to their work context and should hear what 
    and to paste the sentence again once the plugin is active.
 
 3. **Run the OAuth flow** (this stores the credential the hooks use, in
-   `~/.wybe-connect/credentials.json`, owner-only):
+   `~/.wybe-connect/connections/<node>/credentials.json`, owner-only):
    ```
    node "${CLAUDE_PLUGIN_ROOT}/bin/connect.js" https://<slug>.wybe.me
    ```
@@ -39,6 +39,10 @@ start; the person is granting access to their work context and should hear what 
    `sessions:full`). Wait for the command to print `Connected to ...`. If it prints an URL
    instead of opening a browser, show that URL to the person.
    Never paste, read or echo the contents of `credentials.json`.
+   Connecting a second node (or a second account, with `--name <name>`) keeps the first: each
+   is its own connection, and the newest becomes the default for new sessions. `connect.js list`
+   shows them, `connect.js use <name>` changes the default, `connect.js use <name> --session <id>`
+   moves one session, `connect.js remove <name>` deletes one locally.
 
 4. **Add the MCP server for the interactive tools** (`remember`, `import_conversation`,
    `pending_questions`), which use Claude Code's own OAuth session:
@@ -66,7 +70,7 @@ start; the person is granting access to their work context and should hear what 
 
 ## Never
 
-- Never read or print `~/.wybe-connect/credentials.json`, a `wat_`/`wrt_` token, or an
+- Never read or print a `credentials.json` under `~/.wybe-connect/`, a `wat_`/`wrt_` token, or an
   `Authorization` header.
 - Never send anything personal, about other people, or any credential through `remember`.
   Work only ("kun jobb").
