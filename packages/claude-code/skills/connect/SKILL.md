@@ -1,6 +1,6 @@
 ---
 name: connect
-description: Connect this Claude Code to the person's Wybe colleague (their Wybe node) so that hooks feed it redacted session summaries and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me", "Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me", "Koble til Wybe", "Connect me to my Wybe colleague at https://<slug>.wybe.me", "connect to Wybe", "wybe connect", or any request to pair, link or hook up Claude Code with a Wybe node URL.
+description: Connect this Claude Code to the person's Wybe colleague (their Wybe node) so that a background distil feeds it the redacted essence of their work and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me", "Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me", "Koble til Wybe", "Connect me to my Wybe colleague at https://<slug>.wybe.me", "connect to Wybe", "wybe connect", or any request to pair, link or hook up Claude Code with a Wybe node URL.
 ---
 
 # Connect to Wybe
@@ -11,7 +11,9 @@ The person pasted (or said) one of these, with their own node URL:
 
 > Connect me to my Wybe AI colleague at https://dittfirma.wybe.me
 
-Your job: pair this machine with that node once, then run the first sync. Everything the
+Your job: pair this machine with that node once. The first sync is not yours to run: the node
+asks for it by itself when the connection is made (an import), and the plugin runs it in the
+background. Everything the
 plugin sends afterwards is **write-only** (the node never reads this machine, Claude Code never
 reads the node) and is **redacted on this machine first**. Say that in one sentence before you
 start; the person is granting access to their work context and should hear what it means.
@@ -36,22 +38,13 @@ start; the person is granting access to their work context and should hear what 
    serves the hooks and the tools; there is nothing else to add or copy.
    Never paste, read or echo `~/.wybe-connect/credentials.json`.
 
-4. **First sync: the opening kit.** Ask the person, in their language, for the short version
-   of these six things **about their work only**, then call the `wybe` server's `remember` tool
-   with one item per fact:
-   - projects they are working on right now
-   - how they like to work (arbeidsmåte)
-   - the tools they use
-   - ideas they are carrying around
-   - research they are doing or following
-   - recurring tasks
-   If the answer to `remember` carries `open_questions`, ask the first one right away and pass
-   the answer back with `answers: [<id>]`.
-
-5. **Confirm** in one paragraph: connected to which node, which scopes, that the hooks now
-   flush redacted session deltas at every stop/compaction/end, and that pairing can be revoked
-   under "Mine koblinger" on the node (revoking stops the flow; erasing what was learned is a
-   separate action there).
+4. **Confirm** in one paragraph: connected to which node, and which scopes. Say that the first
+   sync now runs by itself in the background: the node asked for an import, and the plugin
+   distils this machine's recent Claude Code sessions and memory into short work facts. There is
+   no step for the person. From then on, the same distil runs at most every 6 hours. Pairing
+   can be revoked under "Mine koblinger" on the node (revoking stops the flow; erasing what was
+   learned is a separate action there). Do not interview the person or send facts yourself now:
+   the import already covers it, and a second first sync would store everything twice.
 
 ## Never
 

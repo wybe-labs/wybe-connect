@@ -78,9 +78,10 @@ Then paste one of these with your own node address:
 
 Claude runs the `connect` skill, which calls the plugin's own `wybe` MCP server: a browser
 opens on `auth.wybe.me`, you log in with your passkey and tick the scopes. That one sign-in
-serves both the hooks and the `remember` tool; nothing to copy, no `claude mcp add`. Claude
-then runs the first sync (the opening kit: projects, how you
-work, tools, ideas, research, recurring tasks; work only). From then on the hooks do the rest.
+serves both the hooks and the `remember` tool; nothing to copy, no `claude mcp add`. The first
+sync then runs by itself: the node asks for an import when the connection is made, and the
+plugin distils your recent sessions and memory in the background. There is no step for you.
+From then on the hooks do the rest.
 
 Revoking the pairing (under "Mine koblinger" on your node) stops the flow. Erasing what the
 node learned from this assistant is a separate, explicit action there. Both are stated on the
