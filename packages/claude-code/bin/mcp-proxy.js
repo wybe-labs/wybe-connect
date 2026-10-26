@@ -7,6 +7,7 @@
 // goes to that connection's distil scheduler.
 
 import { runStdio } from '../lib/mcp-proxy.js';
+import { STATIC_CLIENTS } from '../lib/oauth.js';
 import { harnessHome } from '../lib/home.js';
 import { NODE_ENV } from '../lib/connections.js';
 import { DISTIL_ENV, requestImport, maybeRun, planPaths } from '../lib/distil.js';
@@ -17,6 +18,7 @@ const distilRun = typeof run === 'string' && /^[A-Za-z0-9-]{1,80}$/.test(run) ? 
 
 runStdio({
   ...(distilRun ? { paths: planPaths({ connection: process.env[NODE_ENV] || null }, root) } : { root }),
+  clientId: STATIC_CLIENTS['claude-code'],
   clientName: 'wybe-connect (Claude Code)',
   distilRun,
   onImportRequest: (requestedAt, p) => {

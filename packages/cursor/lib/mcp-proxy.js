@@ -25,6 +25,7 @@ import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './
 import { NODE_ENV, connectionPaths, defaultConnection, findConnection, checkSave, saveConnection } from './connections.js';
 import { spoolRemember, spoolDone } from './distil.js';
 import { redactValue } from './redact.js';
+import { renewStored } from './connect-cli.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'wybe', version: '0.2.0' });
 
@@ -101,7 +102,7 @@ export function importRequestOf(result) {
  * handle(message) answers one JSON-RPC message (null for a notification); notify(message) is how
  * the proxy pushes notifications/tools/list_changed after a sign-in completes.
  */
-export function createProxy({ paths: fixed = null, root = null, env = process.env, clientName = 'wybe-connect (Claude Code)', notify = () => {}, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, distilRun = null, onImportRequest = null }) {
+export function createProxy({ paths: fixed = null, root = null, env = process.env, clientId = null, clientName = 'wybe-connect (Claude Code)', notify = () => {}, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, distilRun = null, onImportRequest = null }) {
   let pending = null; // { nodeUrl, url, done, error }
   // With `root` (a harness home), the server uses one connection (lib/connections.js). It gets no
   // session id, so it takes the hooks' rule without the session step: WYBE_CONNECT_NODE (unknown
@@ -168,6 +169,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     pending = state;
     connectImpl(nodeUrl, {
       scopes: ALL_SCOPES,
+      clientId,
       clientName,
       fetchImpl,
       onUrl: (url) => { state.url = url; resolveUrl(); },
@@ -209,6 +211,13 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         checkSave(root, origin); // a name another node holds is refused before the browser opens
       } catch (err) {
         return text(`Could not start the sign-in: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+      // Already connected to this node under the same fixed client: renew, never a second grant.
+      const renewed = await renewStored(root, origin, { clientId, fetchImpl });
+      if (renewed) {
+        key = renewed.key;
+        notify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
+        return text(`Connected to ${renewed.credentials.nodeUrl} (scopes: ${renewed.credentials.scopes.join(', ')}); the stored grant was renewed, no new sign-in. The Wybe tools are available now.`);
       }
     }
     const state = await startConnect(origin);
@@ -335,9 +344,9 @@ export const POLL_EVERY_MS = 5 * 60 * 1000;
  * «Importer» press is picked up while Claude Code is open: pending_questions 2 s after start, then
  * every 5 minutes (timers unref'd, so they never keep the process alive).
  */
-export function runStdio({ paths, root = null, env = process.env, clientName, input = process.stdin, output = process.stdout, distilRun = null, onImportRequest = null }) {
+export function runStdio({ paths, root = null, env = process.env, clientId = null, clientName, input = process.stdin, output = process.stdout, distilRun = null, onImportRequest = null }) {
   const write = (m) => output.write(`${JSON.stringify(m)}\n`);
-  const proxy = createProxy({ paths, root, env, clientName, notify: write, distilRun, onImportRequest });
+  const proxy = createProxy({ paths, root, env, clientId, clientName, notify: write, distilRun, onImportRequest });
   if (onImportRequest && !distilRun) {
     const tick = () => { proxy.pollImport().catch(() => {}); };
     setTimeout(tick, POLL_FIRST_MS).unref?.();

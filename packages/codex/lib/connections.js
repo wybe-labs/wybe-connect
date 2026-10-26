@@ -217,6 +217,26 @@ export function saveConnection(root, credentials, { name = null } = {}) {
   return key;
 }
 
+/** The stored grant of connection `key`, or null. */
+export function connectionGrant(root, key) {
+  migrateLegacy(root);
+  return readGrant(connectionPaths(root, key));
+}
+
+/**
+ * Stores renewed tokens of the same grant (oauth.renewGrant) and makes it the default. The grantId
+ * stays: it is the same grant, so nothing running on it is stale. Refused when the file no longer
+ * holds that grant (removed or replaced meanwhile).
+ */
+export function renewConnection(root, key, credentials) {
+  const p = connectionPaths(root, key);
+  const held = readGrant(p);
+  if (!held || (held.grantId ?? null) !== (credentials.grantId ?? null)) throw new Error(`connection ${key} changed meanwhile; run connect again`);
+  saveCredentials(credentials, p);
+  markRecent(root, key);
+  return key;
+}
+
 /** Fixes a session to a connection and the node it is for, so a name reused later does not move it. */
 function pin(root, sessionId, key) {
   const nodeUrl = key ? readGrant(connectionPaths(root, key))?.nodeUrl ?? null : null;

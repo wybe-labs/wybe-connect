@@ -9,9 +9,9 @@
 //   remove <name>                          delete a connection's local grant and queue
 // Prints where it connected, the granted scopes and the next steps. Never prints a token.
 
-import { connect, ALL_SCOPES } from './oauth.js';
+import { connect, renewGrant, ALL_SCOPES, STATIC_CLIENTS } from './oauth.js';
 import { harnessHome } from './home.js';
-import { connectionPaths, listConnections, saveConnection, useConnection, removeConnection, checkedName, checkSave, NODE_ENV } from './connections.js';
+import { connectionPaths, connectionGrant, renewConnection, listConnections, saveConnection, useConnection, removeConnection, checkedName, checkSave, NODE_ENV } from './connections.js';
 
 const USAGE = [
   'usage: connect.js <node-url> [--scopes remember,conversations,sessions:light,sessions:full] [--name <name>]',
@@ -76,7 +76,31 @@ function printList(root, out) {
   out.write(`* = the default for new sessions. Choose another per session with ${NODE_ENV}=<name> or: connect.js use <name> --session <session-id>\n`);
 }
 
-export async function runConnect({ harness, clientName, nextSteps, argv = process.argv.slice(2), out = process.stdout, err = process.stderr, connectImpl = connect }) {
+/**
+ * A connect to a node this home already holds a grant for (same fixed client, same scopes or
+ * fewer) renews that grant instead of signing in again, so a re-run never makes a new grant.
+ * Returns { key, credentials } when renewed, or null when a sign-in is needed.
+ */
+export async function renewStored(root, nodeUrl, { name = null, scopes = null, clientId = null, fetchImpl = globalThis.fetch } = {}) {
+  if (!clientId) return null;
+  let key;
+  try {
+    key = checkSave(root, nodeUrl, name);
+  } catch {
+    return null; // the name belongs to another node: the sign-in path reports it
+  }
+  const held = connectionGrant(root, key);
+  const next = await renewGrant(held, { clientId, nodeUrl, scopes, fetchImpl });
+  if (!next) return null;
+  try {
+    renewConnection(root, key, next);
+  } catch {
+    return null;
+  }
+  return { key, credentials: next };
+}
+
+export async function runConnect({ harness, clientName, clientId = STATIC_CLIENTS[harness] ?? null, nextSteps, argv = process.argv.slice(2), out = process.stdout, err = process.stderr, connectImpl = connect, fetchImpl = globalThis.fetch }) {
   const parsed = parseConnectArgs(argv);
   if (parsed.help || parsed.error) {
     if (parsed.error) err.write(`${parsed.error}\n`);
@@ -100,11 +124,20 @@ export async function runConnect({ harness, clientName, nextSteps, argv = proces
       out.write('The pairing on the node stays until you revoke it there (the Wybe portal\'s list of connected assistants).\n');
       return 0;
     }
-    checkSave(root, parsed.nodeUrl, parsed.name ?? null); // a name another node holds is refused before the browser opens
-    const credentials = await connectImpl(parsed.nodeUrl, { scopes: parsed.scopes, clientName, log: (line) => err.write(`${line}\n`) });
-    const key = saveConnection(root, credentials, { name: parsed.name ?? null });
+    // Scopes asked for explicitly must all be held; by default the grant's own scopes stand.
+    const renewed = await renewStored(root, parsed.nodeUrl, { name: parsed.name ?? null, scopes: argv.includes('--scopes') ? parsed.scopes : null, clientId, fetchImpl });
+    let credentials;
+    let key;
+    if (renewed) {
+      ({ key, credentials } = renewed);
+      out.write(`Already connected to ${credentials.nodeUrl}: the stored grant was renewed, no new sign-in.\n`);
+    } else {
+      checkSave(root, parsed.nodeUrl, parsed.name ?? null); // a name another node holds is refused before the browser opens
+      credentials = await connectImpl(parsed.nodeUrl, { scopes: parsed.scopes, clientId, clientName, fetchImpl, log: (line) => err.write(`${line}\n`) });
+      key = saveConnection(root, credentials, { name: parsed.name ?? null });
+      out.write(`Connected to ${credentials.nodeUrl}\n`);
+    }
     const others = listConnections(root).filter((c) => c.key !== key).map((c) => c.key);
-    out.write(`Connected to ${credentials.nodeUrl}\n`);
     out.write(`Granted scopes: ${credentials.scopes.join(', ') || '(none)'}\n`);
     out.write(`Credential stored in ${connectionPaths(root, key).credentials}\n`);
     if (others.length) {
