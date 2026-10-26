@@ -37,23 +37,26 @@ Everything is redacted before it is written anywhere, including the local queue.
 
 ### The redaction families
 
+Redaction reads structure first, then known token prefixes, then keys, then entropy:
+
 | Family | What it catches |
 |---|---|
 | `pem-private-key` | `-----BEGIN ... PRIVATE KEY-----` blocks, whole |
+| `secret-block` | a YAML `\|` or `>` block under a secret key (nested YAML, templates, public keys and prose stay) |
 | `url-userinfo` | `scheme://user:password@host` in any URL or DSN (the scheme and host stay) |
-| `bearer` | the value after `Bearer ` |
-| `wybe-credential` | `wnc_` `wbt_` `wpc_` `wat_` `wrt_` `wac_` `wcl_` credentials |
-| `openai-key` | `sk-...` and `sk-ant-...` keys |
-| `aws-access-key`, `aws-secret` | `AKIA...` ids and the 40-character secret after an AWS secret label |
-| `github-token` | `ghp_` `gho_` `ghu_` `ghs_` `ghr_` and `github_pat_` tokens |
-| `slack-token` | `xox?-...` tokens |
-| `jwt` | `eyJ...` three-part signed tokens |
-| `generic-secret` | a 32+ character hex or base64url value after `token`, `secret`, `key`, `password`, `api_key`, `client_secret`, ... |
+| `auth-header` | the credential in `Authorization:` (Bearer, Token, Basic, a Digest `response=`), and a bare `Bearer <token>` |
+| `cookie` | `Cookie:` and `Set-Cookie:` values |
+| `cli-secret` | `--password x`, `--token=x`, `mysql -p<pw>`, `docker login -p x`, `curl -u user:pw` |
+| `wybe-credential`, `openai-key`, `aws-access-key`, `github-token`, `gitlab-token`, `npm-token`, `slack-token`, `slack-webhook`, `stripe-key`, `google-api-key`, `sendgrid-key`, `twilio-key`, `discord-token`, `microsoft-token`, `jwt` | known vendor token prefixes and shapes, wherever they stand |
+| `keyed-secret` | the value under a secret key (`password`, `passord`, `secret`, `token`, `api_key`, `<x>_key`, ...) in JSON at any escape depth, YAML, env and shell lines, headers, URL queries and connection strings; placeholders, types, code, paths, labels and sentences stay, and so do ids under keys like `page_token` or `cache_key` |
+| `high-entropy` | a 40+ character random string that no key vouched for |
 | `fodselsnummer` | Norwegian national identity numbers whose two mod-11 control digits verify (an ordinary 11-digit number is left alone) |
 | `email` | e-mail addresses; `{ emails: false }` keeps them |
 
-`test/redact-weaken.js` weakens each family in turn and demands the suite goes red, so a
-family that stopped protecting cannot pass unnoticed.
+`test/redact-table.test.js` is the frozen table: every leak and every false positive with its
+exact expected output, and a second pass that must change nothing. It also switches off each
+family in turn and demands that some row goes red, so a family that stopped protecting cannot
+pass unnoticed.
 
 ### What never leaves, under any scope
 
@@ -288,8 +291,7 @@ test/           node --test; fixtures are synthetic (scripts/codex-fixtures.js w
 ## Development
 
 ```
-node --test                  # every suite
-node test/redact-weaken.js   # the mutation harness (run directly, not under node --test)
+node --test                  # every suite, the redaction table and its mutation check included
 npm run sync-lib             # refresh packages/*/lib after editing lib/
 npm run sync-texts           # regenerate the README's texts section after editing texts/standing.json
 npm ls                       # must print nothing under the package: zero dependencies
