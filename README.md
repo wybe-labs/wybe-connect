@@ -20,14 +20,14 @@ Install and pairing take one pasted sentence; see "Getting started".
 
 | Scope | Consent label (nb) | What flows | When |
 |---|---|---|---|
-| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session; and (Claude Code) from the background distil: at most every 6 hours, and when you press «Importer» |
+| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session; and (Claude Code, Codex) from the background distil: at most every 6 hours, and when you press «Importer» |
 | `conversations` | Samtalesammendrag | a title and a summary of a past chat, and its messages only if you ask for them | only when you explicitly ask Claude to import a conversation |
 | `sessions:light` | Arbeidsøkter — hva du ba om | per session: project name (the folder name), the **names** of your git remotes (never their URLs), branch, files Claude wrote or edited, start/end time, and **your own prompts**. Zero assistant text, zero tool output, zero thinking. Prompts written by Claude to its own subagents are excluded; text a hook injected into your prompt is stripped. | automatically at every stop, before every context compaction, and at session end |
 | `sessions:full` | Arbeidsøkter — alt innhold | everything in `sessions:light` plus Claude's replies and every tool call's input and output (each clipped to 4000 characters). Thinking blocks still never leave. | same as above |
 
-Claude Code sends no `sessions:*` payload: its hooks only note the session, and a background
-distil on your machine turns your sessions into short `remember` facts (see "The background
-distil"). The `sessions:*` rows apply to Codex and Cursor.
+Claude Code and Codex send no `sessions:*` payload: their hooks only note the session, and a
+background distil on your machine turns your sessions into short `remember` facts (see "The
+background distil"). The `sessions:*` rows apply to Cursor.
 
 With no `sessions:*` scope the hooks build nothing and send nothing. Every payload carries a
 `redaction.families` count (which families hit, how often, never the values) so a review can
@@ -99,10 +99,13 @@ codex plugin add wybe-connect@wybe-connect
 
 Codex reads `.agents/plugins/marketplace.json` at the root of this repository (it looks there
 before `.claude-plugin/`, so it never picks up the Claude Code hooks). Paste the same sentence;
-the plugin's `connect` skill runs the OAuth flow as its own client, adds the MCP server with
-`codex mcp add wybe --url https://dittfirma.wybe.me/mcp` and `codex mcp login wybe`, and offers
-the standing line for `~/.codex/AGENTS.md`. Codex runs a plugin's hooks only after you have
-trusted them once. Details and what was verified where: `packages/codex/README.md`.
+the plugin's `connect` skill runs the OAuth flow as its own client and offers the standing line
+for `~/.codex/AGENTS.md`. That one grant serves the hooks and the plugin's own MCP server
+(`packages/codex/mcp.json`), so there is no MCP server to add and no second sign-in. Like Claude
+Code, Codex then sends the essence only: a background distil (`codex exec`) turns your sessions
+into short `remember` facts, and on first connect it imports your Codex sessions of the last 30
+days by itself. Codex runs a plugin's hooks only after you have trusted them once. Details and
+what was verified where: `packages/codex/README.md`.
 
 ## Getting started (Cursor)
 
@@ -249,10 +252,39 @@ only the facts the run chose, redacted again by `lib/redact.js`. What makes it e
 The node should keep each `idempotency_key` once. Until it does, a reply lost after the node
 stored the facts (beyond the 60 s delivery timeout) means that one record can be stored twice.
 
-### Codex and Cursor
+### The background distil (Codex)
+
+The same pipeline, the same files and the same guarantees, with Codex's pieces:
+
+- **The hooks** (Stop, PreCompact; SessionEnd only notes, as Codex caps it at 3 s) note the
+  rollout Codex names in `transcript_path`. A spawned subagent's thread (`agent_id`, or a
+  subagent or internal `source` in `session_meta`) and a compressed rollout are not noted. No
+  rollout delta is sent.
+- **The run** is a headless `codex exec`, started by `bin/distil-run.js` in the distil's own
+  folder:
+  `codex exec --sandbox read-only --json --ephemeral --skip-git-repo-check -c mcp_servers={}`
+  `-c mcp_servers.wybe_distil.command="<node>" -c mcp_servers.wybe_distil.args=["<plugin>/bin/mcp-proxy.js"]`
+  `-c mcp_servers.wybe_distil.env={ WYBE_CONNECT_DISTIL = "<run>", ... } "<prompt>"`.
+  `mcp_servers={}` drops every MCP server you configured, so the plugin's own server in distil
+  mode (named `wybe_distil`, so it is never confused with the interactive `wybe`) is the only
+  one. Codex starts a stdio server with only a few variables of its own
+  environment, so the distil mode travels in the server's `env` table. `--ephemeral` keeps the
+  run from writing a rollout, so it never becomes a session to import (a rollout whose first
+  prompt is the distil prompt is left out as well).
+- **The import** lists `<CODEX_HOME or ~/.codex>/sessions/YYYY/MM/DD/rollout-*.jsonl` changed in
+  the last 30 days, the person's threads only, and also reads `~/.codex/AGENTS.md` and the
+  projects' `AGENTS.md`.
+- **First connect.** The node asks for the first sync by itself (an `import_request` in its
+  answers). The plugin's MCP server (`mcp.json` → `bin/mcp-proxy.js`) asks the node for it
+  2 seconds after Codex starts it, every 5 minutes, and at once when a sign-in through its
+  `connect` tool finishes. The import then runs in the background: no button and no command.
+
+It runs on your machine and on your own ChatGPT/Codex plan.
+
+### Cursor
 
 ```
-Codex / Cursor ──hook stdin (transcript)──▶ hooks/flush.js
+Cursor ──hook stdin (transcript)──▶ hooks/flush.js
                                                 │ delta since the cursor (~/.wybe-connect/state/<id>.json)
                                                 │ scope-aware payload (lib/transcript.js)
                                                 │ redaction (lib/redact.js)
@@ -295,8 +327,8 @@ lib/            shared, dependency-free: redact, transcript, codex-rollout, curs
                 distil (the background distil), ledger (checksummed records), lock
 packages/
   claude-code/  the Claude Code plugin (plugin.json, hooks/, bin/connect.js, skills/connect)
-  codex/        the Codex plugin (.codex-plugin/, hooks/, bin/connect.js, skills/connect, AGENTS.md
-                and config.toml snippets)
+  codex/        the Codex plugin (.codex-plugin/, mcp.json, hooks/, bin/{connect,mcp-proxy,distil-run}.js,
+                skills/connect, AGENTS.md and config.toml snippets)
   cursor/       the Cursor plugin (.cursor-plugin/, hooks/, bin/connect.js, skills/connect, mcp.json snippet)
                 every package ships a byte-identical copy of lib/
 texts/standing.json               the Claude Desktop / ChatGPT texts (nb + en)
@@ -331,8 +363,9 @@ Node 20.11 or newer. No dependencies, ever: the code runs inside people's editor
 - **A live run in Codex and in Cursor.** Both adapters are tested by spawning their hook scripts
   with stdin shaped from the vendors' published schemas and docs, against synthetic fixtures. The
   Codex rollout reader was also checked against the structure of real Codex desktop-app rollouts;
-  the Codex CLI's legacy history mode and Cursor itself have not been run. See the packages'
-  READMEs for the exact list.
+  the Codex CLI's legacy history mode and Cursor itself have not been run. The Codex distil is
+  tested with a fake `codex` that plays an obedient `codex exec`; a real `codex exec` run has not
+  been made. See the packages' READMEs for the exact list.
 - **A dry run in a fresh `~/.claude` sandbox** with the marketplace installed from a local path
   (C2.3's check): the hook scripts are tested by spawning them with hook-shaped stdin; the
   marketplace install itself has not been exercised end to end.
