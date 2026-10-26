@@ -1,5 +1,4 @@
-// QA round 5, R5-1 (F1): every tools/call argument the proxy forwards to the node passes through
-// redactValue first. Without it the redaction families protect nothing on the MCP path. The node is
+// Every tools/call argument the proxy forwards to the node passes through redactValue first. Without it the redaction families protect nothing on the MCP path. The node is
 // an in-process fake fetch; the secrets are fabricated and assembled from parts.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -40,7 +39,7 @@ function connectedHome() {
   return p;
 }
 
-test('R5-1: a secret in a tools/call argument never reaches the node; the rest of the call is forwarded as it was', async () => {
+test('a secret in a tools/call argument never reaches the node; the rest of the call is forwarded as it was', async () => {
   assert.deepEqual(Object.entries(SECRETS).filter(([, [i, s]]) => redact(i).text.includes(s)).map(([k]) => k), [], 'control: redact() catches each one');
   const node = fakeNode();
   const proxy = createProxy({ paths: connectedHome(), fetchImpl: node.fetchImpl });
@@ -56,7 +55,7 @@ test('R5-1: a secret in a tools/call argument never reaches the node; the rest o
   assert.ok(sent.arguments.items.every((x) => x.text.startsWith('Deploy note: ')));
 });
 
-test('R5-1: an argument the redactor cannot walk is refused, never forwarded', async () => {
+test('an argument the redactor cannot walk is refused, never forwarded', async () => {
   const node = fakeNode();
   const proxy = createProxy({ paths: connectedHome(), fetchImpl: node.fetchImpl });
   // JSON-RPC carries only JSON, so this stands for a value a future caller might pass in-process.
