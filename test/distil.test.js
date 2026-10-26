@@ -43,7 +43,7 @@ function sandbox(n = 3) {
 
 /**
  * An MCP node over real HTTP. `answers[i]` is the reply to the i-th remember: 'ok', a status code
- * (NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is wybe-node#844:
+ * (NOT stored), 'toolError' (refused, NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is wybe-node#844:
  * a repeat of an idempotency_key on the connection stores nothing and replays the WHOLE first
  * answer (import_done included). `sends` lists every remember it saw.
  */
@@ -67,6 +67,7 @@ async function httpNode({ answers = [], dedupe = false, importDone = true } = {}
       sends.push(args);
       const a = answers[n++] ?? 'ok';
       if (typeof a === 'number') { res.writeHead(a); return res.end('upstream error'); }
+      if (a === 'toolError') return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text: 'Invalid arguments: items[0].content: too long' }] } });
       const key = dedupe ? args.idempotency_key : undefined;
       let answer = key !== undefined ? first.get(key) : undefined;
       if (!answer) {
@@ -426,9 +427,77 @@ test('an HTTP 200 that is a JSON-RPC error, an isError result, an HTML page, an 
     D.spoolRemember(p, runId, { items: [{ content: 'A.' }] });
     D.spoolDone(p, runId);
     const out = await D.deliver(p, { runId, mode: 'ongoing' }, { fetchImpl });
-    assert.equal(out.ok, false, label);
-    assert.equal(readRecords(D.distilPaths(p).acks(runId)).records.length, 0, `${label}: no ack written`);
+    const acks = readRecords(D.distilPaths(p).acks(runId)).records;
+    assert.equal(acks.filter((a) => typeof a.stored === 'number').length, 0, `${label}: no ack written`);
+    if (label === 'isError result') {
+      // The node answered and refused the call for good: set aside and counted, never an ack.
+      assert.equal(out.ok, true, label);
+      assert.equal(out.refused, 1, label);
+      assert.equal(acks.filter((a) => a.refused === true).length, 1, label);
+    } else {
+      assert.equal(out.ok, false, label);
+      assert.equal(acks.length, 0, label);
+    }
   }
+});
+
+// ------------------------------------------------------------------ set aside, never a wedge
+test('a record the node refuses for good (a tool error) is set aside and counted, told once as refused, and later sessions still go', async () => {
+  const { p, files } = sandbox(2);
+  const node = await httpNode({ answers: ['toolError'] });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - 7 * H);
+  const r1 = await cycle(p, { now: T });
+  assert.equal(r1.outcome.ok, true, 'the refused record does not hold the outbox');
+  assert.equal(r1.outcome.refused, 1);
+  let s = D.loadState(p);
+  assert.equal(s.outbox, null);
+  assert.notEqual(s.lastError?.class, 'node-unreachable', 'the node answered: it is not told as unreachable');
+  const n1 = D.distilNotice(p, { now: T + MIN });
+  assert.match(n1, /refused 1/);
+  assert.doesNotMatch(n1, /could not be reached/);
+  assert.equal(D.distilNotice(p, { now: T + 2 * MIN }), null, 'told once');
+  note(p, files.slice(1), T + H);
+  const r2 = await cycle(p, { now: T + 7 * H });
+  node.close();
+  assert.equal(r2.plan.mode, 'ongoing', 'the next session is distilled');
+  assert.equal(r2.outcome.ok, true);
+  assert.deepEqual(node.stored, ['Fact 1 of 1.']);
+  assert.equal(node.sends.length, 2, 'the refused record was sent once, never again');
+  s = D.loadState(p);
+  assert.equal(s.setAside.refused, 1);
+});
+
+test('an outbox line damaged after distil_done is set aside; the intact records are still delivered and the pipeline goes on', async () => {
+  const { p, files } = sandbox(2);
+  saveCredentials(creds(DOWN), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - 7 * H);
+  const r1 = await cycle(p, { now: T, env: { FAKE_CALLS: '2' } });
+  assert.equal(r1.outcome.class, 'node-unreachable', 'distilled, kept in the outbox');
+  const { outbox } = D.loadState(p);
+  const file = D.distilPaths(p).outbox(outbox.runId);
+  const lines = readFileSync(file, 'utf8').split('\n');
+  lines[0] = lines[0].replace('Fact 1 of 2.', 'Fact 1 of 2!'); // one flipped byte at rest
+  writeFileSync(file, lines.join('\n'));
+  const node = await httpNode();
+  saveCredentials(creds(node.url), p);
+  const r2 = await cycle(p, { now: T + 31 * MIN });
+  assert.equal(r2.plan.mode, 'deliver');
+  assert.equal(r2.outcome.ok, true);
+  assert.equal(r2.outcome.torn, 1);
+  assert.deepEqual(node.stored, ['Fact 2 of 2.'], 'the intact record is delivered');
+  const kept = readFileSync(D.distilPaths(p).torn(outbox.runId), 'utf8');
+  assert.match(kept, /Fact 1 of 2!/, 'the damaged line is kept aside, not deleted');
+  const n = D.distilNotice(p, { now: T + 32 * MIN });
+  assert.match(n, /damaged/);
+  assert.equal(D.distilNotice(p, { now: T + 33 * MIN }), null, 'told once');
+  note(p, files.slice(1), T + H);
+  const r3 = await cycle(p, { now: T + 8 * H });
+  node.close();
+  assert.equal(r3.plan.mode, 'ongoing');
+  assert.equal(r3.outcome.ok, true);
 });
 
 // ------------------------------------------------------------------ R4-5: told once per kind

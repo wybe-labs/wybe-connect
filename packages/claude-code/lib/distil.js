@@ -74,6 +74,7 @@ export function distilPaths(p) {
     outbox: (runId) => join(runs, `${runId}.outbox`),
     acks: (runId) => join(runs, `${runId}.acks`),
     log: (runId) => join(runs, `${runId}.log`),
+    torn: (runId) => join(runs, `${runId}.torn`), // outbox lines that no longer check out, set aside
   };
 }
 
@@ -92,6 +93,10 @@ const EMPTY = Object.freeze({
   problemShown: null, // the lastError class SessionStart already told
   dropped: null, // { count, firstAt, lastAt }
   droppedShown: 0,
+  // Records set aside so they never hold the pipeline: refused for good by the node (a tool
+  // error), or outbox lines damaged after distil_done. Counted here, told once at SessionStart.
+  setAside: { refused: 0, torn: 0 },
+  setAsideShown: { refused: 0, torn: 0 },
 });
 
 export function loadState(p) {
@@ -476,9 +481,13 @@ const parseAnswer = (result) => {
 };
 
 /**
- * Sends every record of the outbox the node has not acknowledged, in order (the record carrying
- * import_of last), and appends each ack. An ack is a JSON-RPC result that is not an error, says
- * ok: true and has a numeric `stored`. Stops at the first failure. Returns { ok, class?, message?, importDone, sent }.
+ * Sends every record of the outbox the node has not settled, in order (the record carrying
+ * import_of last), and appends each answer to the acks file. An ack is a JSON-RPC result that is
+ * not an error, says ok: true and has a numeric `stored`. A tool error is the node refusing that
+ * record for good: it is recorded as refused, never re-sent, and delivery goes on. An outbox line
+ * that no longer checks out (damaged after distil_done, when the run was already judged whole) is
+ * copied aside to <run>.torn and the intact records are delivered. Stops at the first other
+ * failure. Returns { ok, class?, message?, importDone, sent, refused, torn }.
  */
 export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs = DELIVERY_TIMEOUT_MS, now = Date.now } = {}) {
   const dp = distilPaths(p);
@@ -490,12 +499,19 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
     throw err;
   }
   try {
-    const verdict = outboxVerdict(p, run);
-    if (!verdict.ok) return { ok: false, class: 'distil-failed', message: verdict.reason, importDone: false, sent: 0 };
+    const { records, torn, tornLines } = readRecords(dp.outbox(run.runId), { keepTorn: true });
+    const items = records.filter((r) => r.kind === 'remember');
+    // An intact outbox without distil_done was never judged whole: nothing of it is sent.
+    if (!torn && records.filter((r) => r.kind === 'done').length !== 1) return { ok: false, class: 'distil-failed', message: 'the run did not finish (no distil_done)', importDone: false, sent: 0 };
+    if (torn) writeFileSync(dp.torn(run.runId), `${tornLines.join('\n')}\n`, { mode: 0o600 });
     const acks = readRecords(dp.acks(run.runId)).records;
     const acked = new Set(acks.map((a) => a.seq));
     let importDone = acks.some((a) => a.importDone === true);
-    const order = [...verdict.items].sort((a, b) => (a.args?.import_of ? 1 : 0) - (b.args?.import_of ? 1 : 0) || a.seq - b.seq);
+    const settled = () => {
+      const all = readRecords(dp.acks(run.runId)).records;
+      return { refused: new Set(all.filter((a) => a.refused === true).map((a) => a.seq)).size, torn };
+    };
+    const order = [...items].sort((a, b) => (a.args?.import_of ? 1 : 0) - (b.args?.import_of ? 1 : 0) || a.seq - b.seq);
     let c;
     try {
       c = loadCredentials(p);
@@ -516,6 +532,11 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
           out = await callTool({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, name: 'remember', args, fetchImpl, timeoutMs });
         }
       }
+      if (!out.ok && out.toolError) {
+        appendRecord(dp.acks(run.runId), { seq: r.seq, key: r.key, refused: true, message: String(out.message).slice(0, 200), at: iso(now()) });
+        sent += 1;
+        continue;
+      }
       if (!out.ok) return { ok: false, class: out.kind === 'auth' ? 'signed-out' : 'node-unreachable', message: out.message, importDone, sent };
       const answer = parseAnswer(out.result);
       if (answer?.ok !== true || typeof answer.stored !== 'number') return { ok: false, class: 'node-refused', message: 'the colleague answered without confirming it stored the facts', importDone, sent };
@@ -524,7 +545,7 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
       importDone = importDone || done;
       sent += 1;
     }
-    return { ok: true, importDone, sent };
+    return { ok: true, importDone, sent, ...settled() };
   } finally {
     held.release();
   }
@@ -634,7 +655,7 @@ function pruneLogs(p, now) {
   const dp = distilPaths(p);
   if (!existsSync(dp.runs)) return;
   for (const f of readdirSync(dp.runs)) {
-    if (!f.endsWith('.log')) continue;
+    if (!f.endsWith('.log') && !f.endsWith('.torn')) continue;
     try {
       if (now - statSync(join(dp.runs, f)).mtimeMs > KEEP_LOGS_MS) unlinkSync(join(dp.runs, f));
     } catch {
@@ -704,13 +725,14 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
         if (s.importRequest === s.importHandled) s.importRequest = null;
       }
       s.outbox = null;
+      s.setAside = { refused: (s.setAside?.refused ?? 0) + (d.refused ?? 0), torn: (s.setAside?.torn ?? 0) + (d.torn ?? 0) };
       s.lastRunAt = iso(now());
       s.lastSuccessAt = iso(now());
       s.lastFailureAt = null;
       s.lastError = unconfirmed ? { class: 'import-unconfirmed', message: 'no import_done in the answer', at: iso(now()) } : null;
       if (!unconfirmed) s.problemShown = null;
       save();
-      return { ok: true, sent: d.sent, importDone: d.importDone };
+      return { ok: true, sent: d.sent, importDone: d.importDone, refused: d.refused ?? 0, torn: d.torn ?? 0 };
     }
     if (d.class !== 'busy') fail(s, d.class, d.message, now());
     save();
@@ -745,6 +767,17 @@ export function distilNotice(p, { now = Date.now() } = {}) {
         parts.push(`${n} session${n === 1 ? '' : 's'} could not be queued for the colleague (the local queue was full) and will not be distilled`);
         s.droppedShown = s.dropped.count;
       }
+      const aside = s.setAside ?? { refused: 0, torn: 0 };
+      const shown = s.setAsideShown ?? { refused: 0, torn: 0 };
+      if (aside.refused > shown.refused) {
+        const n = aside.refused - shown.refused;
+        parts.push(`the colleague refused ${n} batch${n === 1 ? '' : 'es'} of distilled work facts (it answered with an error, so ${n === 1 ? 'it was' : 'they were'} not stored and will not be sent again)`);
+      }
+      if (aside.torn > shown.torn) {
+        const n = aside.torn - shown.torn;
+        parts.push(`${n} batch${n === 1 ? '' : 'es'} of distilled work facts ${n === 1 ? 'was' : 'were'} damaged on this machine's disk before ${n === 1 ? 'it' : 'they'} could be sent, and ${n === 1 ? 'was' : 'were'} set aside; the rest was sent`);
+      }
+      s.setAsideShown = { refused: aside.refused, torn: aside.torn };
       if (s.lastError && s.problemShown !== s.lastError.class) {
         parts.push(`${NOTICES[s.lastError.class] ?? 'the background distil had a problem'} (${s.lastError.message})`);
         s.problemShown = s.lastError.class;

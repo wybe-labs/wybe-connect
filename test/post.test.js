@@ -99,7 +99,7 @@ test('a 5xx, a JSON-RPC error and a tool isError are server outcomes', async () 
 
   const toolErr = fakeNode({ callAnswer: () => ({ isError: true, content: [{ type: 'text', text: 'refused' }] }) });
   const t = await callTool({ endpoint: ENDPOINT, accessToken: TOKEN, name: 'x', args: {}, fetchImpl: toolErr.fetchImpl });
-  assert.deepEqual(t, { ok: false, kind: 'server', message: 'tool error: refused' });
+  assert.deepEqual(t, { ok: false, kind: 'server', toolError: true, message: 'tool error: refused' });
 });
 
 test('a body without our id is a protocol outcome', async () => {

@@ -35,32 +35,38 @@ export function appendRecord(file, record) {
   }
 }
 
-/** { records, torn }: every whole, checksummed line in order, and how many lines were not. */
-export function readRecords(file) {
+/**
+ * { records, torn }: every whole, checksummed line in order, and how many lines were not. With
+ * keepTorn, also tornLines: those lines as read, so a caller can set them aside instead of losing them.
+ */
+export function readRecords(file, { keepTorn = false } = {}) {
   let text;
   try {
     text = readFileSync(file, 'utf8');
   } catch (err) {
-    if (err && err.code === 'ENOENT') return { records: [], torn: 0 };
+    if (err && err.code === 'ENOENT') return keepTorn ? { records: [], torn: 0, tornLines: [] } : { records: [], torn: 0 };
     throw err;
   }
   const lines = text.split('\n');
   const tail = lines.pop(); // '' when the file ends on a newline; otherwise a line cut short
   const records = [];
-  let torn = tail === '' ? 0 : 1;
+  const tornLines = tail === '' ? [] : [tail];
+  let torn = tornLines.length;
   for (const line of lines) {
     if (line === '') continue;
     const tab = line.lastIndexOf('\t');
     const json = tab < 0 ? null : line.slice(0, tab);
     if (json === null || sum(json) !== line.slice(tab + 1)) {
       torn += 1;
+      tornLines.push(line);
       continue;
     }
     try {
       records.push(JSON.parse(json));
     } catch {
       torn += 1;
+      tornLines.push(line);
     }
   }
-  return { records, torn };
+  return keepTorn ? { records, torn, tornLines } : { records, torn };
 }
