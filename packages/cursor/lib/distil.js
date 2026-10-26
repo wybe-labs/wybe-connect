@@ -83,7 +83,8 @@ const EMPTY = Object.freeze({
   pending: [], // [{ path, sessionId, cwd, notedAt }], oldest first
   distilled: {}, // { [path]: { line, at } }: the next run of that transcript starts after `line`
   running: null, // { runId, mode, importOf, pid, startedAt, transcripts: [{ path, sessionId, cwd, notedAt, fromLine, toLine }] }
-  outbox: null, // { runId, mode, importOf, doneAt }: distilled, not yet all acknowledged
+  outbox: null, // { runId, mode, importOf, node, doneAt }: distilled for `node`, not yet all acknowledged
+  parked: [], // outboxes made for another node than the one connected now: kept, sent only to their own node
   importRequest: null,
   importHandled: null,
   lastRunAt: null,
@@ -95,9 +96,12 @@ const EMPTY = Object.freeze({
   droppedShown: 0,
   // Records set aside so they never hold the pipeline: refused for good by the node (a tool
   // error), or outbox lines damaged after distil_done. Counted here, told once at SessionStart.
-  setAside: { refused: 0, torn: 0 },
-  setAsideShown: { refused: 0, torn: 0 },
+  // parked: outboxes kept for another node; unsent: parked outboxes deleted past MAX_PARKED.
+  setAside: { refused: 0, torn: 0, parked: 0, unsent: 0 },
+  setAsideShown: { refused: 0, torn: 0, parked: 0, unsent: 0 },
 });
+
+export const MAX_PARKED = 20;
 
 export function loadState(p) {
   const s = readJson(distilPaths(p).state);
@@ -138,6 +142,29 @@ const hasRemember = (p) => {
     return loadCredentials(p)?.scopes?.includes('remember') === true;
   } catch {
     return false;
+  }
+};
+
+/**
+ * The node a grant belongs to: the origin of the colleague's address the person connected to
+ * (https://<firm>.wybe.me), else its OAuth resource or endpoint. A new sign-in to the same
+ * colleague is the same node; connecting to another colleague is another. Null without a grant.
+ */
+export function nodeOf(c) {
+  const raw = [c?.nodeUrl, c?.resource, c?.mcpEndpoint].find((x) => typeof x === 'string' && x);
+  if (!raw) return null;
+  try {
+    return raw === c.nodeUrl ? new URL(raw).origin : raw;
+  } catch {
+    return raw;
+  }
+}
+
+const currentNode = (p) => {
+  try {
+    return nodeOf(loadCredentials(p));
+  } catch {
+    return null;
   }
 };
 
@@ -273,7 +300,42 @@ function returnToPending(s, transcripts) {
 function bind(s, run, now) {
   for (const t of run.transcripts) s.distilled[t.path] = { line: t.toLine, at: iso(now) };
   for (const [path, d] of Object.entries(s.distilled)) if (now - ms(d.at) > KEEP_DISTILLED_MS) delete s.distilled[path];
-  s.outbox = { runId: run.runId, mode: run.mode, importOf: run.importOf ?? null, doneAt: iso(now) };
+  s.outbox = { runId: run.runId, mode: run.mode, importOf: run.importOf ?? null, node: run.node ?? null, doneAt: iso(now) };
+}
+
+const bump = (s, field, n = 1) => {
+  s.setAside = { ...structuredClone(EMPTY.setAside), ...(s.setAside ?? {}) };
+  s.setAside[field] += n;
+};
+
+/** Sets an outbox aside for its own node (never sent to another). Past MAX_PARKED the oldest is deleted, counted. */
+function park(p, s, outbox) {
+  s.parked = [...(s.parked ?? []), outbox];
+  bump(s, 'parked');
+  while (s.parked.length > MAX_PARKED) {
+    const old = s.parked.shift();
+    removeRunFiles(p, old.runId);
+    bump(s, 'unsent');
+  }
+}
+
+/**
+ * The outbox to deliver for the node connected now: the current one if it is that node's (another
+ * node's is parked first), else a parked one made for this node. Null when there is none.
+ */
+function outboxFor(p, s, node) {
+  if (s.outbox && s.outbox.node && s.outbox.node !== node) {
+    park(p, s, s.outbox);
+    s.outbox = null;
+  }
+  if (!s.outbox) {
+    const i = (s.parked ?? []).findIndex((x) => x.node === node);
+    if (i >= 0) {
+      s.outbox = s.parked[i];
+      s.parked = s.parked.filter((_, j) => j !== i);
+    }
+  }
+  return s.outbox;
 }
 
 function fail(s, cls, message, now) {
@@ -361,13 +423,14 @@ export function maybeRun({ paths: p, env = process.env, now = Date.now(), alive 
   if (env[DISTIL_ENV]) return null; // a distil run's own hooks and server never start another
   if (!hasRemember(p)) return null;
   const dp = distilPaths(p);
+  const node = currentNode(p);
   let folded = [];
   let plan;
   try {
     plan = locked(p, (s, save) => {
       folded = foldNotes(p, s);
       reconcile(p, s, now, alive);
-      const decided = decide(s, now);
+      const decided = decide(p, s, now, node);
       if (decided) {
         s.running = { ...decided, pid: null, startedAt: iso(now) };
         if (decided.mode === 'import') s.importRequest = null;
@@ -408,42 +471,45 @@ export function maybeRun({ paths: p, env = process.env, now = Date.now(), alive 
   return { ...plan, planFile };
 }
 
-function decide(s, now) {
+function decide(p, s, now, node) {
   if (s.running) return null;
   const backoff = Number.isFinite(ms(s.lastFailureAt)) && now - ms(s.lastFailureAt) < BACKOFF_MS;
   if (backoff) return null;
   // 128 random bits: the node keeps a key once per PERSON across all their assistants and machines
   // (wybe-node#844), and every key derives from the run id, so two runs must never share one.
   const runId = `${iso(now).replace(/[:.]/g, '-')}-${randomBytes(16).toString('hex')}`;
-  if (s.outbox) return { runId: s.outbox.runId, mode: 'deliver', importOf: s.outbox.importOf, transcripts: [] };
+  const outbox = outboxFor(p, s, node);
+  if (outbox) return { runId: outbox.runId, mode: 'deliver', importOf: outbox.importOf, node: outbox.node ?? node, transcripts: [] };
   if (s.importRequest && s.importRequest !== s.importHandled) {
-    return { runId, mode: 'import', importOf: s.importRequest, transcripts: pick(s) };
+    return { runId, mode: 'import', importOf: s.importRequest, node, transcripts: pick(s) };
   }
   if (!s.pending.length) return null;
   const since = now - ms(s.lastSuccessAt);
   const due = !Number.isFinite(since) || since >= ONGOING_INTERVAL_MS || (s.pending.length > MAX_RUN_TRANSCRIPTS && since >= BACKLOG_INTERVAL_MS);
   if (!due) return null;
   const transcripts = pick(s);
-  return transcripts.length ? { runId, mode: 'ongoing', importOf: null, transcripts } : null;
+  return transcripts.length ? { runId, mode: 'ongoing', importOf: null, node, transcripts } : null;
 }
 
 // ------------------------------------------------------------------ the outbox (written by the run's MCP server)
 
-// One key per outbox record. A record never changes once written, and a redone distil is a new run
-// with new keys, so a key is never reused for new content (the node would replay the old answer).
-const keyOf = (runId, seq) => `wc1-${createHash('sha256').update(`${runId}:${seq}`).digest('hex')}`;
+// One key per outbox record, bound to the node the run distils for. A record never changes once
+// written, and a redone distil is a new run with new keys, so a key is never reused for new
+// content (the node would replay the old answer), and no two nodes ever see the same key.
+export const recordKey = (node, runId, seq) => `wc1-${createHash('sha256').update(`${node ?? ''}\n${runId}:${seq}`).digest('hex')}`;
 
 function outboxRecords(p, runId) {
   return readRecords(distilPaths(p).outbox(runId));
 }
 
-/** The run's `remember`: redacted, then appended. Returns { seq } or { error }. */
+/** The run's `remember`: redacted, then appended, keyed for the run's node. Returns { seq } or { error }. */
 export function spoolRemember(p, runId, args) {
   const { records } = outboxRecords(p, runId);
   if (records.some((r) => r.kind === 'done')) return { error: 'this distil run already called distil_done' };
   const seq = records.filter((r) => r.kind === 'remember').reduce((m, r) => Math.max(m, r.seq), 0) + 1;
   const { value } = redactValue(args);
-  appendRecord(distilPaths(p).outbox(runId), { kind: 'remember', seq, key: keyOf(runId, seq), args: value });
+  const node = readJson(distilPaths(p).plan(runId))?.node ?? currentNode(p);
+  appendRecord(distilPaths(p).outbox(runId), { kind: 'remember', seq, key: recordKey(node, runId, seq), args: value });
   return { seq };
 }
 
@@ -519,6 +585,8 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
       c = null;
     }
     let sent = 0;
+    // An outbox is sent only to the node it was distilled for, whatever the person connected since.
+    if (c && run.node && nodeOf(c) !== run.node) return { ok: false, class: 'node-changed', message: 'this Claude Code is now connected to another colleague', importDone, sent };
     for (const r of order) {
       if (acked.has(r.seq)) continue;
       if (!c) return { ok: false, class: 'signed-out', message: 'not connected to a Wybe AI colleague', importDone, sent };
@@ -725,7 +793,8 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
         if (s.importRequest === s.importHandled) s.importRequest = null;
       }
       s.outbox = null;
-      s.setAside = { refused: (s.setAside?.refused ?? 0) + (d.refused ?? 0), torn: (s.setAside?.torn ?? 0) + (d.torn ?? 0) };
+      bump(s, 'refused', d.refused ?? 0);
+      bump(s, 'torn', d.torn ?? 0);
       s.lastRunAt = iso(now());
       s.lastSuccessAt = iso(now());
       s.lastFailureAt = null;
@@ -734,7 +803,10 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
       save();
       return { ok: true, sent: d.sent, importDone: d.importDone, refused: d.refused ?? 0, torn: d.torn ?? 0 };
     }
-    if (d.class !== 'busy') fail(s, d.class, d.message, now());
+    if (d.class === 'node-changed') {
+      park(p, s, s.outbox); // not a failure: it waits for its own node
+      s.outbox = null;
+    } else if (d.class !== 'busy') fail(s, d.class, d.message, now());
     save();
     return { ok: false, class: d.class, message: d.message };
   });
@@ -767,8 +839,16 @@ export function distilNotice(p, { now = Date.now() } = {}) {
         parts.push(`${n} session${n === 1 ? '' : 's'} could not be queued for the colleague (the local queue was full) and will not be distilled`);
         s.droppedShown = s.dropped.count;
       }
-      const aside = s.setAside ?? { refused: 0, torn: 0 };
-      const shown = s.setAsideShown ?? { refused: 0, torn: 0 };
+      const aside = { ...structuredClone(EMPTY.setAside), ...(s.setAside ?? {}) };
+      const shown = { ...structuredClone(EMPTY.setAsideShown), ...(s.setAsideShown ?? {}) };
+      if (aside.parked > shown.parked) {
+        const n = aside.parked - shown.parked;
+        parts.push(`${n} batch${n === 1 ? '' : 'es'} of distilled work facts ${n === 1 ? 'was' : 'were'} made for another colleague than the one this Claude Code is connected to now; ${n === 1 ? 'it is' : 'they are'} kept on this machine and sent only to that colleague, if this Claude Code connects to it again`);
+      }
+      if (aside.unsent > shown.unsent) {
+        const n = aside.unsent - shown.unsent;
+        parts.push(`${n} older batch${n === 1 ? '' : 'es'} kept for other colleagues ${n === 1 ? 'was' : 'were'} deleted unsent (at most ${MAX_PARKED} are kept)`);
+      }
       if (aside.refused > shown.refused) {
         const n = aside.refused - shown.refused;
         parts.push(`the colleague refused ${n} batch${n === 1 ? '' : 'es'} of distilled work facts (it answered with an error, so ${n === 1 ? 'it was' : 'they were'} not stored and will not be sent again)`);
@@ -777,7 +857,7 @@ export function distilNotice(p, { now = Date.now() } = {}) {
         const n = aside.torn - shown.torn;
         parts.push(`${n} batch${n === 1 ? '' : 'es'} of distilled work facts ${n === 1 ? 'was' : 'were'} damaged on this machine's disk before ${n === 1 ? 'it' : 'they'} could be sent, and ${n === 1 ? 'was' : 'were'} set aside; the rest was sent`);
       }
-      s.setAsideShown = { refused: aside.refused, torn: aside.torn };
+      s.setAsideShown = { ...aside };
       if (s.lastError && s.problemShown !== s.lastError.class) {
         parts.push(`${NOTICES[s.lastError.class] ?? 'the background distil had a problem'} (${s.lastError.message})`);
         s.problemShown = s.lastError.class;

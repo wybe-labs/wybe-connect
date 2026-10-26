@@ -500,6 +500,64 @@ test('an outbox line damaged after distil_done is set aside; the intact records 
   assert.equal(r3.outcome.ok, true);
 });
 
+// ------------------------------------------------------------------ an outbox belongs to one node
+test('an outbox made for node A is never sent to node B; it is kept, told once, and delivered when A is connected again', async () => {
+  const { p, files } = sandbox(1);
+  const a = await httpNode({ answers: [502] });
+  const b = await httpNode();
+  try {
+    saveCredentials(creds(a.url), p);
+    const T = Date.now();
+    note(p, files, T - 7 * H);
+    const r1 = await cycle(p, { now: T });
+    assert.equal(r1.outcome.class, 'node-unreachable', 'distilled for A, kept in the outbox');
+    const runId = r1.plan.runId;
+    saveCredentials({ ...creds(b.url), nodeUrl: 'https://node-b.example.invalid' }, p);
+    const r2 = await cycle(p, { now: T + 31 * MIN });
+    assert.equal(r2.plan, null, 'nothing to do for B: A\'s outbox is not B\'s');
+    assert.deepEqual(b.sends, [], 'B received nothing');
+    let s = D.loadState(p);
+    assert.equal(s.outbox, null);
+    assert.deepEqual(s.parked.map((x) => x.runId), [runId], 'kept on this machine for A');
+    const n = D.distilNotice(p, { now: T + 32 * MIN });
+    assert.match(n, /another colleague/);
+    assert.equal(D.distilNotice(p, { now: T + 33 * MIN }), null, 'told once');
+    // A delivery started before the switch is refused at the door, too.
+    const direct = await D.deliver(p, { runId, mode: 'ongoing', node: 'https://demo.example.test' }, {});
+    assert.equal(direct.ok, false);
+    assert.equal(direct.class, 'node-changed');
+    assert.deepEqual(b.sends, []);
+    saveCredentials(creds(a.url), p);
+    const r3 = await cycle(p, { now: T + 7 * H });
+    assert.equal(r3.plan.mode, 'deliver');
+    assert.equal(r3.outcome.ok, true);
+    assert.deepEqual(a.stored, ['Fact 1 of 1.'], 'delivered to A once A is connected again');
+    s = D.loadState(p);
+    assert.deepEqual(s.parked, []);
+  } finally {
+    a.close();
+    b.close();
+  }
+});
+
+test('the idempotency key is bound to the node: the same run and record give another key on another node', async () => {
+  const { p, files } = sandbox(1);
+  const a = await httpNode();
+  try {
+    saveCredentials(creds(a.url), p);
+    const T = Date.now();
+    note(p, files, T - 7 * H);
+    const r = await cycle(p, { now: T });
+    assert.equal(r.outcome.ok, true);
+    const key = a.sends[0].idempotency_key;
+    assert.equal(key, D.recordKey('https://demo.example.test', r.plan.runId, 1));
+    assert.notEqual(D.recordKey('https://node-b.example.invalid', r.plan.runId, 1), key);
+    assert.match(key, /^wc1-[0-9a-f]{64}$/);
+  } finally {
+    a.close();
+  }
+});
+
 // ------------------------------------------------------------------ R4-5: told once per kind
 test('R4-5: one continuing outage is told once, whatever number of calls each run made', async () => {
   const { p, files } = sandbox();
