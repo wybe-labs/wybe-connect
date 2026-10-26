@@ -3,7 +3,7 @@
 // without it, the text comes back with the instruction to ask the person and wait for a yes.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
@@ -138,6 +138,28 @@ test('take_task: an unknown id, a settled task, or no connection is an error', a
     assert.equal((await proxy.handle(req(4, 'tools/call', { name: 'take_task', arguments: { task_id: t.id } }))).result.isError, true);
     const none = createProxy({ paths: connectionPaths(mkdtempSync(join(tmpdir(), 'wybe-connect-take-')), 'x') });
     assert.equal((await none.handle(req(5, 'tools/call', { name: 'take_task', arguments: { task_id: t.id } }))).result.isError, true);
+  } finally {
+    await node.close();
+  }
+});
+
+test('take_task finds a task in the connection of the session it went to, not only the server\'s default one', async () => {
+  const node = await startFakeNode();
+  try {
+    const root = mkdtempSync(join(tmpdir(), 'wybe-connect-take-'));
+    const a = connectionPaths(root, 'node-a');
+    const b = connectionPaths(root, 'node-b');
+    saveCredentials(grantFor(node), a);
+    saveCredentials(grantFor(node, { grantId: 'g-b' }), b);
+    writeFileSync(join(root, 'connections.json'), JSON.stringify({ version: 1, recent: ['node-a', 'node-b'] }));
+    const t = { id: randomUUID(), text: 'Oppgave til økta på den andre koblingen', mode: 'confirm', session_id: SID };
+    node.tasks.push(t);
+    await pollOnce(b, SID);
+    const proxy = createProxy({ root, env: {}, request: async () => ({ action: 'accept' }) });
+    await initialized(proxy, true);
+    const r = await proxy.handle(req(2, 'tools/call', { name: 'take_task', arguments: { task_id: t.id } }));
+    assert.ok(textOf(r).includes(t.text));
+    assert.equal(findTask(b, t.id).task.status, 'running');
   } finally {
     await node.close();
   }
