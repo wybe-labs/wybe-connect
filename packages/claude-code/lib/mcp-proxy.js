@@ -25,6 +25,7 @@ import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './
 import { NODE_ENV, connectionPaths, defaultConnection, findConnection, checkSave, saveConnection } from './connections.js';
 import { spoolRemember, spoolDone } from './distil.js';
 import { redactValue } from './redact.js';
+import { findTask, decideTask } from './bridge.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'wybe', version: '0.2.0' });
 
@@ -42,6 +43,29 @@ export const CONNECT_TOOL = Object.freeze({
 });
 
 const text = (t, isError = false) => ({ content: [{ type: 'text', text: t }], ...(isError ? { isError: true } : {}) });
+
+// A task from the person's Wybe colleague that needs the person's yes (mode confirm, lib/bridge.js).
+// The session's notice carries only the id; this tool is the one way to the text. With the
+// client's elicitation capability the person decides in a form; without it the model is told to
+// show the text word for word and act only after an explicit yes (model-mediated, a stated limit).
+export const TAKE_TASK_TOOL = Object.freeze({
+  name: 'take_task',
+  description: 'Take a task the person\'s Wybe AI colleague sent to this session; the notice you got names its task_id. It shows the exact task to the person, who accepts or declines it, and returns the task only when they accept. If it says this client cannot show a form: show the task to the person word for word, ask them, and only after their explicit yes call take_task again with accepted: true (accepted: false when they say no).',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      task_id: { type: 'string', description: 'the task id from the notice' },
+      accepted: { type: 'boolean', description: 'only when this client shows no form: the person\'s own answer in the chat' },
+    },
+    required: ['task_id'],
+    additionalProperties: false,
+  },
+});
+
+export const ELICIT_TIMEOUT_MS = 10 * 60 * 1000;
+const quoted = (t) => `«${t}»`;
+const accepted = (t) => text(`The person accepted the task. Do it now in this session: ${quoted(t)}. When you finish, end with a short summary of what you did; it is sent back to the colleague.`);
+const declined = () => text('The person declined the task. Do not do it; the colleague has been told.');
 
 export const DISTIL_TOOLS = Object.freeze([
   Object.freeze({
@@ -101,8 +125,9 @@ export function importRequestOf(result) {
  * handle(message) answers one JSON-RPC message (null for a notification); notify(message) is how
  * the proxy pushes notifications/tools/list_changed after a sign-in completes.
  */
-export function createProxy({ paths: fixed = null, root = null, env = process.env, clientName = 'wybe-connect (Claude Code)', notify = () => {}, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, distilRun = null, onImportRequest = null }) {
+export function createProxy({ paths: fixed = null, root = null, env = process.env, clientName = 'wybe-connect (Claude Code)', notify = () => {}, request = null, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, distilRun = null, onImportRequest = null }) {
   let pending = null; // { nodeUrl, url, done, error }
+  let canElicit = false; // the client declared the elicitation capability at initialize
   // With `root` (a harness home), the server uses one connection (lib/connections.js). It gets no
   // session id, so it takes the hooks' rule without the session step: WYBE_CONNECT_NODE (unknown
   // means none, never another), else the default. Once found, it keeps that connection for its
@@ -220,6 +245,35 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     return text(`A browser window is opening on the Wybe sign-in page. Ask the person to sign in with their passkey and tick what they want to share, then call connect again to confirm. If no browser opened, they can open this link: ${state.url}`);
   }
 
+  async function callTakeTask(args) {
+    const p = current();
+    if (!p || !credentials()) return text('Not connected to a Wybe AI colleague, so there is no task to take.', true);
+    const id = typeof args?.task_id === 'string' ? args.task_id.trim() : '';
+    const found = findTask(p, id);
+    if (!found) return text(`No task ${JSON.stringify(id.slice(0, 64))} from the colleague on this machine.`, true);
+    const { sessionId, task } = found;
+    if (task.status === 'running') return accepted(task.text);
+    if (task.status !== 'offered') return text('That task is already settled; there is nothing to do for it.', true);
+    const decide = async (yes) => {
+      await decideTask(p, sessionId, id, yes, { fetchImpl, now });
+      return yes ? accepted(task.text) : declined();
+    };
+    if (canElicit && request) {
+      let answer;
+      try {
+        answer = await request('elicitation/create', {
+          message: `Oppgave fra KI-kollegaen din i Wybe:\n\n${quoted(task.text)}\n\nGodta for å la denne økta gjøre den. Avvis for å si nei.`,
+          requestedSchema: { type: 'object', properties: {} },
+        }, ELICIT_TIMEOUT_MS);
+      } catch {
+        return text('The person has not answered the form. Nothing was done; call take_task again to ask once more.', true);
+      }
+      return decide(answer?.action === 'accept');
+    }
+    if (args?.accepted === true || args?.accepted === false) return decide(args.accepted);
+    return text(`This client cannot show a form, so ask the person yourself. Show them this task word for word, exactly as written: ${quoted(task.text)}. Ask whether they accept it. Do nothing for it until they give an explicit yes in this chat; then call take_task again with task_id "${id}" and accepted: true. If they say no, call take_task with accepted: false.`);
+  }
+
   const seeImport = (result) => {
     const at = onImportRequest ? importRequestOf(result) : null;
     if (at) {
@@ -283,6 +337,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     if (distilRun && method !== 'initialize' && method !== 'ping') return handleDistil(method, params, reply, fail);
     switch (method) {
       case 'initialize':
+        canElicit = Boolean(params?.capabilities?.elicitation && typeof params.capabilities.elicitation === 'object');
         return reply({
           protocolVersion: typeof params?.protocolVersion === 'string' ? params.protocolVersion : PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: true } },
@@ -293,12 +348,13 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
       case 'tools/list': {
         if (!credentials()) return reply({ tools: [CONNECT_TOOL] });
         const out = await upstream('tools/list', {});
-        const tools = out.ok && Array.isArray(out.result?.tools) ? out.result.tools.filter((t) => t?.name !== CONNECT_TOOL.name) : [];
-        return reply({ tools: [...tools, CONNECT_TOOL] });
+        const tools = out.ok && Array.isArray(out.result?.tools) ? out.result.tools.filter((t) => t?.name !== CONNECT_TOOL.name && t?.name !== TAKE_TASK_TOOL.name) : [];
+        return reply({ tools: [...tools, TAKE_TASK_TOOL, CONNECT_TOOL] });
       }
       case 'tools/call': {
         const name = params?.name;
         if (name === CONNECT_TOOL.name) return reply(await callConnect(params?.arguments));
+        if (name === TAKE_TASK_TOOL.name) return reply(await callTakeTask(params?.arguments));
         if (!credentials()) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
         // Every argument passes through redactValue before it leaves the machine; one the walker
         // cannot read is refused rather than forwarded.
@@ -337,7 +393,18 @@ export const POLL_EVERY_MS = 5 * 60 * 1000;
  */
 export function runStdio({ paths, root = null, env = process.env, clientName, input = process.stdin, output = process.stdout, distilRun = null, onImportRequest = null }) {
   const write = (m) => output.write(`${JSON.stringify(m)}\n`);
-  const proxy = createProxy({ paths, root, env, clientName, notify: write, distilRun, onImportRequest });
+  // Requests this server sends to the client (elicitation/create for take_task): ids of their own,
+  // answered by a message with that id and a result or an error, never by a method.
+  const waiting = new Map();
+  let seq = 0;
+  const request = (method, params, timeoutMs) => new Promise((resolve, reject) => {
+    const id = `wybe-${++seq}`;
+    const timer = setTimeout(() => { waiting.delete(id); reject(new Error('no answer')); }, timeoutMs);
+    timer.unref?.();
+    waiting.set(id, { resolve, reject, timer });
+    write({ jsonrpc: '2.0', id, method, params });
+  });
+  const proxy = createProxy({ paths, root, env, clientName, notify: write, request, distilRun, onImportRequest });
   if (onImportRequest && !distilRun) {
     const tick = () => { proxy.pollImport().catch(() => {}); };
     setTimeout(tick, POLL_FIRST_MS).unref?.();
@@ -351,6 +418,14 @@ export function runStdio({ paths, root = null, env = process.env, clientName, in
       msg = JSON.parse(line);
     } catch {
       write({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'parse error' } });
+      return;
+    }
+    if (msg && typeof msg === 'object' && msg.method === undefined && waiting.has(msg.id) && ('result' in msg || 'error' in msg)) {
+      const w = waiting.get(msg.id);
+      waiting.delete(msg.id);
+      clearTimeout(w.timer);
+      if (msg.error) w.reject(new Error(String(msg.error?.message ?? 'error')));
+      else w.resolve(msg.result);
       return;
     }
     try {

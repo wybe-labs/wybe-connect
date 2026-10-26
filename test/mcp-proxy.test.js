@@ -109,7 +109,7 @@ test('connected: the node\'s tools are listed with connect, a call is forwarded 
   saveCredentials(creds(), p);
   const node = fakeNode();
   const proxy = createProxy({ paths: p, fetchImpl: node.fetchImpl });
-  assert.deepEqual((await proxy.handle(req(1, 'tools/list'))).result.tools.map((t) => t.name), ['remember', 'report_session', 'connect']);
+  assert.deepEqual((await proxy.handle(req(1, 'tools/list'))).result.tools.map((t) => t.name), ['remember', 'report_session', 'take_task', 'connect']);
   const r = await proxy.handle(req(2, 'tools/call', { name: 'remember', arguments: { items: [{ content: 'x' }] } }));
   assert.equal(r.result.content[0].text, '{"ok":true,"stored":1}');
   assert.deepEqual(node.seen.filter((s) => s.rpc === 'tools/call')[0].params, { name: 'remember', arguments: { items: [{ content: 'x' }] } });
