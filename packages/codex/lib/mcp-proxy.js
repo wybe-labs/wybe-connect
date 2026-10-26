@@ -4,8 +4,9 @@
 // URL to copy. Now:
 //   not connected  tools/list = [connect]; `connect(node_url)` starts the OAuth flow (lib/oauth.js)
 //                  in the background and answers at once with the sign-in URL; when the browser
-//                  flow completes, the grant is stored where the hooks read it and the server
-//                  sends notifications/tools/list_changed
+//                  flow completes, the grant is stored as a connection (lib/connections.js
+//                  saveConnection: its own grantId, the new default), where the hooks read it,
+//                  and the server sends notifications/tools/list_changed
 //   connected      tools/list = the node's own tools + connect; tools/call is forwarded to the
 //                  node's /mcp with the stored bearer (one refresh on 401), the result verbatim
 //   distil run     (`distilRun` set: the background `claude -p` of lib/distil.js) tools/list is fixed,
@@ -20,7 +21,8 @@
 import { createInterface } from 'node:readline';
 import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
-import { loadCredentials, saveCredentials, writeJsonPrivate } from './home.js';
+import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
+import { NODE_ENV, connectionPaths, defaultConnection, findConnection, checkSave, saveConnection } from './connections.js';
 import { spoolRemember, spoolDone } from './distil.js';
 import { redactValue } from './redact.js';
 
@@ -99,12 +101,28 @@ export function importRequestOf(result) {
  * handle(message) answers one JSON-RPC message (null for a notification); notify(message) is how
  * the proxy pushes notifications/tools/list_changed after a sign-in completes.
  */
-export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', notify = () => {}, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, distilRun = null, onImportRequest = null }) {
+export function createProxy({ paths: fixed = null, root = null, env = process.env, clientName = 'wybe-connect (Claude Code)', notify = () => {}, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, distilRun = null, onImportRequest = null }) {
   let pending = null; // { nodeUrl, url, done, error }
+  // With `root` (a harness home), the server uses one connection (lib/connections.js). It gets no
+  // session id, so it takes the hooks' rule without the session step: WYBE_CONNECT_NODE (unknown
+  // means none, never another), else the default. Once found, it keeps that connection for its
+  // life, as a session does; a `connect` from here switches it to the connection it made.
+  // With `paths`, it uses those as they are (a distil run's own connection, or the single layout).
+  let key = null;
+  const current = () => {
+    if (fixed) return fixed;
+    if (!root) return null;
+    if (!key) {
+      const wanted = env[NODE_ENV];
+      key = wanted ? findConnection(root, wanted) : defaultConnection(root);
+    }
+    return key ? connectionPaths(root, key) : null;
+  };
 
   const credentials = () => {
     try {
-      return loadCredentials(paths);
+      const p = current();
+      return p ? loadCredentials(p) : null;
     } catch {
       return null;
     }
@@ -118,11 +136,29 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
       const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now() });
       if (next) {
         c = { ...c, ...next };
-        saveCredentials(c, paths);
+        // Stored only while the file still holds the grant this call started with: a grant removed
+        // or replaced meanwhile (a new grantId, lib/connections.js) is never written over.
+        const p = current();
+        let onDisk = null;
+        try {
+          onDisk = p ? readJson(p.credentials) : null;
+        } catch {
+          onDisk = null;
+        }
+        if (onDisk && (onDisk.grantId ?? null) === (c.grantId ?? null)) saveCredentials(c, p);
         out = await forward({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, method, params, fetchImpl });
       }
     }
     return out;
+  }
+
+  /** Stores a finished sign-in: as a connection of its own (the new default), or in the fixed paths. */
+  function store(creds) {
+    if (fixed) {
+      saveCredentials(creds, fixed);
+      return;
+    }
+    key = saveConnection(root, creds);
   }
 
   function startConnect(nodeUrl) {
@@ -137,7 +173,7 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
       onUrl: (url) => { state.url = url; resolveUrl(); },
       log: () => {},
     }).then((creds) => {
-      saveCredentials(creds, paths);
+      store(creds);
       state.done = true;
       notify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
     }).catch((err) => {
@@ -167,6 +203,14 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
       pending = null;
       return text(`The last sign-in did not finish (${why}). Call connect again to retry.`, true);
     }
+    if (!fixed) {
+      try {
+        if (!root) throw new Error('this server has no wybe-connect home');
+        checkSave(root, origin); // a name another node holds is refused before the browser opens
+      } catch (err) {
+        return text(`Could not start the sign-in: ${err instanceof Error ? err.message : String(err)}`, true);
+      }
+    }
     const state = await startConnect(origin);
     if (state.error) return text(`Could not start the sign-in: ${state.error}`, true);
     if (state.done) {
@@ -180,7 +224,7 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
     const at = onImportRequest ? importRequestOf(result) : null;
     if (at) {
       try {
-        onImportRequest(at);
+        onImportRequest(at, current());
       } catch {
         // the scheduler is best effort here; the next answer carries the request again
       }
@@ -198,6 +242,7 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
   }
 
   async function handleDistil(method, params, reply, fail) {
+    if (method === 'tools/call' && !current()) return reply(text('This distil run has no connection to queue for.', true));
     switch (method) {
       case 'tools/list':
         return reply({ tools: DISTIL_TOOLS });
@@ -206,12 +251,12 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
         if (name === 'remember') {
           const cleaned = cleanRememberArgs(params?.arguments);
           if (cleaned.error) return reply(text(cleaned.error, true));
-          const r = spoolRemember(paths, distilRun, cleaned.args);
+          const r = spoolRemember(current(), distilRun, cleaned.args);
           if (r.error) return reply(text(r.error, true));
           return reply(text(`Queued ${cleaned.args.items.length} item(s) as call ${r.seq}. They are sent to the colleague after distil_done.`));
         }
         if (name === 'distil_done') {
-          const r = spoolDone(paths, distilRun);
+          const r = spoolDone(current(), distilRun);
           if (r.error) return reply(text(r.error, true));
           return reply(text(`Done: ${r.items} remember call(s) will be sent to the colleague.`));
         }
@@ -269,7 +314,8 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
           return reply(text(`Not delivered: ${why}.`, true));
         }
         const questions = openQuestionsOf(out.result);
-        if (questions.length) writeJsonPrivate(paths.openQuestions, { fetched_at: new Date(now()).toISOString(), open_questions: questions });
+        const cp = current();
+        if (questions.length && cp) writeJsonPrivate(cp.openQuestions, { fetched_at: new Date(now()).toISOString(), open_questions: questions });
         seeImport(out.result);
         return reply(out.result);
       }
@@ -289,9 +335,9 @@ export const POLL_EVERY_MS = 5 * 60 * 1000;
  * «Importer» press is picked up while Claude Code is open: pending_questions 2 s after start, then
  * every 5 minutes (timers unref'd, so they never keep the process alive).
  */
-export function runStdio({ paths, clientName, input = process.stdin, output = process.stdout, distilRun = null, onImportRequest = null }) {
+export function runStdio({ paths, root = null, env = process.env, clientName, input = process.stdin, output = process.stdout, distilRun = null, onImportRequest = null }) {
   const write = (m) => output.write(`${JSON.stringify(m)}\n`);
-  const proxy = createProxy({ paths, clientName, notify: write, distilRun, onImportRequest });
+  const proxy = createProxy({ paths, root, env, clientName, notify: write, distilRun, onImportRequest });
   if (onImportRequest && !distilRun) {
     const tick = () => { proxy.pollImport().catch(() => {}); };
     setTimeout(tick, POLL_FIRST_MS).unref?.();

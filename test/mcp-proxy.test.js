@@ -188,3 +188,78 @@ test('import: a node answer carrying import_request is handed on, and pollImport
   assert.deepEqual(seen, ['remember', 'pending_questions']);
   assert.deepEqual(handed, [at, at]);
 });
+
+// ------------------------------------------------------------------ several connections (lib/connections.js)
+const { connectionNames, connectionPaths, defaultConnection, saveConnection, useConnection } = await import('../lib/connections.js');
+const A = 'https://node-a.example.invalid';
+const B = 'https://node-b.example.invalid';
+const TOK_A = ['wat_', 'a'.repeat(40)].join('');
+const TOK_B = ['wat_', 'b'.repeat(40)].join('');
+const at = (node, over = {}) => creds({ nodeUrl: node, resource: `${node}/mcp`, mcpEndpoint: `${node}/mcp`, ...over });
+
+/** A node fake that takes any bearer and records which one each tools/call carried, and to where. */
+function anyBearerNode() {
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    if (init.method === 'DELETE') return new Response('', { status: 200 });
+    const msg = JSON.parse(init.body);
+    if (msg.method === 'initialize') return json({ jsonrpc: '2.0', id: msg.id, result: {} }, 200, { 'mcp-session-id': 's1' });
+    if (msg.method === 'notifications/initialized') return new Response('', { status: 202 });
+    calls.push({ url: String(url), auth: init.headers.authorization, rpc: msg.method });
+    if (msg.method === 'tools/list') return json({ jsonrpc: '2.0', id: msg.id, result: { tools: [{ name: 'remember', inputSchema: { type: 'object' } }] } });
+    return json({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: '{"ok":true,"stored":1}' }], structuredContent: { open_questions: [{ id: 'q1', question: 'Hva jobber du med nå?' }] } } });
+  };
+  return { calls, fetchImpl };
+}
+
+const remember = (id) => req(id, 'tools/call', { name: 'remember', arguments: { items: [{ content: 'x' }] } });
+
+test('connections: the server\'s connect stores a connection of its own with a grantId, makes it the default, and the tools use it', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wybe-connect-proxy-conn-'));
+  const node = anyBearerNode();
+  const notes = [];
+  const proxy = createProxy({ root, env: {}, notify: (m) => notes.push(m), fetchImpl: node.fetchImpl, connectImpl: (_url, opts) => { opts.onUrl('https://auth.example.invalid/authorize?x'); return Promise.resolve(at(A, { accessToken: TOK_A })); } });
+  assert.deepEqual((await proxy.handle(req(1, 'tools/list'))).result.tools.map((t) => t.name), ['connect']);
+  await proxy.handle(req(2, 'tools/call', { name: 'connect', arguments: { node_url: A } }));
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(connectionNames(root), ['node-a.example.invalid']);
+  assert.equal(defaultConnection(root), 'node-a.example.invalid');
+  const stored = loadCredentials(connectionPaths(root, 'node-a.example.invalid'));
+  assert.match(stored.grantId, /^[0-9a-f]{32}$/);
+  assert.equal(existsSync(join(root, 'credentials.json')), false, 'not the single layout');
+  assert.deepEqual(notes, [{ jsonrpc: '2.0', method: 'notifications/tools/list_changed' }]);
+  assert.equal((await proxy.handle(remember(3))).result.content[0].text, '{"ok":true,"stored":1}');
+  assert.deepEqual(node.calls.filter((c) => c.rpc === 'tools/call').map((c) => [c.url, c.auth]), [[`${A}/mcp`, `Bearer ${TOK_A}`]]);
+  assert.ok(existsSync(connectionPaths(root, 'node-a.example.invalid').openQuestions), 'open questions cached for that connection');
+});
+
+test('connections: the server uses WYBE_CONNECT_NODE, else the default, keeps the connection it found, and an unknown name is no connection', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wybe-connect-proxy-conn-'));
+  saveConnection(root, at(A, { accessToken: TOK_A }));
+  saveConnection(root, at(B, { accessToken: TOK_B })); // B is the default now
+  const node = anyBearerNode();
+  const named = createProxy({ root, env: { WYBE_CONNECT_NODE: 'node-a.example.invalid' }, fetchImpl: node.fetchImpl });
+  const byDefault = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+  await named.handle(remember(1));
+  await byDefault.handle(remember(2));
+  useConnection(root, 'node-a.example.invalid'); // the default moves; a running server keeps its own
+  await byDefault.handle(remember(3));
+  assert.deepEqual(node.calls.filter((c) => c.rpc === 'tools/call').map((c) => c.auth), [`Bearer ${TOK_A}`, `Bearer ${TOK_B}`, `Bearer ${TOK_B}`]);
+  const unknown = createProxy({ root, env: { WYBE_CONNECT_NODE: 'node-c.example.invalid' }, fetchImpl: node.fetchImpl });
+  assert.deepEqual((await unknown.handle(req(4, 'tools/list'))).result.tools.map((t) => t.name), ['connect'], 'never another node');
+});
+
+test('connections: a refresh never writes over a grant replaced while it ran', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wybe-connect-proxy-conn-'));
+  const key = saveConnection(root, at(A));
+  const replacement = ['wat_', 'r'.repeat(40)].join('');
+  const node = fakeNode({ valid: NEW });
+  const fetchImpl = async (url, init) => {
+    if (String(url) === TOKEN_ENDPOINT) saveConnection(root, at(A, { accessToken: replacement })); // a sign-in again, meanwhile
+    return node.fetchImpl(url, init);
+  };
+  const proxy = createProxy({ root, env: {}, fetchImpl });
+  const r = await proxy.handle(remember(1));
+  assert.equal(r.result.content[0].text, '{"ok":true,"stored":1}', 'this call still goes through with its refreshed token');
+  assert.equal(loadCredentials(connectionPaths(root, key)).accessToken, replacement, 'the new grant stands');
+});
