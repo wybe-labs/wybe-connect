@@ -20,10 +20,11 @@
 //
 // The old single <home>/credentials.json (with its queue and caches) moves under its node on the
 // first call that reads the store; when that node already has a connection the old file is left
-// where it is, untouched, and one that cannot be read is renamed credentials.unreadable.json.
+// where it is, untouched. One that is not a grant (bad JSON or shape) is renamed
+// credentials.unreadable.json; one that fails to read (busy, locked) stays for the next call.
 
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
 import { paths as legacyPaths, readJson, writeJsonPrivate, loadCredentials, saveCredentials } from './home.js';
 
@@ -89,11 +90,19 @@ function moveIfThere(from, to) {
   }
 }
 
+function isGrant(c) {
+  try {
+    return Boolean(c && typeof c.nodeUrl === 'string' && originOf(c.nodeUrl));
+  } catch {
+    return false;
+  }
+}
+
 /** The grant at `p`, or null when it is missing or unreadable (never throws). */
 function readGrant(p) {
   try {
     const c = loadCredentials(p);
-    return c && typeof c.nodeUrl === 'string' && originOf(c.nodeUrl) ? c : null;
+    return isGrant(c) ? c : null;
   } catch {
     return null;
   }
@@ -114,9 +123,17 @@ function setAside(root, file) {
 export function migrateLegacy(root) {
   const old = legacyPaths(root);
   if (!existsSync(old.credentials)) return null;
-  const credentials = readGrant(old);
-  if (!credentials) {
-    setAside(root, old.credentials);
+  let credentials;
+  try {
+    credentials = loadCredentials(old);
+  } catch (err) {
+    // a read error (busy, locked, not a file) leaves the file for the next call; only one that
+    // is not a grant at all (bad JSON, wrong shape) is set aside
+    if (err?.code) return null;
+    credentials = null;
+  }
+  if (!isGrant(credentials)) {
+    if (existsSync(old.credentials)) setAside(root, old.credentials);
     return null;
   }
   const key = connectionKey(credentials.nodeUrl);
@@ -189,10 +206,13 @@ export function checkSave(root, nodeUrl, name = null) {
   return key;
 }
 
-/** Stores a grant from oauth.connect() as its own connection and makes it the default. */
+/**
+ * Stores a grant from oauth.connect() as its own connection and makes it the default. Each save
+ * gets a new random grantId, so a flush still running on the grant it replaces can tell (lib/flush.js).
+ */
 export function saveConnection(root, credentials, { name = null } = {}) {
   const key = checkSave(root, credentials.nodeUrl, name);
-  saveCredentials(credentials, connectionPaths(root, key));
+  saveCredentials({ ...credentials, grantId: randomBytes(16).toString('hex') }, connectionPaths(root, key));
   markRecent(root, key);
   return key;
 }

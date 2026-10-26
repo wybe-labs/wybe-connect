@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
@@ -10,6 +10,7 @@ import {
 } from '../lib/connections.js';
 import { loadCredentials } from '../lib/home.js';
 import { createDelivery, newSummary } from '../lib/flush.js';
+import { enqueue } from '../lib/queue.js';
 
 const TOKEN_A = ['wat_', 'a1Aa2Bb3Cc4Dd5Ee6Ff7Gg8Hh9Ii0Jj'].join('');
 const TOKEN_B = ['wat_', 'b1Kk2Ll3Mm4Nn5Oo6Pp7Qq8Rr9Ss0Tt'].join('');
@@ -244,6 +245,80 @@ test('removing a connection while a flush refreshes its token does not bring it 
   const gone = await createDelivery({ credentials: { ...creds('https://dittfirma.wybe.me', TOKEN_A) }, paths: p, fetchImpl: async () => new Response('', { status: 503 }), summary: newSummary('Stop') });
   await gone.deliver({ scope: 'sessions:light', prompts: [] });
   assert.equal(existsSync(join(root, 'connections', 'dittfirma.wybe.me')), false, 'nothing is queued for a removed connection');
+});
+
+const mcpOk = (init) => {
+  let id = 1;
+  try { id = JSON.parse(String(init?.body)).id; } catch { /* not JSON */ }
+  if (id === undefined) return new Response('', { status: 202 });
+  return new Response(JSON.stringify({ jsonrpc: '2.0', id, result: {} }), { status: 200, headers: { 'content-type': 'application/json', 'mcp-session-id': 's' } });
+};
+const tokenOk = (access) => new Response(JSON.stringify({ access_token: access, token_type: 'Bearer', refresh_token: 'wrt_rotated', expires_in: 3600 }), { status: 200, headers: { 'content-type': 'application/json' } });
+
+test('a name removed and reconnected to another node during a flush: the new grant and its queue stay, the old node gets none of its items', async () => {
+  const root = home();
+  saveConnection(root, { ...creds('https://node-a.example.invalid', TOKEN_A), refreshToken: 'wrt_a' }, { name: 'work' });
+  const p = connectionPaths(root, 'work');
+  const seen = [];
+  const fetchImpl = async (url, init) => {
+    seen.push({ url: String(url), body: String(init?.body ?? '') });
+    if (seen.length === 1) {
+      removeConnection(root, 'work');
+      saveConnection(root, creds('https://node-b.example.invalid', TOKEN_B), { name: 'work' });
+      enqueue(p.queue, { text: 'queued for node b' });
+      return new Response('', { status: 401 });
+    }
+    if (String(url).endsWith('/oauth/token')) return tokenOk('wat_refreshed_for_a');
+    return mcpOk(init);
+  };
+  const summary = newSummary('Stop');
+  const d = createDelivery({ credentials: loadCredentials(p), paths: p, fetchImpl, summary });
+  await d.deliver({ scope: 'sessions:light', prompts: [] });
+  await d.drainQueue();
+  const now = loadCredentials(p);
+  assert.equal(now.nodeUrl, 'https://node-b.example.invalid');
+  assert.equal(now.accessToken, TOKEN_B);
+  assert.deepEqual(seen.filter((s) => s.body.includes('queued for node b')).map((s) => s.url), [], 'node a got an item queued for node b');
+  assert.equal(seen.filter((s) => s.url.endsWith('/oauth/token')).length, 0, 'the replaced grant is not refreshed');
+  assert.equal(readdirSync(p.queue).length, 1, "node b's queue is untouched and nothing of node a's is added to it");
+  assert.equal(summary.queued, 0);
+  assert.equal(summary.drained, 0);
+});
+
+test('the same node reconnected with other scopes during a flush keeps the new grant, not the refreshed old one', async () => {
+  const root = home();
+  saveConnection(root, { ...creds('https://node-a.example.invalid', TOKEN_A, ['remember', 'sessions:full']), refreshToken: 'wrt_a' });
+  const p = connectionPaths(root, 'node-a.example.invalid');
+  let calls = 0;
+  const fetchImpl = async (url, init) => {
+    calls += 1;
+    if (calls === 1) {
+      removeConnection(root, 'node-a.example.invalid');
+      saveConnection(root, creds('https://node-a.example.invalid', TOKEN_B, ['remember']));
+      return new Response('', { status: 401 });
+    }
+    if (String(url).endsWith('/oauth/token')) return tokenOk('wat_refreshed_old_pairing');
+    return mcpOk(init);
+  };
+  const d = createDelivery({ credentials: loadCredentials(p), paths: p, fetchImpl, summary: newSummary('Stop') });
+  await d.deliver({ scope: 'sessions:full', prompts: [] });
+  const now = loadCredentials(p);
+  assert.equal(now.accessToken, TOKEN_B);
+  assert.deepEqual(now.scopes, ['remember']);
+  assert.equal(existsSync(p.queue) ? readdirSync(p.queue).length : 0, 0);
+});
+
+test('migrateLegacy: an old credentials.json that cannot be read right now stays where it is and moves on a later call', () => {
+  const root = home();
+  mkdirSync(join(root, 'credentials.json'));
+  assert.equal(migrateLegacy(root), null);
+  assert.equal(listConnections(root).length, 0);
+  assert.ok(existsSync(join(root, 'credentials.json')), 'left in place for the next call');
+  assert.deepEqual(readdirSync(root).filter((f) => f.startsWith('credentials.unreadable')), [], 'a read error is not a bad file');
+  rmSync(join(root, 'credentials.json'), { recursive: true });
+  writeFileSync(join(root, 'credentials.json'), JSON.stringify({ version: 1, ...creds('https://node-a.example.invalid', TOKEN_A) }));
+  assert.equal(migrateLegacy(root), 'node-a.example.invalid');
+  assert.equal(loadCredentials(connectionPaths(root, 'node-a.example.invalid')).accessToken, TOKEN_A);
 });
 
 test('sessionPaths: credentials, queue and question caches per connection; cursors and spool shared; none when not connected', () => {
