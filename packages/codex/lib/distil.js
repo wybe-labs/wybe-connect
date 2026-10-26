@@ -23,15 +23,22 @@
 // Bounds: pending plus the run in flight hold at most MAX_PENDING transcripts; past that, notes
 // wait on disk, folded oldest first as room frees. Past MAX_NOTE_FILES a note is dropped with a
 // count, and SessionStart says so. A failed run's transcripts go back by their noted time.
+//
+// Codex has the same pipeline (a plan's `harness`): its hooks note rollouts, the run is a headless
+// `codex exec` (read-only sandbox, ephemeral, only the plugin's own server, in distil mode), and
+// the import lists the person's rollouts under <CODEX_HOME>/sessions. What differs per harness is
+// only: how the runner is found, its arguments, the prompt's reading instructions, and where the
+// transcripts are.
 
 import { spawn as defaultSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, openSync, closeSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { delimiter, join, posix, win32 } from 'node:path';
+import { delimiter, dirname, join, posix, win32 } from 'node:path';
 import { homedir } from 'node:os';
 import { withLock, acquire, isAlive as defaultAlive } from './lock.js';
 import { appendRecord, readRecords } from './ledger.js';
-import { paths as legacyPaths, loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
+import { paths as legacyPaths, harnessHome, loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
+import { rolloutHead, stripCodexInjected } from './codex-rollout.js';
 import { connectionPaths, checkedName, connectionNames, pinnedConnection, NODE_ENV } from './connections.js';
 import { callTool } from './post.js';
 import { refreshTokens } from './oauth.js';
@@ -455,20 +462,109 @@ export function claudeHomeOf(env = process.env) {
   return env.CLAUDE_CONFIG_DIR || process.env.CLAUDE_CONFIG_DIR || join(homedir(), '.claude');
 }
 
-/** Whether a transcript is a distil run's own session: its first user message is the distil prompt. */
-function isDistilSession(path) {
-  let head;
+/** Codex's home: CODEX_HOME when set, else ~/.codex. */
+export function codexHomeOf(env = process.env) {
+  return env.CODEX_HOME || process.env.CODEX_HOME || join(homedir(), '.codex');
+}
+
+const harnessOf = (plan) => (plan?.harness === 'codex' ? 'codex' : 'claude-code');
+
+/**
+ * The wybe-connect home a harness home lies in (lib/home.js harnessHome): what the watchdog and
+ * the run's MCP server are started with, so their own harnessHome() finds the same connection.
+ */
+function wybeHomeOf(root, harness) {
+  const up = dirname(root);
+  return harness !== 'claude-code' && join(harnessHome(harness, up)) === join(root) ? up : root;
+}
+
+/** Reads at most `bytes` of a file's head as text, or null. */
+function headText(path, bytes) {
   try {
     const fd = openSync(path, 'r');
     try {
-      const buf = Buffer.alloc(HEAD_BYTES);
-      head = buf.subarray(0, readSync(fd, buf, 0, HEAD_BYTES, 0)).toString('utf8');
+      const buf = Buffer.alloc(bytes);
+      return buf.subarray(0, readSync(fd, buf, 0, bytes, 0)).toString('utf8');
     } finally {
       closeSync(fd);
     }
   } catch {
-    return false;
+    return null;
   }
+}
+
+// A rollout's session_meta carries the base instructions, so the first prompt can lie far in.
+const CODEX_HEAD_BYTES = 1024 * 1024;
+
+/** Whether a rollout is a distil run's own thread: the first prompt the person "typed" is the distil prompt. */
+function isCodexDistilRollout(path) {
+  const head = headText(path, CODEX_HEAD_BYTES);
+  if (head === null) return false;
+  for (const line of head.split('\n')) {
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (o?.type !== 'event_msg') continue;
+    const p = o.payload ?? {};
+    let text = null;
+    if (p.type === 'user_message' && typeof p.message === 'string') text = p.message;
+    else if (p.type === 'item_completed' && p.item?.type === 'UserMessage' && Array.isArray(p.item.content)) text = p.item.content.map((c) => (typeof c?.text === 'string' ? c.text : '')).join('\n');
+    if (text === null) continue;
+    return stripCodexInjected(text).startsWith(DISTIL_PROMPT_START);
+  }
+  return false;
+}
+
+/**
+ * The person's Codex rollouts changed in the import window, oldest first: <codexHome>/sessions/
+ * YYYY/MM/DD/rollout-*.jsonl. A session resumed later keeps its first day's folder, so every
+ * folder is looked at and the file's own time decides. Subagent and internal threads
+ * (session_meta.source), distil runs' own threads and compressed rollouts are left out.
+ */
+export function importRollouts(codexHome, now) {
+  const out = [];
+  const walk = (dir, depth) => {
+    let entries = [];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const path = join(dir, e.name);
+      if (depth < 3) {
+        if (e.isDirectory()) walk(path, depth + 1);
+        continue;
+      }
+      if (!e.isFile() || !e.name.startsWith('rollout-') || !e.name.endsWith('.jsonl')) continue;
+      let st;
+      try {
+        st = statSync(path);
+      } catch {
+        continue;
+      }
+      if (now - st.mtimeMs > IMPORT_DAYS * 24 * 60 * 60 * 1000 || !safeTranscriptPath(path)) continue;
+      let head = null;
+      try {
+        head = rolloutHead(path);
+      } catch {
+        head = null;
+      }
+      if (!head?.personThread || isCodexDistilRollout(path)) continue;
+      out.push({ path, sessionId: head.sessionId, mtimeMs: st.mtimeMs });
+    }
+  };
+  walk(join(codexHome, 'sessions'), 0);
+  return out.sort((a, b) => a.mtimeMs - b.mtimeMs);
+}
+
+/** Whether a transcript is a distil run's own session: its first user message is the distil prompt. */
+function isDistilSession(path) {
+  const head = headText(path, HEAD_BYTES);
+  if (head === null) return false;
   for (const line of head.split('\n')) {
     let o;
     try {
@@ -536,9 +632,9 @@ function importable(p, sessionId) {
  * not the model, decides what the import reads, and each is read from its mark on like any other
  * run. Past MAX_PENDING the rest wait on disk as notes, folded as room frees.
  */
-function enqueueImport(p, s, claudeHome, now) {
+function enqueueImport(p, s, harness, home, now) {
   const have = new Set([...s.pending, ...(s.running?.transcripts ?? [])].map((x) => transcriptKey(x.path)));
-  for (const t of importTranscripts(claudeHome, now)) {
+  for (const t of harness === 'codex' ? importRollouts(home, now) : importTranscripts(home, now)) {
     const key = transcriptKey(t.path);
     if (have.has(key)) continue;
     if (p.connection && !importable(p, t.sessionId)) continue;
@@ -568,9 +664,10 @@ export function requestImport(p, requestedAt) {
 /**
  * One scheduler tick (a hook, or the MCP server on an import request). Folds notes, settles a
  * dead run, and starts the detached watchdog when there is work: an undelivered outbox first, then
- * an import, then an ongoing run. Returns the plan it started, or null.
+ * an import, then an ongoing run. `harness` ('claude-code' or 'codex') picks the runner and where
+ * an import finds the transcripts. Returns the plan it started, or null.
  */
-export function maybeRun({ paths: p, env = process.env, now = Date.now(), alive = defaultAlive, spawnImpl = defaultSpawn, watchdog = join(PLUGIN_ROOT, 'bin', 'distil-run.js'), claudeHome = claudeHomeOf(env) } = {}) {
+export function maybeRun({ paths: p, env = process.env, now = Date.now(), alive = defaultAlive, spawnImpl = defaultSpawn, watchdog = join(PLUGIN_ROOT, 'bin', 'distil-run.js'), harness = 'claude-code', claudeHome = claudeHomeOf(env), codexHome = codexHomeOf(env) } = {}) {
   if (env[DISTIL_ENV]) return null; // a distil run's own hooks and server never start another
   if (!hasRemember(p)) return null;
   const dp = distilPaths(p);
@@ -581,7 +678,7 @@ export function maybeRun({ paths: p, env = process.env, now = Date.now(), alive 
     plan = locked(p, (s, save) => {
       folded = foldNotes(p, s);
       reconcile(p, s, now, alive);
-      const decided = decide(p, s, now, node, claudeHome);
+      const decided = decide(p, s, now, node, harness, harness === 'codex' ? codexHome : claudeHome);
       if (decided) {
         s.running = { ...decided, pid: null, startedAt: iso(now) };
         if (decided.mode === 'import') s.importRequest = null;
@@ -600,7 +697,7 @@ export function maybeRun({ paths: p, env = process.env, now = Date.now(), alive 
   mkdirSync(dp.runs, { recursive: true, mode: 0o700 });
   let pid = null;
   try {
-    const child = spawnImpl(process.execPath, [watchdog, planFile], { detached: true, stdio: 'ignore', windowsHide: true, env: { ...env, WYBE_CONNECT_HOME: p.root } });
+    const child = spawnImpl(process.execPath, [watchdog, planFile], { detached: true, stdio: 'ignore', windowsHide: true, env: { ...env, WYBE_CONNECT_HOME: wybeHomeOf(p.root, harness) } });
     child.on?.('error', () => {});
     child.unref?.();
     pid = child.pid ?? null;
@@ -641,25 +738,27 @@ export function maybeRunAll(root, opts = {}) {
   return started;
 }
 
-function decide(p, s, now, node, claudeHome) {
+function decide(p, s, now, node, harness, home) {
   if (s.running) return null;
   const backoff = Number.isFinite(ms(s.lastFailureAt)) && now - ms(s.lastFailureAt) < BACKOFF_MS;
   if (backoff) return null;
   // 128 random bits: the node keeps a key once per PERSON across all their assistants and machines
   // (wybe-node#844), and every key derives from the run id, so two runs must never share one.
   const runId = `${iso(now).replace(/[:.]/g, '-')}-${randomBytes(16).toString('hex')}`;
+  // Claude Code's plans keep their earlier shape; a Codex plan says so.
+  const of = harness === 'codex' ? { harness } : {};
   const outbox = outboxFor(p, s, node);
-  if (outbox) return { runId: outbox.runId, mode: 'deliver', importOf: outbox.importOf, node: outbox.node ?? node, transcripts: [] };
+  if (outbox) return { runId: outbox.runId, mode: 'deliver', importOf: outbox.importOf, node: outbox.node ?? node, ...of, transcripts: [] };
   if (s.importRequest && s.importRequest !== s.importHandled) {
-    enqueueImport(p, s, claudeHome, now);
-    return { runId, mode: 'import', importOf: s.importRequest, node, claudeHome, transcripts: pick(s, node) };
+    enqueueImport(p, s, harness, home, now);
+    return { runId, mode: 'import', importOf: s.importRequest, node, ...of, ...(harness === 'codex' ? { codexHome: home } : { claudeHome: home }), transcripts: pick(s, node) };
   }
   if (!s.pending.length) return null;
   const since = now - ms(s.lastSuccessAt);
   const due = !Number.isFinite(since) || since >= ONGOING_INTERVAL_MS || (s.pending.length > MAX_RUN_TRANSCRIPTS && since >= BACKLOG_INTERVAL_MS);
   if (!due) return null;
   const transcripts = pick(s, node);
-  return transcripts.length ? { runId, mode: 'ongoing', importOf: null, node, transcripts } : null;
+  return transcripts.length ? { runId, mode: 'ongoing', importOf: null, node, ...of, transcripts } : null;
 }
 
 // ------------------------------------------------------------------ the outbox (written by the run's MCP server)
@@ -810,35 +909,59 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
 
 // ------------------------------------------------------------------ the watchdog (bin/distil-run.js)
 
-/** How to start claude without a shell: an override, claude(.exe) on PATH, or the npm shim's cli.js under Node. */
-export function resolveClaude(env = process.env, platform = process.platform) {
-  const override = env.WYBE_CONNECT_CLAUDE_BIN;
+/**
+ * How to start a CLI without a shell: the override, <name>(.exe) on PATH (and `extraDirs`), or on
+ * Windows the npm shim's JavaScript entry under Node (a .cmd cannot be started without a shell).
+ */
+function resolveCli({ override, name, npmEntry, extraDirs = [] }, env, platform) {
   if (override) return /\.(?:m?js|cjs)$/.test(override) ? { cmd: process.execPath, pre: [override] } : { cmd: override, pre: [] };
   const dirs = (env.PATH ?? env.Path ?? '').split(delimiter).filter(Boolean);
-  dirs.push(join(homedir(), '.local', 'bin'), join(homedir(), '.claude', 'local'));
+  dirs.push(...extraDirs);
   const win = platform === 'win32';
   for (const d of dirs) {
-    const exe = join(d, win ? 'claude.exe' : 'claude');
+    const exe = join(d, win ? `${name}.exe` : name);
     if (existsSync(exe)) return { cmd: exe, pre: [] };
-    if (win && existsSync(join(d, 'claude.cmd'))) {
-      const cli = join(d, 'node_modules', '@anthropic-ai', 'claude-code', 'cli.js');
+    if (win && existsSync(join(d, `${name}.cmd`))) {
+      const cli = join(d, 'node_modules', ...npmEntry);
       if (existsSync(cli)) return { cmd: process.execPath, pre: [cli] };
     }
   }
   return null;
 }
 
+/** How to start claude without a shell: an override, claude(.exe) on PATH, or the npm shim's cli.js under Node. */
+export function resolveClaude(env = process.env, platform = process.platform) {
+  return resolveCli({ override: env.WYBE_CONNECT_CLAUDE_BIN, name: 'claude', npmEntry: ['@anthropic-ai', 'claude-code', 'cli.js'], extraDirs: [join(homedir(), '.local', 'bin'), join(homedir(), '.claude', 'local')] }, env, platform);
+}
+
+/** How to start codex without a shell: an override, codex(.exe) on PATH, or the npm shim's bin/codex.js under Node. */
+export function resolveCodex(env = process.env, platform = process.platform) {
+  return resolveCli({ override: env.WYBE_CONNECT_CODEX_BIN, name: 'codex', npmEntry: ['@openai', 'codex', 'bin', 'codex.js'] }, env, platform);
+}
+
 export function buildPrompt(plan) {
+  const codex = harnessOf(plan) === 'codex';
   const lines = [
     'wybe-connect distil run (started in the background by the wybe-connect plugin, not by a person).',
     `mode: ${plan.mode}`,
   ];
   if (plan.mode === 'import') lines.push(`import_of: ${plan.importOf}`);
-  lines.push('', 'Read these transcript ranges with the Read tool (offset = the first line, limit = the number of lines):');
+  lines.push('', codex
+    ? 'Read these Codex rollout ranges (one JSON event per line) with a read-only shell command that prints only those lines, e.g. `sed -n \'<first>,<last>p\' <file>`, or in PowerShell `Get-Content -LiteralPath <file> | Select-Object -Skip <first - 1> -First <count>`:'
+    : 'Read these transcript ranges with the Read tool (offset = the first line, limit = the number of lines):');
   for (const t of plan.transcripts) lines.push(`- ${t.path} lines ${t.fromLine + 1}-${t.toLine}`);
   if (!plan.transcripts.length) lines.push('- (none)');
   lines.push('Read only those ranges: never another transcript, nor other lines of these. What lies outside them was distilled already, and reading it again would store the same facts twice.');
-  if (plan.mode === 'import') {
+  if (codex) {
+    lines.push('In a rollout the person\'s own words are the event_msg user_message (or item_completed UserMessage) events and the answers are response_item messages with role assistant. Developer messages, AGENTS.md and <environment_context> blocks are the harness talking, not the person. Run nothing that writes or changes anything.');
+  }
+  if (plan.mode === 'import' && codex) {
+    const home = plan.codexHome ?? '~/.codex';
+    lines.push(
+      '',
+      `This is the import the person asked for in Wybe. The ranges above are every Codex session of the last ${IMPORT_DAYS} days that is not distilled yet. Also read ${join(home, 'AGENTS.md')} and the AGENTS.md of the projects in those rollouts (their session_meta cwd).`,
+    );
+  } else if (plan.mode === 'import') {
     const home = plan.claudeHome ?? '~/.claude';
     lines.push(
       '',
@@ -850,14 +973,14 @@ export function buildPrompt(plan) {
     'Then:',
     '1. Pick at most 40 durable facts about the person\'s WORK: projects, decisions and why, preferences, ways of working, tools, ideas. One short, self-contained statement per item, at most 400 characters. Work only: never secrets, credentials, code, file contents, anything personal, or anything about other people.',
     '2. If pending_questions has open questions this material clearly answers, add the answer as an item and pass answers: [<question id>].',
-    '3. Send the items with the wybe server\'s remember tool, at most 50 items per call.' + (plan.mode === 'import' ? ` Pass import_of: ${plan.importOf} on the LAST remember call, and send at least one item.` : ''),
-    '4. Finally call distil_done exactly once. If nothing is durable, send nothing and call distil_done.',
+    `3. Send the items with the ${codex ? 'wybe_distil' : 'wybe'} server's remember tool, at most 50 items per call.` + (plan.mode === 'import' ? ` Pass import_of: ${plan.importOf} on the LAST remember call, and send at least one item.` : ''),
+    `4. Finally call distil_done exactly once. If nothing is durable, send nothing and call distil_done.${codex ? ' Use only the wybe_distil server: never the tools of another server named wybe.' : ''}`,
   );
   return lines.join('\n');
 }
 
 /** The environment of a run's claude and its MCP server: the run, the home, and the connection the run is for. */
-const runEnv = (plan, root) => ({ [DISTIL_ENV]: plan.runId, WYBE_CONNECT_HOME: root, [NODE_ENV]: typeof plan.connection === 'string' ? plan.connection : '' });
+const runEnv = (plan, root) => ({ [DISTIL_ENV]: plan.runId, WYBE_CONNECT_HOME: wybeHomeOf(root, harnessOf(plan)), [NODE_ENV]: typeof plan.connection === 'string' ? plan.connection : '' });
 
 export function claudeArgs(plan, { root, pluginRoot = PLUGIN_ROOT }) {
   const mcp = { mcpServers: { wybe: { command: process.execPath, args: [join(pluginRoot, 'bin', 'mcp-proxy.js')], env: runEnv(plan, root) } } };
@@ -871,6 +994,38 @@ export function claudeArgs(plan, { root, pluginRoot = PLUGIN_ROOT }) {
   ];
 }
 
+// A `-c key=value` value is TOML. A JSON string or array of strings is valid TOML as it is (the
+// escapes JSON writes are TOML's too); a table is written inline.
+const tomlTable = (o) => `{ ${Object.entries(o).map(([k, v]) => `${k} = ${JSON.stringify(String(v))}`).join(', ')} }`;
+
+/**
+ * `codex exec` for one plan: the read-only sandbox, JSON events to the run's log, --ephemeral so
+ * the run leaves no rollout (it is never a session to import), no git-repository check, and as its
+ * only MCP server the plugin's own, in distil mode. `mcp_servers={}` first drops every server the
+ * person configured; Codex starts a stdio server with only a few variables of its own environment
+ * plus the server's `env` table, so the distil mode is carried there. It is named wybe_distil, not
+ * wybe, so it can never be confused with the plugin's own interactive server. The prompt goes last.
+ */
+export function codexArgs(plan, { root, pluginRoot = PLUGIN_ROOT }) {
+  return [
+    'exec',
+    '--sandbox', 'read-only',
+    '--json',
+    '--ephemeral',
+    '--skip-git-repo-check',
+    '-c', 'mcp_servers={}',
+    '-c', `mcp_servers.wybe_distil.command=${JSON.stringify(process.execPath)}`,
+    '-c', `mcp_servers.wybe_distil.args=${JSON.stringify([join(pluginRoot, 'bin', 'mcp-proxy.js')])}`,
+    '-c', `mcp_servers.wybe_distil.env=${tomlTable(runEnv(plan, root))}`,
+    buildPrompt(plan),
+  ];
+}
+
+const RUNNERS = {
+  'claude-code': { name: 'claude', missing: 'claude-missing', args: claudeArgs, resolve: () => resolveClaude() },
+  codex: { name: 'codex', missing: 'codex-missing', args: codexArgs, resolve: () => resolveCodex() },
+};
+
 function killTree(pid) {
   if (!pid) return;
   if (process.platform === 'win32') spawnSync('taskkill', ['/PID', String(pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true });
@@ -883,9 +1038,10 @@ function killTree(pid) {
   }
 }
 
-function runClaude(plan, { root, resolve, spawnImpl, runTimeoutMs, logFile }) {
+function runRunner(plan, { root, resolve, spawnImpl, runTimeoutMs, logFile, cwd }) {
+  const runner = RUNNERS[harnessOf(plan)];
   const how = resolve();
-  if (!how) return Promise.resolve({ code: null, error: 'claude-missing' });
+  if (!how) return Promise.resolve({ code: null, error: runner.missing });
   return new Promise((done) => {
     let fd = null;
     try {
@@ -896,10 +1052,11 @@ function runClaude(plan, { root, resolve, spawnImpl, runTimeoutMs, logFile }) {
     const io = fd === null ? 'ignore' : fd;
     let child;
     try {
-      child = spawnImpl(how.cmd, [...how.pre, ...claudeArgs(plan, { root })], { stdio: ['ignore', io, io], windowsHide: true, detached: process.platform !== 'win32', env: { ...process.env, ...runEnv(plan, root) } });
+      // codex runs in the distil's own folder, so no project's AGENTS.md or .codex/config.toml applies to it
+      child = spawnImpl(how.cmd, [...how.pre, ...runner.args(plan, { root })], { stdio: ['ignore', io, io], windowsHide: true, detached: process.platform !== 'win32', env: { ...process.env, ...runEnv(plan, root) }, ...(runner.name === 'codex' ? { cwd } : {}) });
     } catch (err) {
       if (fd !== null) closeSync(fd);
-      done({ code: null, error: `could not start claude: ${err?.code ?? err}` });
+      done({ code: null, error: `could not start ${runner.name}: ${err?.code ?? err}` });
       return;
     }
     const timer = setTimeout(() => killTree(child.pid), runTimeoutMs);
@@ -908,7 +1065,7 @@ function runClaude(plan, { root, resolve, spawnImpl, runTimeoutMs, logFile }) {
       if (fd !== null) { try { closeSync(fd); } catch { /* closed */ } }
       done({ code, error });
     };
-    child.on('error', (err) => end(null, `could not start claude: ${err?.code ?? err}`));
+    child.on('error', (err) => end(null, `could not start ${runner.name}: ${err?.code ?? err}`));
     child.on('exit', (code) => end(code));
   });
 }
@@ -944,9 +1101,10 @@ export function planPaths(plan, root) {
  * delivers. Every state change is fenced by the runId, so a watchdog the scheduler already gave
  * up on changes nothing. Returns { ok, class?, message?, outcome? }.
  */
-export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve = () => resolveClaude(), spawnImpl = defaultSpawn, fetchImpl = globalThis.fetch, timeoutMs = DELIVERY_TIMEOUT_MS, runTimeoutMs = RUN_TIMEOUT_MS } = {}) {
+export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve = null, spawnImpl = defaultSpawn, fetchImpl = globalThis.fetch, timeoutMs = DELIVERY_TIMEOUT_MS, runTimeoutMs = RUN_TIMEOUT_MS } = {}) {
   const plan = readJson(planFile);
   if (!plan?.runId) return { ok: false, outcome: 'no-plan' };
+  const runner = RUNNERS[harnessOf(plan)];
   const mine = (s) => s.running?.runId === plan.runId;
   const claimed = locked(p, (s, save) => {
     if (!mine(s)) return false;
@@ -958,7 +1116,7 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
   pruneLogs(p, now());
 
   if (plan.mode !== 'deliver') {
-    const exit = await runClaude(plan, { root: p.root, resolve, spawnImpl, runTimeoutMs, logFile: distilPaths(p).log(plan.runId) });
+    const exit = await runRunner(plan, { root: p.root, resolve: resolve ?? runner.resolve, spawnImpl, runTimeoutMs, logFile: distilPaths(p).log(plan.runId), cwd: distilPaths(p).dir });
     const verdict = outboxVerdict(p, plan);
     const settled = locked(p, (s, save) => {
       // Given up on: what this run wrote is dropped, unless the scheduler already kept its outbox.
@@ -969,8 +1127,9 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
         save();
         return null;
       }
-      const cls = exit.error === 'claude-missing' ? 'claude-missing' : 'distil-failed';
-      const why = exit.error === 'claude-missing' ? 'claude was not found on this machine' : `${verdict.reason}${exit.code ? ` (claude exited ${exit.code})` : ''}`;
+      const missing = exit.error === runner.missing;
+      const cls = missing ? runner.missing : 'distil-failed';
+      const why = missing ? `${runner.name} was not found on this machine` : `${verdict.reason}${exit.code ? ` (${runner.name} exited ${exit.code})` : ''}`;
       returnToPending(s, s.running.transcripts);
       s.running = null;
       fail(s, cls, why, now());
@@ -1026,14 +1185,21 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
 const NOTICES = {
   'node-unreachable': 'the colleague could not be reached, so the distilled work facts wait on this machine and are sent on the next try (every 30 minutes)',
   'node-refused': 'the colleague did not confirm it stored the distilled work facts; they wait on this machine and are sent again',
-  'signed-out': 'this Claude Code is no longer signed in to the colleague; the distilled work facts wait on this machine. Call the wybe server\'s `connect` tool to sign in again',
+  'signed-out': (label) => `this ${label} is no longer signed in to the colleague; the distilled work facts wait on this machine. Call the wybe server's \`connect\` tool to sign in again`,
   'distil-failed': 'the background distil did not finish; it runs again in 30 minutes',
   'claude-missing': 'the background distil could not find the claude command on this machine',
+  'codex-missing': 'the background distil could not find the codex command on this machine',
   'import-unconfirmed': 'the import was sent, but the colleague did not confirm it; the person can press «Importer» again',
 };
 
+const noticeOf = (cls, label) => {
+  const n = NOTICES[cls];
+  return typeof n === 'function' ? n(label) : n ?? 'the background distil had a problem';
+};
+
 /** One line for SessionStart about a delivery problem or dropped notes, told once per kind. Null when there is nothing new. */
-export function distilNotice(p, { now = Date.now() } = {}) {
+export function distilNotice(p, { now = Date.now(), harness = 'claude-code' } = {}) {
+  const label = harness === 'codex' ? 'Codex' : 'Claude Code';
   let folded = [];
   let saved = false;
   try {
@@ -1050,7 +1216,7 @@ export function distilNotice(p, { now = Date.now() } = {}) {
       const shown = { ...structuredClone(EMPTY.setAsideShown), ...(s.setAsideShown ?? {}) };
       if (aside.parked > shown.parked) {
         const n = aside.parked - shown.parked;
-        parts.push(`${n} batch${n === 1 ? '' : 'es'} of distilled work facts ${n === 1 ? 'was' : 'were'} made for another colleague than the one this Claude Code is connected to now; ${n === 1 ? 'it is' : 'they are'} kept on this machine and sent only to that colleague, if this Claude Code connects to it again`);
+        parts.push(`${n} batch${n === 1 ? '' : 'es'} of distilled work facts ${n === 1 ? 'was' : 'were'} made for another colleague than the one this ${label} is connected to now; ${n === 1 ? 'it is' : 'they are'} kept on this machine and sent only to that colleague, if this ${label} connects to it again`);
       }
       if (aside.unsent > shown.unsent) {
         const n = aside.unsent - shown.unsent;
@@ -1066,7 +1232,7 @@ export function distilNotice(p, { now = Date.now() } = {}) {
       }
       s.setAsideShown = { ...aside };
       if (s.lastError && s.problemShown !== s.lastError.class) {
-        parts.push(`${NOTICES[s.lastError.class] ?? 'the background distil had a problem'} (${s.lastError.message})`);
+        parts.push(`${noticeOf(s.lastError.class, label)} (${s.lastError.message})`);
         s.problemShown = s.lastError.class;
       }
       if (!parts.length) {

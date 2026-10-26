@@ -1,5 +1,5 @@
 {
-  "description": "wybe-connect for Codex: SessionStart injects the standing instruction and the node's cached open questions; Stop and PreCompact flush the redacted rollout delta to the node (or the local queue); SessionEnd only queues (Codex caps it at 3 s). bridge.js is the session bridge: it starts the session's detached poller, which queues a task from the person's Wybe colleague into the live session (codex queue), settles the task's result at Stop, and hands over a notice that could not be queued as a Stop block. Every hook exits 0 whatever happens.",
+  "description": "wybe-connect for Codex: SessionStart injects the standing instruction, the node's cached open questions and a background-distil problem (once per kind); Stop and PreCompact note the session for the background distil (codex exec) and send nothing themselves; SessionEnd only notes (Codex caps it at 3 s). bridge.js is the session bridge: it starts the session's detached poller, which queues a task from the person's Wybe colleague into the live session (codex queue), settles the task's result at Stop, and hands over a notice that could not be queued as a Stop block. Every hook exits 0 whatever happens.",
   "hooks": {
     "SessionStart": [
       {
