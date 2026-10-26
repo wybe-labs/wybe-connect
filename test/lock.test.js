@@ -39,7 +39,7 @@ test('a throw inside the lock releases it', () => {
   assert.equal(existsSync(file), false);
 });
 
-test('R4-7: a live holder slower than any timeout is never taken over (real process, 6 s)', async () => {
+test('a live holder slower than any timeout is never taken over (real process, 6 s)', async () => {
   const file = fresh();
   const h = holder(file, 6000);
   await h.holding;
@@ -78,7 +78,7 @@ test('fencing: a holder whose lock was replaced sees it, so it can refuse to wri
   assert.equal(JSON.parse(readFileSync(file, 'utf8')).token, 'someone-else');
 });
 
-test('a reaper that judged an old empty lock never deletes the new, still-empty lock that replaced it (#4\'s second R4-7 race)', () => {
+test('a reaper that judged an old empty lock never deletes the new, still-empty lock that replaced it', () => {
   const file = fresh();
   writeFileSync(file, '');
   const old = (Date.now() - LOCK_UNREADABLE_MS - 1000) / 1000;

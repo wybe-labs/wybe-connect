@@ -3,7 +3,7 @@
 // test/fixtures/fake-distil-claude.mjs, never the real claude: maybeRun gets a recorder for
 // spawnImpl, and runWatchdog gets an explicit `resolve`. The node is an in-process HTTP fake on
 // 127.0.0.1, or the closed port 127.0.0.1:9.
-// QA round 4 on #4 (M-mvi8bth3) is the first set of red tests here: R4-3, R4-4, R4-5, R4-6, R4-8.
+// The first red tests here were the review findings on the earlier delivery build.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -105,8 +105,8 @@ const note = (p, files, at) => files.forEach((f, i) => D.noteSession(p, { transc
 const pendingPaths = (p) => D.loadState(p).pending.map((x) => x.path);
 const fakeRuns = (log) => (existsSync(log) ? readFileSync(log, 'utf8').trim().split('\n').length : 0);
 
-// ------------------------------------------------------------------ R4-3: success only on the node's ack
-test('R4-3: node unreachable and the run never finished: the transcripts stay pending, nothing counts as delivered', async () => {
+// ------------------------------------------------------------------ success only on the node's ack
+test('node unreachable and the run never finished: the transcripts stay pending, nothing counts as delivered', async () => {
   const { p, files } = sandbox();
   saveCredentials(creds(DOWN), p);
   const T = Date.now();
@@ -122,7 +122,7 @@ test('R4-3: node unreachable and the run never finished: the transcripts stay pe
   assert.equal(s.running, null);
 });
 
-test('R4-3: node unreachable but the run finished: the facts wait in the outbox, and only the node\'s acks make it a success', async () => {
+test('node unreachable but the run finished: the facts wait in the outbox, and only the node\'s acks make it a success', async () => {
   const { root, p, files } = sandbox();
   saveCredentials(creds(DOWN), p);
   const T = Date.now();
@@ -135,7 +135,7 @@ test('R4-3: node unreachable but the run finished: the facts wait in the outbox,
   assert.ok(s.outbox, 'the distilled facts are kept for delivery');
   assert.equal(s.lastSuccessAt, null);
   assert.ok(s.lastFailureAt);
-  // The run's MCP server offered remember although the node was down (the door R4-3 went through).
+  // The run's MCP server offered remember although the node was down.
   assert.ok(JSON.parse(readFileSync(log, 'utf8').trim()).tools.includes('remember'));
 
   // Within the back-off nothing starts; after it, the outbox is delivered without running claude again.
@@ -154,7 +154,7 @@ test('R4-3: node unreachable but the run finished: the facts wait in the outbox,
   assert.deepEqual(s.pending, []);
 });
 
-test('R4-3: signed out after the hooks noted: no run starts and nothing is dropped', () => {
+test('signed out after the hooks noted: no run starts and nothing is dropped', () => {
   const { p, files } = sandbox();
   saveCredentials(creds(DOWN), p);
   const T = Date.now();
@@ -164,7 +164,7 @@ test('R4-3: signed out after the hooks noted: no run starts and nothing is dropp
   assert.equal(D.pendingView(p).length, 3);
 });
 
-test('R4-3: signed out between the distil and the delivery: the outbox is kept and the error says signed out', async () => {
+test('signed out between the distil and the delivery: the outbox is kept and the error says signed out', async () => {
   const { p, files } = sandbox();
   saveCredentials(creds(DOWN), p);
   const T = Date.now();
@@ -224,8 +224,8 @@ test('a transcript that grew after its run is distilled again from where the las
   assert.deepEqual(r.plan.transcripts.map((t) => [t.fromLine, t.toLine]), [[3, 5]]);
 });
 
-// ------------------------------------------------------------------ R4-4: exactly once
-test('R4-4: one HTTP 502 re-sends only the lost call; the node holds each fact once and claude ran once', async () => {
+// ------------------------------------------------------------------ exactly once
+test('one HTTP 502 re-sends only the lost call; the node holds each fact once and claude ran once', async () => {
   const { root, p, files } = sandbox();
   const node = await httpNode({ answers: ['ok', 502, 'ok', 'ok', 'ok'] });
   saveCredentials(creds(node.url), p);
@@ -243,7 +243,7 @@ test('R4-4: one HTTP 502 re-sends only the lost call; the node holds each fact o
   assert.equal(fakeRuns(log), 1);
 });
 
-test('R4-4: a node that answers late but within the delivery timeout is acknowledged, not re-sent', async () => {
+test('a node that answers late but within the delivery timeout is acknowledged, not re-sent', async () => {
   assert.ok(D.DELIVERY_TIMEOUT_MS >= 60_000, 'the delivery waits a minute, not 15 s');
   const { p, files } = sandbox();
   const node = await httpNode({ answers: [{ delayMs: 1500 }] });
@@ -256,7 +256,7 @@ test('R4-4: a node that answers late but within the delivery timeout is acknowle
   assert.equal(node.sends.length, 1);
 });
 
-test('R4-4: an answer lost past the timeout is re-sent with the same idempotency key, which the node keeps once', async () => {
+test('an answer lost past the timeout is re-sent with the same idempotency key, which the node keeps once', async () => {
   const { p, files } = sandbox();
   const node = await httpNode({ answers: [{ delayMs: 1500 }], dedupe: true });
   saveCredentials(creds(node.url), p);
@@ -325,8 +325,8 @@ test('each outbox record has its own key, and the key is what goes to the node',
   assert.equal(r.outcome.ok, true);
 });
 
-// ------------------------------------------------------------------ R4-6: bounded, never a silent drop
-test('R4-6: with pending full, a failed run\'s transcripts all come back and the sessions noted during the run wait on disk', async () => {
+// ------------------------------------------------------------------ bounded, never a silent drop
+test('with pending full, a failed run\'s transcripts all come back and the sessions noted during the run wait on disk', async () => {
   const { p, files } = sandbox(D.MAX_RUN_TRANSCRIPTS);
   saveCredentials(creds(DOWN), p);
   const T = Date.now();
@@ -368,8 +368,8 @@ test('past the note-file cap a note is dropped with a count, and SessionStart te
   assert.equal(D.distilNotice(p, { now: T + MIN }), null, 'told once');
 });
 
-// ------------------------------------------------------------------ R4-8: a torn line never counts
-test('R4-8: a torn outbox line fails the distil even when distil_done was written', () => {
+// ------------------------------------------------------------------ a torn line never counts
+test('a torn outbox line fails the distil even when distil_done was written', () => {
   const { p } = sandbox(0);
   const runId = 'r-torn';
   D.spoolRemember(p, runId, { items: [{ content: 'A.' }] });
@@ -384,7 +384,7 @@ test('R4-8: a torn outbox line fails the distil even when distil_done was writte
   assert.match(v.reason, /unreadable/);
 });
 
-test('R4-8: a torn ack line means that call is re-sent, never that the run succeeded', async () => {
+test('a torn ack line means that call is re-sent, never that the run succeeded', async () => {
   const { p } = sandbox(0);
   const node = await httpNode({ dedupe: true });
   saveCredentials(creds(node.url), p);
@@ -561,8 +561,8 @@ test('the idempotency key is bound to the node: the same run and record give ano
   }
 });
 
-// ------------------------------------------------------------------ R4-5: told once per kind
-test('R4-5: one continuing outage is told once, whatever number of calls each run made', async () => {
+// ------------------------------------------------------------------ told once per kind
+test('one continuing outage is told once, whatever number of calls each run made', async () => {
   const { p, files } = sandbox();
   const node = await httpNode({ answers: Array(20).fill(502) });
   saveCredentials(creds(node.url), p);

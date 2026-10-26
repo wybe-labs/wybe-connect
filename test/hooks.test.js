@@ -116,7 +116,7 @@ test('Stop hook: sends nothing itself, notes the session and starts one distil r
   }
 });
 
-test('R4-3, the real path (hook -> detached bin/distil-run.js -> fake claude -> bin/mcp-proxy.js): node down means no success, and the facts wait', async () => {
+test('the real path (hook -> detached bin/distil-run.js -> fake claude -> bin/mcp-proxy.js): node down means no success, and the facts wait', async () => {
   const { dir, home, project, transcript } = sandbox();
   writeCredentials(home, REFUSED, ['remember']);
   const log = join(dir, 'fake.log');
@@ -143,7 +143,7 @@ test('8 parallel Stop hooks start exactly one run', async () => {
   assert.equal(lines(log), 1);
 });
 
-test('R4-7: four real Stop hooks during a live holder\'s 6 s critical section keep all their notes', async () => {
+test('four real Stop hooks during a live holder\'s 6 s critical section keep all their notes', async () => {
   const { home, project } = sandbox();
   writeCredentials(home, REFUSED, ['remember']);
   const p = paths(home);

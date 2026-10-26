@@ -1,4 +1,4 @@
-// A LIVE but slow holder of the distil lock (QA R4-7's shape; not claude): takes the lock through
+// A LIVE but slow holder of the distil lock (not claude): takes the lock through
 // the real lib/lock.js, reads distil.json, stays inside its critical section for <hold ms> (a laptop
 // that slept mid-hook, an AV scan, a loaded disk), then writes what it read plus one entry of its
 // own. argv: <home root> <hold ms>. Prints "HOLDING" once it has the lock, "HOLDER done" at the end.

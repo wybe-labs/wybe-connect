@@ -20,7 +20,7 @@ test('a missing file is no records, not torn', () => {
   assert.deepEqual(readRecords(join(tmpdir(), 'wybe-connect-no-such-file.acks')), { records: [], torn: 0 });
 });
 
-test('R4-8: a torn last line is counted as torn and never hides the records before it', () => {
+test('a torn last line is counted as torn and never hides the records before it', () => {
   const file = fresh();
   appendRecord(file, { seq: 1, ok: false });
   appendRecord(file, { seq: 2, ok: true });
