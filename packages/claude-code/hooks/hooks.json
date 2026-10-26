@@ -1,5 +1,5 @@
 {
-  "description": "wybe-connect: SessionStart injects the standing instruction, the node's cached open questions and a background-distil problem (once per kind); Stop, SessionEnd and PreCompact note the session for the background distil and send nothing themselves. Every hook exits 0 whatever happens.",
+  "description": "wybe-connect: SessionStart injects the standing instruction, the node's cached open questions and a background-distil problem (once per kind); Stop, SessionEnd and PreCompact note the session for the background distil and send nothing themselves. task-wait.js is the session bridge: in the background (asyncRewake) it reports the session and waits for a task from the person's Wybe colleague, and wakes Claude with it (exit 2); UserPromptSubmit pauses it, SessionEnd marks the session closed. Every other exit is 0.",
   "hooks": {
     "SessionStart": [
       {
@@ -7,6 +7,28 @@
           {
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/session-start.js\"",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/task-wait.js\"",
+            "asyncRewake": true,
+            "timeout": 86400
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/task-wait.js\"",
+            "async": true,
             "timeout": 10
           }
         ]
@@ -21,6 +43,28 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/task-wait.js\"",
+            "asyncRewake": true,
+            "timeout": 86400
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/task-wait.js\"",
+            "asyncRewake": true,
+            "timeout": 86400
+          }
+        ]
       }
     ],
     "SessionEnd": [
@@ -30,6 +74,15 @@
             "type": "command",
             "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/flush.js\"",
             "timeout": 30
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/task-wait.js\"",
+            "timeout": 2
           }
         ]
       }

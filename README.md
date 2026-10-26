@@ -6,7 +6,8 @@ node), and carries the standing texts for assistants without hooks (Claude Deskt
 ChatGPT). Three promises, in order of importance:
 
 1. **Only sends.** There is no tool, scope or code path by which the harness reads anything
-   from the node. The node retrieves and acts on its own.
+   from the node. The node retrieves and acts on its own. The one thing that comes back is a
+   task the person gave their colleague for an open session (see "Tasks from the colleague").
 2. **Redacts on your machine first.** Credentials, connection strings, private keys, Norwegian
    national identity numbers and (by default) e-mail addresses are replaced with
    `[REDACTED:<family>]` before anything leaves the laptop. Pattern-based and deterministic; no
@@ -189,6 +190,45 @@ generated from `texts/standing.json`, the file the node's connect cards pin agai
 
 <!-- texts:end -->
 
+## Tasks from the colleague
+
+The person can ask their Wybe AI colleague to hand a task to one of their open Claude Code or
+Codex sessions, and to read the result. This is the only thing that ever comes from the node:
+the person's own words for a task, never anything the colleague knows.
+
+- **Which sessions are open.** Each session's hooks send `sessions_report`: the session id,
+  harness, project (the last segment of the working directory, never the path), a title (the
+  first prompt, redacted, at most 80 characters), the vendor account as the harness knows it
+  locally (Claude Code's signed-in e-mail from `.claude.json`; Codex's from the `email` claim of
+  `auth.json`'s id token, decoded on the machine; no token is ever read out or sent), when it
+  started, when it was last active, and open or closed. At start, every 5 minutes while open,
+  and at the end.
+- **Delivery into the live session.** A poller per session asks the node's `inbox` for that
+  session's tasks about every 20 s (backing off while the node is down).
+  - Claude Code: `hooks/task-wait.js` is an `asyncRewake` hook on SessionStart, Stop and
+    StopFailure. It waits in the background and exits 2 with the notice when a task arrives,
+    which wakes Claude even when the session is idle. Every Stop re-arms it, a newer one
+    supersedes the older, and it pauses while the person's own turn runs (UserPromptSubmit), so
+    a task always gets a turn of its own.
+  - Codex: no hook can wake an idle Codex session, so SessionStart starts a detached poller
+    that runs `codex queue --thread <session> --message <notice>`. If that fails, the next
+    Stop hook hands the notice over as a `decision: block` (a new turn), once.
+- **The person's yes, by the node's access level.** At `read` nothing is ever delivered. A task
+  in mode `run` (the person already said yes to their colleague) carries its text in the
+  notice. A task in mode `confirm` carries only its id: the session must call the plugin's
+  `take_task` tool, which shows the exact text in an MCP elicitation form (Godta / Avvis) and
+  returns it only on accept; a decline sends `task_result` refused.
+- **The result.** The Stop that ends the task's turn sends `task_result` with status `done`
+  (Claude Code's StopFailure: `failed`) and the turn's last message, redacted, at most 20 000
+  characters. Once per task.
+
+Limits: a client without elicitation gets the confirm task's text with the instruction to show
+it word for word and act only after an explicit yes in the chat; that yes is the model's
+reading of the chat, not a form. A Claude Code session idle for more than 24 hours stops
+waiting until its next Stop. A Codex task's result is taken from the turn whose prompt carries
+the task's mark (`[wybe-task <id>]`), which relies on `codex queue` putting the notice in the
+rollout as that turn's prompt.
+
 ## How it works
 
 ### The background distil (Claude Code)
@@ -292,7 +332,8 @@ flush drains the queue. A queue older than 7 days or larger than 50 MB loses its
 ```
 lib/            shared, dependency-free: redact, transcript, codex-rollout, cursor-spool, post, oauth,
                 queue, home, flush, session-context, hook-io, connect-cli, mcp-proxy,
-                distil (the background distil), ledger (checksummed records), lock
+                distil (the background distil), ledger (checksummed records), lock,
+                session-info, bridge and task-poller (tasks from the colleague)
 packages/
   claude-code/  the Claude Code plugin (plugin.json, hooks/, bin/connect.js, skills/connect)
   codex/        the Codex plugin (.codex-plugin/, hooks/, bin/connect.js, skills/connect, AGENTS.md

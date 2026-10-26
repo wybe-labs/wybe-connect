@@ -17,13 +17,18 @@ only after you have reviewed and trusted them once.
 
 | Piece | What it does |
 |---|---|
-| `hooks/hooks.json` | `SessionStart` -> `session-start.js`; `Stop` and `PreCompact` -> `flush.js`; `SessionEnd` -> `flush.js --offline` |
+| `hooks/hooks.json` | `SessionStart` -> `session-start.js`; `Stop` and `PreCompact` -> `flush.js`; `SessionEnd` -> `flush.js --offline`; `SessionStart`, `Stop`, `SessionEnd` -> `bridge.js` |
+| `hooks/bridge.js` | the session bridge: SessionStart (and a Stop that finds it gone) starts the session's detached poller `bin/bridge.js poll`, which reports the session and queues a task from the person's Wybe colleague into it with `codex queue --thread <session> --message <notice>`. Stop sends the result of the task the turn worked on (`task_result`), and when a notice could not be queued, returns it once as `{"decision":"block","reason":...}`. SessionEnd marks the session closed. See the root README, "Tasks from the colleague" |
 | `hooks/session-start.js` | hands the model the standing "remember work facts" line and the cached open questions (`hookSpecificOutput.additionalContext`) |
 | `hooks/flush.js` | rollout delta -> scope-aware payload (`lib/codex-rollout.js` + `lib/transcript.js`) -> redaction -> `report_session`, or the local queue |
 | `bin/connect.js` | the one-time OAuth flow as client `wybe-connect (Codex)`; stores the grant as a connection under `~/.wybe-connect/codex/connections/<name>/`; also `list`, `use`, `remove` |
 | `AGENTS.snippet.md` | the standing line for `~/.codex/AGENTS.md`, for sessions where the hooks are not trusted yet |
 | `config.toml.snippet` | the MCP entry (`[mcp_servers.wybe] url = ...`) for the interactive tools; then `codex mcp login wybe` |
 | `lib/` | a byte-identical copy of the repository's `lib/` (`npm run sync-lib`; a test guards it) |
+
+A task that needs the person's yes (mode `confirm`) is taken with the `take_task` tool of the
+plugin's own stdio `wybe` server (`lib/mcp-proxy.js`); a Codex set up with only the node's URL
+in `config.toml` sees the notice but has no `take_task` to call.
 
 ## How the Codex events map
 
