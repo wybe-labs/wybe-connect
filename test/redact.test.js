@@ -158,6 +158,17 @@ test('redaction is idempotent: a second pass changes nothing and reports no hits
   assert.deepEqual(second.hits, []);
 });
 
+// A transcript can hold one enormous line (minified JSON, a log). Every pass must stay linear in
+// it; the bound is generous so a slow machine does not flake, a quadratic pass (tens of seconds
+// on these inputs) does not pass.
+test('a half-megabyte single line of pairs, JSON or headers redacts in linear time', () => {
+  for (const line of ['name=demo '.repeat(50_000), '{"name":"demo","n":1},'.repeat(25_000), 'Authorization: Digest a=b '.repeat(20_000), `curl ${'-H x '.repeat(50_000)}`]) {
+    const t = Date.now();
+    assert.equal(redact(line).text, line);
+    assert.ok(Date.now() - t < 8000, `${line.slice(0, 20)}... took ${Date.now() - t} ms`);
+  }
+});
+
 test('TRAP: a userinfo that only STARTS with a redaction tag is still redacted', () => {
   const pw = j('real', 'Pw-9x');
   const r = redact(`https://${tag('url-userinfo')}:${pw}@db.example.test/x`);

@@ -140,12 +140,6 @@ function wholeMatch(re, validate) {
   });
 }
 
-const lineAround = (text, i) => {
-  const start = text.lastIndexOf('\n', i - 1) + 1;
-  const nl = text.indexOf('\n', i);
-  const end = nl < 0 ? text.length : nl;
-  return { start, end: text[end - 1] === '\r' ? end - 1 : end };
-};
 
 /** basic-auth: the base64 must decode to printable text containing a colon (user:password). */
 function isBasicCredential(b64) {
@@ -228,7 +222,7 @@ function runAuthHeader(text, tag, hit) {
     return v.length >= 8 && looksLikeToken(v);
   }, tag, hit);
   // Digest: only the response hash is a credential.
-  out = replaceGroup(out, /(?<![\w-])authorization\\*["']?[ \t]*:[ \t]*\\*["']?[ \t]*digest\b[^\r\n]*?\bresponse=\\*"(?<v>[^"\\\r\n]+)/dgi, 'v', () => true, tag, hit);
+  out = replaceGroup(out, /(?<![\w-])authorization\\*["']?[ \t]*:[ \t]*\\*["']?[ \t]*digest\b[^\r\n]{0,1024}?\bresponse=\\*"(?<v>[^"\\\r\n]+)/dgi, 'v', () => true, tag, hit);
   // A bare "Bearer <token>" or "Basic <base64 of user:pw>" outside a header.
   out = replaceGroup(out, /(?<![\w-])bearer[ \t]+(?<v>[A-Za-z0-9._~+/-]{8,}=*)(?![A-Za-z0-9._~+/=-])/dgi, 'v', (m) => looksLikeToken(m.groups.v), tag, hit);
   out = replaceGroup(out, /(?<![\w-])Basic[ \t]+(?<v>[A-Za-z0-9+/]{8,}={0,2})(?![A-Za-z0-9+/=])/dg, 'v', (m) => isBasicCredential(m.groups.v), tag, hit);
@@ -261,9 +255,9 @@ function runCliSecret(text, tag, hit) {
     const v = m.groups.v.replace(/^\\*["']|\\*["']$/g, '');
     return Boolean(cls) && isSecretValue(v, 'password', { quoted: true });
   }, tag, hit);
-  out = replaceGroup(out, /\b(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump|mysqlsh)\b[^\r\n]*?[ \t]-p(?<v>[^\s"'[]+)/dg, 'v', () => true, tag, hit);
-  out = replaceGroup(out, /\b(?:login\b[^\r\n]*?[ \t]-p|sshpass[ \t]+-p)[ \t]*(?<v>[^\s"'[-][^\s"']*)/dg, 'v', () => true, tag, hit);
-  out = replaceGroup(out, /\bcurl\b[^\r\n]*?[ \t](?:-u|--user)[ =]+["']?[^\s:"']+:(?<v>[^\s"'[]+)/dg, 'v', () => true, tag, hit);
+  out = replaceGroup(out, /\b(?:mysql|mysqldump|mysqladmin|mariadb|mariadb-dump|mysqlsh)\b[^\r\n]{0,1024}?[ \t]-p(?<v>[^\s"'[]+)/dg, 'v', () => true, tag, hit);
+  out = replaceGroup(out, /\b(?:login\b[^\r\n]{0,1024}?[ \t]-p|sshpass[ \t]+-p)[ \t]*(?<v>[^\s"'[-][^\s"']*)/dg, 'v', () => true, tag, hit);
+  out = replaceGroup(out, /\bcurl\b[^\r\n]{0,1024}?[ \t](?:-u|--user)[ =]+["']?[^\s:"']+:(?<v>[^\s"'[]+)/dg, 'v', () => true, tag, hit);
   return out;
 }
 
@@ -272,10 +266,12 @@ const KEY_RE = /(?<![\p{L}\p{N}_$.\\-])(?<q>(?:\\*["'])?)(?<key>[\p{L}_$][\p{L}\
 const VOUCHING_WORDS = new Set(['token', 'key', 'id', 'ids', 'cursor', 'hash', 'digest', 'integrity', 'checksum', 'etag', 'sha', 'nonce', 'sid', 'uid', 'uuid', 'ref', 'revision', 'commit']);
 const KEYWORD_BEFORE =/(?:^|\s)(?:export|set|setx|const|let|var|val|local|my|readonly|declare|private|public|protected|static|final)[ \t]+$/;
 
-function findClose(text, from, quote) {
+const WINDOW = 16384; // the longest value the key pass reads; it keeps a huge one-line text linear
+
+function findClose(text, from, quote, to) {
   const n = quote.length - 1;
   const ch = quote[n];
-  for (let i = from; i < text.length; i++) {
+  for (let i = from; i < to; i++) {
     const c = text[i];
     if (c === '\n' || c === '\r') return -1;
     if (c !== ch) continue;
@@ -289,22 +285,38 @@ function findClose(text, from, quote) {
 function runKeyed(text, tag, hit, ctx) {
   let out = '';
   let last = 0;
+  // Matches only move forward, so the current line is tracked, never searched for again.
+  let lineStart = 0;
+  let nextNl = text.indexOf('\n');
+  const lineOf = (i) => {
+    while (nextNl !== -1 && nextNl < i) {
+      lineStart = nextNl + 1;
+      nextNl = text.indexOf('\n', lineStart);
+    }
+    let end = nextNl === -1 ? text.length : nextNl;
+    if (text[end - 1] === '\r') end -= 1;
+    return { start: lineStart, end };
+  };
+  const SPACES = /[ \t]*/y;
   KEY_RE.lastIndex = 0;
   let m;
   while ((m = KEY_RE.exec(text))) {
     const { q, key, pre, sep } = m.groups;
     const afterSep = m.index + m[0].length;
     if (!q && sep === ':' && afterSep < text.length && !/[\s"'\\]/.test(text[afterSep])) continue;
-    const line = lineAround(text, m.index);
-    const before = text.slice(line.start, m.index);
+    const line = lineOf(m.index);
+    const from = Math.max(line.start, m.index - 256);
+    const before = text.slice(from, m.index);
     const t = before.trimEnd();
     const c = t.slice(-1);
-    const spaceAfter = /^[ \t]/.test(text.slice(afterSep, afterSep + 1));
+    const atLineStart = t === '' && from === line.start;
+    const spaceAfter = text[afterSep] === ' ' || text[afterSep] === '\t';
     const eqTight = sep === '=' && !pre && !spaceAfter;
-    const ws = text.slice(afterSep).match(/^[ \t]*/)[0].length;
-    const vStart = afterSep + ws;
-    const rest = text.slice(vStart, line.end);
-    const lineText = text.slice(line.start, line.end);
+    SPACES.lastIndex = afterSep;
+    const vStart = afterSep + SPACES.exec(text)[0].length;
+    const restEnd = Math.min(line.end, vStart + WINDOW);
+    const rest = text.slice(vStart, restEnd);
+    const lineText = text.slice(Math.max(line.start, m.index - 2048), Math.min(line.end, vStart + 2048));
     let mode = 'line';
     if (c === '?' || c === '&') mode = 'query';
     else if (c === ';' && sep === '=') mode = 'conn';
@@ -317,8 +329,8 @@ function runKeyed(text, tag, hit, ctx) {
     let quoted = false;
     const qv = /^\\*["']/.exec(rest)?.[0];
     if (qv) {
-      const close = findClose(text, vStart + qv.length, qv);
-      if (close >= 0 && close <= line.end) {
+      const close = findClose(text, vStart + qv.length, qv, restEnd);
+      if (close >= 0) {
         vFrom = vStart + qv.length;
         vTo = close;
         quoted = true;
@@ -336,7 +348,7 @@ function runKeyed(text, tag, hit, ctx) {
     }
     const value = text.slice(vFrom, vTo);
     const cls = classifyKey(key);
-    const positioned = t === '' || eqTight || '{,;&?([:|-*>#/'.includes(c) || KEYWORD_BEFORE.test(before);
+    const positioned = atLineStart || eqTight || '{,;&?([:|-*>#/'.includes(c) || KEYWORD_BEFORE.test(before);
     if (cls && positioned && isSecretValue(value, cls, { quoted, mode, key })) {
       out += text.slice(last, vFrom) + tag;
       last = vTo;
