@@ -87,9 +87,12 @@ test('POSITIVE CONTROL: disabling url-userinfo (and email, which would catch the
   assert.ok(r.text.includes(BAIT.dsnPassword), 'the control did not leak, so the passing tests above prove nothing');
 });
 
-test('POSITIVE CONTROL: disabling wybe-credential and the entropy check lets the wnc_ credential leak', () => {
-  assert.ok(redact(`node credential: ${BAIT.wnc}`, { disable: ['wybe-credential', 'high-entropy'] }).text.includes(BAIT.wnc));
-  assert.ok(!redact(`node credential: ${BAIT.wnc}`, { disable: ['wybe-credential'] }).text.includes(BAIT.wnc), 'the entropy check is the second line');
+test('POSITIVE CONTROL: only disabling all three layers that see a wnc_ credential lets it leak', () => {
+  const all = ['wybe-credential', 'keyed-secret', 'high-entropy'];
+  assert.ok(redact(`node credential: ${BAIT.wnc}`, { disable: all }).text.includes(BAIT.wnc), 'the control did not leak');
+  for (const on of all) {
+    assert.ok(!redact(`node credential: ${BAIT.wnc}`, { disable: all.filter((f) => f !== on) }).text.includes(BAIT.wnc), `${on} alone should catch it`);
+  }
 });
 
 test('an unknown family name in options.disable throws instead of silently protecting nothing', () => {
