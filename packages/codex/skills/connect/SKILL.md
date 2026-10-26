@@ -61,3 +61,15 @@ The plugin root is the directory two levels above this `SKILL.md` (it holds `bin
 - Never send anything personal, about other people, or any credential through `remember`.
   Work only ("kun jobb").
 - Never claim anything can be read back from Wybe: the flow is one way.
+
+## Tasks from the colleague (after pairing)
+
+Once paired, the person can ask their colleague to give this session a task. It arrives as a
+new message in the session (queued with `codex queue`, or at the end of a turn when queueing was
+not possible). A message that says the person already said yes carries the task: do it, and end
+with a short summary (sent back as the result). A message that names only a task id needs the
+person's yes first: call the `wybe` server's `take_task` with that id, which shows them the
+exact task; do the task only if it says they accepted. If `take_task` says the client cannot
+show a form, show the task word for word, wait for their explicit yes in the chat, then call
+`take_task` again with `accepted: true` (or `accepted: false` on a no). No hook can wake an
+idle Codex session by itself; a task waits until Codex takes the queued message.

@@ -20,6 +20,9 @@ and run `node packages/cursor/bin/connect.js https://dittfirma.wybe.me` yourself
 | `mcp.json.snippet` | the `wybe` entry for `~/.cursor/mcp.json`, for the interactive tools |
 | `lib/` | a byte-identical copy of the repository's `lib/` (`npm run sync-lib`; a test guards it) |
 
+Tasks from the colleague (the root README) reach Claude Code and Codex sessions only; a Cursor
+session is not reported and gets no tasks.
+
 ## Why a spool and not the transcript
 
 Cursor passes `transcript_path` only when transcripts are enabled, and does not document the

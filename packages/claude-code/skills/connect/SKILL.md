@@ -59,3 +59,14 @@ start; the person is granting access to their work context and should hear what 
 - Never send anything personal, about other people, or any credential through `remember`.
   Work only ("kun jobb").
 - Never claim the node can be asked for anything back: the flow is one way.
+
+## Tasks from the colleague (after pairing)
+
+Once paired, the person can ask their colleague to give this session a task. A notice then
+arrives on its own (the plugin's background hook wakes the session). A notice that says the
+person already said yes carries the task: do it, and end with a short summary (sent back as the
+result). A notice that names only a task id needs the person's yes first: call the `wybe`
+server's `take_task` with that id, which shows them the exact task; do the task only if it
+says they accepted. If `take_task` says the client cannot show a form, show the task word for
+word, wait for their explicit yes in the chat, then call `take_task` again with `accepted: true`
+(or `accepted: false` on a no). At the colleague's level «read» no task is ever delivered.
