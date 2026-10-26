@@ -3,7 +3,7 @@
 //
 //   take     open(<lock>, 'wx') and write { pid, token, at }. Exclusive by the file system.
 //   wait     a lock whose pid is alive is busy, however long it has been held: a laptop that sleeps
-//            mid-hook, an AV scan or a slow disk is still a live holder (QA R4-7). No age rule.
+//            mid-hook, an AV scan or a slow disk is still a live holder. No age rule.
 //   take over  only a dead holder's lock (process.kill(pid, 0) says ESRCH); a lock with no readable
 //            pid only after LOCK_UNREADABLE_MS (its writer died between create and write); and,
 //            for a pid the OS has since reused, after LOCK_MAX_HOLD_MS.
@@ -82,7 +82,7 @@ function reap(file, seen) {
     throw err;
   }
   // Same file only by identity: a new holder's lock that is still empty has the same (null) token
-  // as an old empty one, but never the same inode (#4's second R4-7 race).
+  // as an old empty one, but never the same inode.
   const same = seen.ino !== undefined && inoOf(aside) === seen.ino;
   if (!same) {
     try {

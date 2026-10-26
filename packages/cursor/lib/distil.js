@@ -1,6 +1,6 @@
 // The background distil (Claude Code): the person's local sessions become short work facts on
-// their colleague's node, each exactly once. Oscar 2026-10-21 (Todo answers, relayed in #4): the
-// run is «Headless claude -p in the background», and the hooks send «essence only».
+// their colleague's node, each exactly once. The product owner chose:
+// a headless `claude -p` in the background, and the hooks send the essence only.
 //
 // Two steps, never mixed:
 //   distil   a detached `claude -p` reads the noted transcript ranges with read-only tools. Its
@@ -178,7 +178,7 @@ const noteName = (path) => `${createHash('sha256').update(path).digest('hex').sl
 
 /**
  * Stop / SessionEnd / PreCompact: remembers that a transcript has new work. Lock-free: one file
- * per transcript, replaced atomically, so a slow lock holder can never erase it (QA R4-7).
+ * per transcript, replaced atomically, so a slow lock holder can never erase it.
  * Returns { noted: true }, { dropped: true } (past the cap, counted) or null (nothing to note).
  */
 export function noteSession(p, { transcriptPath, sessionId = null, cwd = null, now = Date.now(), maxNoteFiles = MAX_NOTE_FILES }) {
@@ -950,7 +950,7 @@ const NOTICES = {
   'import-unconfirmed': 'the import was sent, but the colleague did not confirm it; the person can press «Importer» again',
 };
 
-/** One line for SessionStart about a delivery problem or dropped notes, told once per kind (QA R4-5). Null when there is nothing new. */
+/** One line for SessionStart about a delivery problem or dropped notes, told once per kind. Null when there is nothing new. */
 export function distilNotice(p, { now = Date.now() } = {}) {
   let folded = [];
   let saved = false;
