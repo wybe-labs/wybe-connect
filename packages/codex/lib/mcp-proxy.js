@@ -14,7 +14,8 @@
 //                  remember is redacted and appended to the run's outbox, never forwarded; the
 //                  watchdog delivers the outbox after distil_done. pending_questions is forwarded.
 // Import: a node answer carrying import_request.requested_at is handed to `onImportRequest`
-// (Claude Code wires it to the distil scheduler). pollImport() asks pending_questions for one.
+// (Claude Code and Codex wire it to the distil scheduler). pollImport() asks pending_questions for
+// one: at start, every 5 minutes, and as soon as a sign-in from `connect` is stored.
 // Write-only stays true: the proxy forwards only the node's own tools, and the node has no read tool.
 // stdout carries JSON-RPC only; nothing here prints a token.
 
@@ -176,6 +177,9 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
       store(creds);
       state.done = true;
       notify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
+      // A new connection: the node asks for its first sync (import_request) at once, so it starts
+      // now, not at the next poll.
+      pollImport().catch(() => {});
     }).catch((err) => {
       state.error = err instanceof Error ? err.message : String(err);
     }).finally(() => resolveUrl());
