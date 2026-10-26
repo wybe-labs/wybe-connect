@@ -718,3 +718,132 @@ test('the run\'s files are removed once its outbox is delivered', async () => {
   const left = readdirSync(D.distilPaths(p).runs).filter((f) => f.startsWith(r.plan.runId) && !f.endsWith('.log'));
   assert.deepEqual(left, []);
 });
+
+// ------------------------------------------------------------------ several connections (lib/connections.js)
+const C = await lib('connections.js');
+const { readJson, loadCredentials } = await lib('home.js');
+
+/** A fetch that records the bearer of every tools/call it passes on, and can act after one. */
+function recordingFetch(after = () => {}) {
+  const calls = [];
+  const fetchImpl = async (url, init = {}) => {
+    const res = await fetch(url, init);
+    const msg = (() => { try { return JSON.parse(init.body ?? '{}'); } catch { return {}; } })();
+    if (msg.method === 'tools/call') {
+      calls.push({ url: String(url), auth: init.headers?.authorization });
+      after(calls.length);
+    }
+    return res;
+  };
+  return { calls, fetchImpl };
+}
+
+async function withEnv(env, fn) {
+  const saved = {};
+  for (const [k, v] of Object.entries(env)) { saved[k] = process.env[k]; process.env[k] = v; }
+  try {
+    return await fn();
+  } finally {
+    for (const k of Object.keys(env)) { if (saved[k] === undefined) delete process.env[k]; else process.env[k] = saved[k]; }
+  }
+}
+
+test('connections: an outbox made under connection A is delivered with A\'s grant on any session\'s tick, even when B is the default now', async () => {
+  const { root, files } = sandbox(1);
+  const home = join(root, 'home');
+  const tokB = ['wat', 'b'.repeat(40)].join('_');
+  const keyA = C.saveConnection(home, { ...creds(DOWN), nodeUrl: 'https://node-a.example.invalid' });
+  const pa = C.connectionPaths(home, keyA);
+  const T = Date.now();
+  note(pa, files, T - 7 * H);
+  const r1 = await cycle(pa, { now: T });
+  assert.equal(r1.outcome.class, 'node-unreachable');
+  assert.ok(D.loadState(pa).outbox, 'A\'s facts wait in A\'s outbox');
+
+  const a = await httpNode();
+  const b = await httpNode();
+  try {
+    saveCredentials({ ...loadCredentials(pa), mcpEndpoint: a.url, resource: a.url }, pa); // A reachable again, same grant
+    const keyB = C.saveConnection(home, { ...creds(b.url), nodeUrl: 'https://node-b.example.invalid', accessToken: tokB });
+    assert.equal(C.defaultConnection(home), keyB);
+    const rec = recorder();
+    const plans = D.maybeRunAll(home, { env: {}, now: T + 31 * MIN, spawnImpl: rec.spawnImpl });
+    assert.deepEqual(plans.map((x) => x.mode), ['deliver'], 'only A has work: its outbox');
+    const plan = readJson(plans[0].planFile);
+    assert.equal(plan.connection, keyA);
+    const rf = recordingFetch();
+    const out = await D.runWatchdog(plans[0].planFile, { paths: D.planPaths(plan, home), now: () => T + 31 * MIN, resolve: resolveFake, fetchImpl: rf.fetchImpl });
+    assert.equal(out.ok, true);
+    assert.deepEqual(a.stored, ['Fact 1 of 1.']);
+    assert.deepEqual(b.sends, []);
+    assert.deepEqual(rf.calls.map((c) => c.auth), [`Bearer ${fakeTok()}`]);
+    assert.equal(D.loadState(C.connectionPaths(home, keyB)).outbox, null);
+  } finally {
+    a.close();
+    b.close();
+  }
+});
+
+test('connections: a delivery stops when the grant is replaced while it runs, never writes over the new grant, and the next tick sends the rest with it', async () => {
+  const { root, files } = sandbox(1);
+  const home = join(root, 'home');
+  const node = await httpNode();
+  try {
+    const key = C.saveConnection(home, creds(node.url));
+    const p = C.connectionPaths(home, key);
+    const T = Date.now();
+    note(p, files, T - 7 * H);
+    const newTok = ['wat', 'n'.repeat(40)].join('_');
+    // the person signs in again (a new grantId) right after the first record reached the node
+    const rf = recordingFetch((n) => { if (n === 1) C.saveConnection(home, { ...creds(node.url), accessToken: newTok }); });
+    const plan = D.maybeRun({ paths: p, env: {}, now: T, spawnImpl: recorder().spawnImpl });
+    const out = await withEnv({ FAKE_CALLS: '2' }, () => D.runWatchdog(plan.planFile, { paths: p, now: () => T, resolve: resolveFake, fetchImpl: rf.fetchImpl }));
+    assert.equal(out.ok, false);
+    assert.equal(out.class, 'grant-changed');
+    assert.deepEqual(node.stored, ['Fact 1 of 2.']);
+    assert.equal(loadCredentials(p).accessToken, newTok, 'the new grant stands');
+    const s = D.loadState(p);
+    assert.ok(s.outbox, 'the rest waits');
+    assert.equal(s.lastFailureAt, null, 'not a failure: no back-off');
+
+    const rf2 = recordingFetch();
+    const next = D.maybeRun({ paths: p, env: {}, now: T + MIN, spawnImpl: recorder().spawnImpl });
+    assert.equal(next.mode, 'deliver');
+    const out2 = await D.runWatchdog(next.planFile, { paths: p, now: () => T + MIN, resolve: resolveFake, fetchImpl: rf2.fetchImpl });
+    assert.equal(out2.ok, true);
+    assert.deepEqual(node.stored, ['Fact 1 of 2.', 'Fact 2 of 2.'], 'each fact once');
+    assert.deepEqual(rf2.calls.map((c) => c.auth), [`Bearer ${newTok}`]);
+  } finally {
+    node.close();
+  }
+});
+
+test('connections: a connection removed during its run gets nothing written back', async () => {
+  const { root, files } = sandbox(1);
+  const home = join(root, 'home');
+  const key = C.saveConnection(home, creds(DOWN));
+  const p = C.connectionPaths(home, key);
+  const T = Date.now();
+  note(p, files, T - 7 * H);
+  const plan = D.maybeRun({ paths: p, env: {}, now: T, spawnImpl: recorder().spawnImpl });
+  await assert.rejects(
+    D.runWatchdog(plan.planFile, { paths: p, now: () => T, resolve: () => { C.removeConnection(home, key); return resolveFake(); } }),
+    { code: 'ECONNGONE' },
+  );
+  assert.equal(existsSync(join(home, 'connections', key)), false);
+  assert.equal(D.maybeRun({ paths: p, env: {}, now: T + H, spawnImpl: recorder().spawnImpl }), null);
+});
+
+test('connections: an import takes only the sessions of its own connection and those never fixed to one', () => {
+  const { root, files } = sandbox(3);
+  const home = join(root, 'home');
+  const key = C.saveConnection(home, creds(DOWN));
+  const p = C.connectionPaths(home, key);
+  const sid = (f) => f.split(/[\\/]/).pop().slice(0, -'.jsonl'.length);
+  writeJsonPrivate(join(home, 'state', 'sessions', `${sid(files[1])}.json`), { connection: 'other.example.invalid', nodeUrl: 'https://other.example.invalid' });
+  writeJsonPrivate(join(home, 'state', 'sessions', `${sid(files[2])}.json`), { connection: key, nodeUrl: 'https://demo.example.test' });
+  assert.equal(D.requestImport(p, '2026-10-21T10:00:00.000Z'), true);
+  const plan = D.maybeRun({ paths: p, env: {}, now: Date.now(), spawnImpl: recorder().spawnImpl, claudeHome: root });
+  assert.equal(plan.mode, 'import');
+  assert.deepEqual(plan.transcripts.map((t) => t.path).sort(), [files[0], files[2]].sort());
+});

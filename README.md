@@ -225,7 +225,10 @@ only the facts the run chose, redacted again by `lib/redact.js`. What makes it e
 - **One distil per connection.** Each connection keeps its own notes, state, outboxes and locks
   under `connections/<name>/`. A session's Stop hook notes it for the connection that session
   uses, and a run reads only those sessions and delivers only to that connection's node, with
-  its grant.
+  its grant. Every Stop hook ticks every connection, so an outbox never waits for a session of
+  its own. An import takes only sessions fixed to its connection, or never fixed to any. A
+  delivery whose grant is removed or replaced meanwhile stops and writes nothing back; the next
+  tick sends the rest with the grant on disk then.
 - **An outbox belongs to one node.** Its keys are made with the node's address in them, and it
   is sent only to that node. After connecting to another colleague it waits on this machine,
   and is sent if this Claude Code connects to that node again.

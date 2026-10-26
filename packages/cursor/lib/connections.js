@@ -246,6 +246,18 @@ export function removeConnection(root, ref) {
   return { key, dropped };
 }
 
+/** The connection a session is fixed to: a name, null (fixed to none), or undefined while it is not fixed. */
+export function pinnedConnection(root, sessionId) {
+  const pinned = readJson(pinPath(root, sessionId));
+  return pinned && 'connection' in pinned ? pinned.connection : undefined;
+}
+
+/** The names of every connection in this home. */
+export function connectionNames(root) {
+  migrateLegacy(root);
+  return knownKeys(root);
+}
+
 /** The connection this session uses (see the order at the top), fixed for the session on first call. */
 export function resolveSession(root, { sessionId = null, env = process.env } = {}) {
   migrateLegacy(root);

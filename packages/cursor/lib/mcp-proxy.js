@@ -212,6 +212,7 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
         }
         if (name === 'distil_done') {
           const r = spoolDone(paths, distilRun);
+          if (r.error) return reply(text(r.error, true));
           return reply(text(`Done: ${r.items} remember call(s) will be sent to the colleague.`));
         }
         if (name === 'pending_questions') {

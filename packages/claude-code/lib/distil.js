@@ -32,7 +32,7 @@ import { homedir } from 'node:os';
 import { withLock, acquire, isAlive as defaultAlive } from './lock.js';
 import { appendRecord, readRecords } from './ledger.js';
 import { paths as legacyPaths, loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
-import { connectionPaths, checkedName, NODE_ENV } from './connections.js';
+import { connectionPaths, checkedName, connectionNames, pinnedConnection, NODE_ENV } from './connections.js';
 import { callTool } from './post.js';
 import { refreshTokens } from './oauth.js';
 import { redactValue } from './redact.js';
@@ -135,7 +135,14 @@ function saveState(p, s, stillHeld) {
   }
 }
 
+/**
+ * A connection removed (`connect remove`) while a hook, run or delivery of it was under way: its
+ * directory is gone, and nothing may write there again, so it does not come back half.
+ */
+const gone = (p) => Boolean(p.connection) && !existsSync(p.credentials);
+
 function locked(p, fn, opts = { tries: 40, waitMs: 50 }) {
+  if (gone(p)) throw Object.assign(new Error('the connection was removed'), { code: 'ECONNGONE' });
   return withLock(distilPaths(p).lock, ({ stillHeld }) => {
     const s = loadState(p);
     return fn(s, (next = s) => saveState(p, next, stillHeld));
@@ -511,6 +518,20 @@ export function importTranscripts(claudeHome, now) {
 }
 
 /**
+ * Whether a session's transcript may go into this connection's import: a session fixed to another
+ * connection (or to none) belongs to that one, so its work never reaches this node. A session
+ * that was never fixed (older than the connections, or never hooked) is the person's for any.
+ */
+function importable(p, sessionId) {
+  try {
+    const pin = pinnedConnection(p.root, sessionId);
+    return pin === undefined || pin === p.connection;
+  } catch {
+    return false; // an unreadable pin: not provably ours
+  }
+}
+
+/**
  * The import: every transcript of the import window joins pending (by its time), so the plugin,
  * not the model, decides what the import reads, and each is read from its mark on like any other
  * run. Past MAX_PENDING the rest wait on disk as notes, folded as room frees.
@@ -520,6 +541,7 @@ function enqueueImport(p, s, claudeHome, now) {
   for (const t of importTranscripts(claudeHome, now)) {
     const key = transcriptKey(t.path);
     if (have.has(key)) continue;
+    if (p.connection && !importable(p, t.sessionId)) continue;
     have.add(key);
     if (s.pending.length + inFlight(s) < MAX_PENDING) s.pending.push({ path: t.path, sessionId: t.sessionId, cwd: null, notedAt: iso(t.mtimeMs) });
     else noteSession(p, { transcriptPath: t.path, sessionId: t.sessionId, now: t.mtimeMs });
@@ -538,7 +560,7 @@ export function requestImport(p, requestedAt) {
       return true;
     });
   } catch (err) {
-    if (err?.code === 'ELOCKBUSY') return false;
+    if (err?.code === 'ELOCKBUSY' || err?.code === 'ECONNGONE') return false;
     throw err;
   }
 }
@@ -568,7 +590,7 @@ export function maybeRun({ paths: p, env = process.env, now = Date.now(), alive 
       return decided;
     });
   } catch (err) {
-    if (err?.code === 'ELOCKBUSY') return null;
+    if (err?.code === 'ELOCKBUSY' || err?.code === 'ECONNGONE') return null;
     throw err;
   }
   unlinkAll(folded);
@@ -598,6 +620,25 @@ export function maybeRun({ paths: p, env = process.env, now = Date.now(), alive 
     }
   }
   return { ...plan, planFile };
+}
+
+/**
+ * A hook's tick for every connection of a harness home (lib/connections.js), each in its own
+ * paths: a connection's outbox or backlog must not wait for a session of its own, since new
+ * sessions may all use another one now. One connection's failure never stops the others.
+ * Returns the plans started.
+ */
+export function maybeRunAll(root, opts = {}) {
+  const started = [];
+  for (const key of connectionNames(root)) {
+    try {
+      const plan = maybeRun({ ...opts, paths: connectionPaths(root, key) });
+      if (plan) started.push(plan);
+    } catch {
+      // that connection's next tick
+    }
+  }
+  return started;
 }
 
 function decide(p, s, now, node, claudeHome) {
@@ -634,6 +675,7 @@ function outboxRecords(p, runId) {
 
 /** The run's `remember`: redacted, then appended, keyed for the run's node. Returns { seq } or { error }. */
 export function spoolRemember(p, runId, args) {
+  if (gone(p)) return { error: 'the connection this distil run is for was removed' };
   const { records } = outboxRecords(p, runId);
   if (records.some((r) => r.kind === 'done')) return { error: 'this distil run already called distil_done' };
   const seq = records.filter((r) => r.kind === 'remember').reduce((m, r) => Math.max(m, r.seq), 0) + 1;
@@ -645,6 +687,7 @@ export function spoolRemember(p, runId, args) {
 
 /** The run's `distil_done`: closes the outbox with the number of calls it holds. */
 export function spoolDone(p, runId) {
+  if (gone(p)) return { error: 'the connection this distil run is for was removed' };
   const { records } = outboxRecords(p, runId);
   if (records.some((r) => r.kind === 'done')) return { items: records.filter((r) => r.kind === 'remember').length, again: true };
   const items = records.filter((r) => r.kind === 'remember').length;
@@ -717,19 +760,35 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
     let sent = 0;
     // An outbox is sent only to the node it was distilled for, whatever the person connected since.
     if (c && run.node && nodeOf(c) !== run.node) return { ok: false, class: 'node-changed', message: 'this Claude Code is now connected to another colleague', importDone, sent };
+    // The connection's grant may be removed or replaced (a new sign-in gets a new grantId,
+    // lib/connections.js) while this delivery runs: then it stops, writes no tokens, and the next
+    // tick delivers what is left with the grant on disk by then.
+    const grantId = c?.grantId ?? null;
+    const replaced = () => {
+      try {
+        const onDisk = readJson(p.credentials);
+        return !onDisk || (onDisk.grantId ?? null) !== grantId;
+      } catch {
+        return true;
+      }
+    };
+    const changed = () => ({ ok: false, class: 'grant-changed', message: 'the connection was removed or signed in again while the facts were sent', importDone, sent });
     for (const r of order) {
       if (acked.has(r.seq)) continue;
       if (!c) return { ok: false, class: 'signed-out', message: 'not connected to a Wybe AI colleague', importDone, sent };
+      if (replaced()) return changed();
       const args = { ...r.args, idempotency_key: r.key };
       let out = await callTool({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, name: 'remember', args, fetchImpl, timeoutMs });
       if (!out.ok && out.kind === 'auth' && c.refreshToken) {
         const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now() });
         if (next) {
+          if (replaced()) return changed();
           c = { ...c, ...next };
           saveCredentials(c, p);
           out = await callTool({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, name: 'remember', args, fetchImpl, timeoutMs });
         }
       }
+      if (gone(p)) return changed(); // removed while the call ran: its files are gone, write none back
       if (!out.ok && out.toolError) {
         appendRecord(dp.acks(run.runId), { seq: r.seq, key: r.key, refused: true, message: String(out.message).slice(0, 200), at: iso(now()) });
         sent += 1;
@@ -954,7 +1013,7 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
     if (d.class === 'node-changed') {
       park(p, s, s.outbox); // not a failure: it waits for its own node
       s.outbox = null;
-    } else if (d.class !== 'busy') fail(s, d.class, d.message, now());
+    } else if (d.class !== 'busy' && d.class !== 'grant-changed') fail(s, d.class, d.message, now());
     save();
     return { ok: false, class: d.class, message: d.message };
   });
@@ -1018,7 +1077,7 @@ export function distilNotice(p, { now = Date.now() } = {}) {
       return `wybe-connect: ${parts.join('; ')}. Tell the person once, briefly.`;
     }, { tries: 5, waitMs: 20 });
   } catch (err) {
-    if (err?.code === 'ELOCKBUSY') return null;
+    if (err?.code === 'ELOCKBUSY' || err?.code === 'ECONNGONE') return null;
     throw err;
   } finally {
     if (saved) unlinkAll(folded);
