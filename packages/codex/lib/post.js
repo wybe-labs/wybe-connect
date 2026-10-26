@@ -6,7 +6,8 @@
 //
 // Outcomes are values, not exceptions:
 //   { ok: true,  result, openQuestions }
-//   { ok: false, kind: 'auth' | 'network' | 'server' | 'protocol', status?, message }
+//   { ok: false, kind: 'auth' | 'network' | 'server' | 'protocol', status?, message, toolError? }
+// toolError: true when the node answered the call with isError: it refused this call, it was not down.
 
 export const PROTOCOL_VERSION = '2025-06-18';
 const CLIENT_INFO = { name: 'wybe-connect', version: '0.1.0' };
@@ -88,9 +89,11 @@ async function firstMessage(res, id) {
 }
 
 /**
- * One tool call through a fresh MCP session. Returns the outcome shapes documented above.
+ * One JSON-RPC request through a fresh MCP session (initialize -> notifications/initialized ->
+ * method). Returns { ok: true, result } or the failure shapes documented above. The node's result
+ * is passed through as it is; lib/mcp-proxy.js forwards it to Claude Code verbatim.
  */
-export async function callTool({ endpoint, accessToken, name, args, fetchImpl = globalThis.fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+export async function forward({ endpoint, accessToken, method, params, fetchImpl = globalThis.fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   if (typeof accessToken !== 'string' || accessToken.length === 0) return { ok: false, kind: 'auth', message: 'no access token' };
   const common = { endpoint, accessToken, fetchImpl, timeoutMs };
   const init = await rpc({
@@ -102,7 +105,7 @@ export async function callTool({ endpoint, accessToken, name, args, fetchImpl = 
   const sessionId = init.sessionId;
   const ack = await rpc({ ...common, sessionId, method: 'notifications/initialized', params: {}, notification: true });
   if (!ack.ok) return ack;
-  const call = await rpc({ ...common, sessionId, method: 'tools/call', params: { name, arguments: args } });
+  const call = await rpc({ ...common, sessionId, method, params });
   if (sessionId) {
     try {
       await fetchImpl(endpoint, { method: 'DELETE', headers: headersFor(accessToken, sessionId), signal: AbortSignal.timeout(timeoutMs) });
@@ -110,11 +113,19 @@ export async function callTool({ endpoint, accessToken, name, args, fetchImpl = 
       // closing the server-side session is a courtesy
     }
   }
+  return call;
+}
+
+/**
+ * One tool call through a fresh MCP session. Returns the outcome shapes documented above.
+ */
+export async function callTool({ endpoint, accessToken, name, args, fetchImpl = globalThis.fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+  const call = await forward({ endpoint, accessToken, method: 'tools/call', params: { name, arguments: args }, fetchImpl, timeoutMs });
   if (!call.ok) return call;
   const result = call.result ?? {};
   if (result.isError === true) {
     const text = Array.isArray(result.content) ? result.content.map((c) => c?.text ?? '').join(' ') : '';
-    return { ok: false, kind: 'server', message: `tool error: ${text.slice(0, 200)}` };
+    return { ok: false, kind: 'server', toolError: true, message: `tool error: ${text.slice(0, 200)}` };
   }
   return { ok: true, result, openQuestions: openQuestionsOf(result) };
 }

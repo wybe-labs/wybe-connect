@@ -1,24 +1,29 @@
 #!/usr/bin/env node
-// Stop / SessionEnd / PreCompact hook: flush the redacted transcript delta to the node this
-// session uses (lib/connections.js). stdin: { session_id, transcript_path, cwd, hook_event_name, ... }.
-// Exit 0 always.
+// Stop / SessionEnd / PreCompact hook (Claude Code). It sends nothing itself: essence only. It
+// notes the session's transcript for the background distil (lib/distil.js) of the connection this
+// session uses (lib/connections.js) and lets the scheduler start a run when one is due. Without a
+// connection, or inside a distil run, it does nothing.
+// stdin: { session_id, transcript_path, cwd, hook_event_name, ... }. Exit 0 always.
 
-import { readHookInput, failOpen, queueNotice } from '../lib/hook-io.js';
-import { flush } from '../lib/flush.js';
+import { readHookInput, failOpen } from '../lib/hook-io.js';
 import { homePath } from '../lib/home.js';
 import { sessionPaths } from '../lib/connections.js';
+import { DISTIL_ENV, noteSession, maybeRun } from '../lib/distil.js';
 
 try {
   const input = await readHookInput();
-  const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
-  const summary = await flush({
-    paths: sessionPaths(homePath(), { sessionId }),
-    transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null,
-    sessionId,
-    cwd: typeof input.cwd === 'string' ? input.cwd : process.cwd(),
-    event: typeof input.hook_event_name === 'string' ? input.hook_event_name : 'Stop',
-  });
-  process.stderr.write(queueNotice(summary));
+  if (!process.env[DISTIL_ENV]) {
+    const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
+    const p = sessionPaths(homePath(), { sessionId });
+    if (p.connection) {
+      noteSession(p, {
+        transcriptPath: input.transcript_path,
+        sessionId,
+        cwd: typeof input.cwd === 'string' ? input.cwd : null,
+      });
+      maybeRun({ paths: p });
+    }
+  }
 } catch (err) {
   failOpen('flush', err);
 }

@@ -20,10 +20,14 @@ Install and pairing take one pasted sentence; see "Getting started".
 
 | Scope | Consent label (nb) | What flows | When |
 |---|---|---|---|
-| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session |
+| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session; and (Claude Code) from the background distil: at most every 6 hours, and when you press «Importer» |
 | `conversations` | Samtalesammendrag | a title and a summary of a past chat, and its messages only if you ask for them | only when you explicitly ask Claude to import a conversation |
 | `sessions:light` | Arbeidsøkter — hva du ba om | per session: project name (the folder name), the **names** of your git remotes (never their URLs), branch, files Claude wrote or edited, start/end time, and **your own prompts**. Zero assistant text, zero tool output, zero thinking. Prompts written by Claude to its own subagents are excluded; text a hook injected into your prompt is stripped. | automatically at every stop, before every context compaction, and at session end |
 | `sessions:full` | Arbeidsøkter — alt innhold | everything in `sessions:light` plus Claude's replies and every tool call's input and output (each clipped to 4000 characters). Thinking blocks still never leave. | same as above |
+
+Claude Code sends no `sessions:*` payload: its hooks only note the session, and a background
+distil on your machine turns your sessions into short `remember` facts (see "The background
+distil"). The `sessions:*` rows apply to Codex and Cursor.
 
 With no `sessions:*` scope the hooks build nothing and send nothing. Every payload carries a
 `redaction.families` count (which families hit, how often, never the values) so a review can
@@ -33,23 +37,26 @@ Everything is redacted before it is written anywhere, including the local queue.
 
 ### The redaction families
 
+Redaction reads structure first, then known token prefixes, then keys, then entropy:
+
 | Family | What it catches |
 |---|---|
 | `pem-private-key` | `-----BEGIN ... PRIVATE KEY-----` blocks, whole |
+| `secret-block` | a YAML `\|` or `>` block under a secret key (nested YAML, templates, public keys and prose stay) |
 | `url-userinfo` | `scheme://user:password@host` in any URL or DSN (the scheme and host stay) |
-| `bearer` | the value after `Bearer ` |
-| `wybe-credential` | `wnc_` `wbt_` `wpc_` `wat_` `wrt_` `wac_` `wcl_` credentials |
-| `openai-key` | `sk-...` and `sk-ant-...` keys |
-| `aws-access-key`, `aws-secret` | `AKIA...` ids and the 40-character secret after an AWS secret label |
-| `github-token` | `ghp_` `gho_` `ghu_` `ghs_` `ghr_` and `github_pat_` tokens |
-| `slack-token` | `xox?-...` tokens |
-| `jwt` | `eyJ...` three-part signed tokens |
-| `generic-secret` | a 32+ character hex or base64url value after `token`, `secret`, `key`, `password`, `api_key`, `client_secret`, ... |
+| `auth-header` | the credential in `Authorization:` (Bearer, Token, Basic, a Digest `response=`), and a bare `Bearer <token>` |
+| `cookie` | `Cookie:` and `Set-Cookie:` values |
+| `cli-secret` | `--password x`, `--token=x`, `mysql -p<pw>`, `docker login -p x`, `curl -u user:pw` |
+| `wybe-credential`, `openai-key`, `aws-access-key`, `github-token`, `gitlab-token`, `npm-token`, `slack-token`, `slack-webhook`, `stripe-key`, `google-api-key`, `sendgrid-key`, `twilio-key`, `discord-token`, `microsoft-token`, `jwt` | known vendor token prefixes and shapes, wherever they stand |
+| `keyed-secret` | the value under a secret key (`password`, `passord`, `secret`, `token`, `api_key`, `<x>_key`, ...) in JSON at any escape depth, YAML, env and shell lines, headers, URL queries and connection strings; placeholders, types, code, paths, labels and sentences stay, and so do ids under keys like `page_token` or `cache_key` |
+| `high-entropy` | a 40+ character random string that no key vouched for |
 | `fodselsnummer` | Norwegian national identity numbers whose two mod-11 control digits verify (an ordinary 11-digit number is left alone) |
 | `email` | e-mail addresses; `{ emails: false }` keeps them |
 
-`test/redact-weaken.js` weakens each family in turn and demands the suite goes red, so a
-family that stopped protecting cannot pass unnoticed.
+`test/redact-table.test.js` is the frozen table: every leak and every false positive with its
+exact expected output, and a second pass that must change nothing. It also switches off each
+family in turn and demands that some row goes red, so a family that stopped protecting cannot
+pass unnoticed.
 
 ### What never leaves, under any scope
 
@@ -59,22 +66,25 @@ itself (it is sent as a header to your node, and to nothing else).
 
 ## Getting started (Claude Code)
 
-In Claude Code:
+One command in a terminal (Claude Code 2.1.292 or newer):
 
 ```
-/plugin marketplace add wybe-labs/wybe-connect
-/plugin install wybe-connect@wybe-connect
+claude plugin install wybe-connect --marketplace wybe-labs/wybe-connect
 ```
 
+(or, inside Claude Code: `/plugin install wybe-connect --marketplace wybe-labs/wybe-connect`).
 Then paste one of these with your own node address:
 
 > Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
 
 > Connect me to my Wybe AI colleague at https://dittfirma.wybe.me
 
-Claude runs the `connect` skill: a browser opens on `auth.wybe.me`, you log in with your
-passkey and tick the scopes, and Claude runs the first sync (the opening kit: projects, how you
-work, tools, ideas, research, recurring tasks; work only). From then on the hooks do the rest.
+Claude runs the `connect` skill, which calls the plugin's own `wybe` MCP server: a browser
+opens on `auth.wybe.me`, you log in with your passkey and tick the scopes. That one sign-in
+serves both the hooks and the `remember` tool; nothing to copy, no `claude mcp add`. The first
+sync then runs by itself: the node asks for an import when the connection is made, and the
+plugin distils your recent sessions and memory in the background. There is no step for you.
+From then on the hooks do the rest.
 
 Revoking the pairing (under "Mine koblinger" on your node) stops the flow. Erasing what the
 node learned from this assistant is a separate, explicit action there. Both are stated on the
@@ -112,6 +122,9 @@ uses the connection its first hook found: one it was moved to (`connect.js use <
 <id>`), else `WYBE_CONNECT_NODE=<name>` in the harness's environment, else the default (the one
 connected or `use`d last, or the only one). `connect.js list` and `connect.js remove <name>`
 manage them. A 0.1 `credentials.json` moves under its node on the first hook, queue included.
+In Claude Code the background distil is kept per connection too, and the plugin's `wybe` MCP
+server (which gets no session id) uses the connection `WYBE_CONNECT_NODE` names when Claude Code
+starts, else the default; its `connect` tool stores a new connection and makes it the default.
 
 ## Claude Desktop, claude.ai and ChatGPT (no hooks)
 
@@ -178,8 +191,65 @@ generated from `texts/standing.json`, the file the node's connect cards pin agai
 
 ## How it works
 
+### The background distil (Claude Code)
+
 ```
-Claude Code ──hook stdin (transcript_path)──▶ hooks/flush.js
+Stop / SessionEnd / PreCompact ─▶ hooks/flush.js ─ one note file per transcript (lock-free)
+                                        │ the scheduler (lib/distil.js maybeRun, under the distil lock)
+                                        ▼
+            bin/distil-run.js (detached watchdog, ends the run at 30 min)
+                │ claude -p  --tools Read,Glob,Grep  --strict-mcp-config (only the plugin's `wybe`)
+                │   reads the noted transcript ranges, calls remember … then distil_done
+                │   └▶ bin/mcp-proxy.js in distil mode: redacts, appends to the run's OUTBOX
+                ▼
+            delivery: each outbox record ─ remember + idempotency_key ─▶ the node
+                      each ack (ok and a numeric `stored`) ─▶ the run's ACKS file
+```
+
+It runs on your machine and on your own Claude subscription. Nothing raw leaves the machine:
+only the facts the run chose, redacted again by `lib/redact.js`. What makes it exactly once:
+
+- **Produce, then deliver.** The run never talks to the node. Until it calls `distil_done`,
+  nothing is sent, so a run that dies is simply redone. Once it has, its outbox is frozen: a
+  retry sends only the records without an ack, with the same `idempotency_key`, and claude never
+  runs again for them.
+- **Success is the node's acknowledgement.** A record counts only when the node answered
+  `ok: true` with a numeric `stored`. An import counts only with `import_done: true`. An empty
+  outbox, a run without `distil_done`, or claude's exit code is never a success.
+- **Each line is distilled at most once per node.** The "distilled up to" mark is kept per
+  node and per transcript file, and lasts as long as the file does. Every run reads a transcript
+  from its mark on, whatever started it: a hook, the import, or a session resumed months later.
+  The import does not let the model look for transcripts: the plugin lists every session of
+  the last 30 days that is not distilled yet (the distil runs' own left out), and the model
+  reads only those ranges.
+- **One distil per connection.** Each connection keeps its own notes, state, outboxes and locks
+  under `connections/<name>/`. A session's Stop hook notes it for the connection that session
+  uses, and a run reads only those sessions and delivers only to that connection's node, with
+  its grant.
+- **An outbox belongs to one node.** Its keys are made with the node's address in them, and it
+  is sent only to that node. After connecting to another colleague it waits on this machine,
+  and is sent if this Claude Code connects to that node again.
+- **Checksummed, append-only files** (`lib/ledger.js`). Each line carries its own checksum. A
+  torn or altered line never counts: a torn outbox before `distil_done` redoes the run, and a
+  torn ack re-sends that record. A line damaged after `distil_done` is set aside to
+  `<run>.torn`, and the intact records are still delivered.
+- **A refusal is set aside.** A record the node refuses with a tool error is recorded as
+  refused and never sent again, so it never holds up the records and sessions behind it.
+- **A real lock** (`lib/lock.js`). A live holder is never taken over, however slow. Only a dead
+  holder's lock is, and a holder checks its token before it writes. The hooks need no lock.
+- **Bounded, never silent.** Pending plus the run in flight hold at most 2000 transcripts.
+  Beyond that, notes wait on disk. A failed run's transcripts go back in their place. Past
+  20 000 waiting notes, a note is dropped with a count, and the next session start says so.
+- A failure retries after 30 minutes. SessionStart tells Claude once per kind of problem, and
+  once for each record set aside (refused, damaged, or kept for another colleague).
+
+The node should keep each `idempotency_key` once. Until it does, a reply lost after the node
+stored the facts (beyond the 60 s delivery timeout) means that one record can be stored twice.
+
+### Codex and Cursor
+
+```
+Codex / Cursor ──hook stdin (transcript)──▶ hooks/flush.js
                                                 │ delta since the cursor (~/.wybe-connect/state/<id>.json)
                                                 │ scope-aware payload (lib/transcript.js)
                                                 │ redaction (lib/redact.js)
@@ -199,10 +269,12 @@ discovery, dynamic client registration with a loopback `redirect_uri`, browser, 
 and stores it in `~/.wybe-connect/connections/<node>/credentials.json` (owner-only). The hooks then speak MCP's
 Streamable HTTP transport directly (`initialize`, `notifications/initialized`, `tools/call`)
 with `fetch`. The interactive tools (`remember`, `import_conversation`, `pending_questions`)
-go through Claude Code's own MCP client, added with `claude mcp add --transport http wybe
-<url>`, which drives its own consent. Two grants, one person, same scopes screen. The plugin
-ships no `.mcp.json` because the node URL is per person and a marketplace install cannot inject
-it.
+go through the plugin's own MCP server (`.mcp.json` → `bin/mcp-proxy.js`, a stdio server):
+before you connect it offers only `connect(node_url)`, which runs the same OAuth flow and stores
+the same `credentials.json`; after that it lists the node's own tools and forwards each call to
+the node's `/mcp` with that grant (one refresh on 401). One grant, one sign-in; the node URL is
+never in `.mcp.json`, so a marketplace install works for everyone. (`bin/connect.js` still runs
+the flow from a terminal.)
 
 **Open questions.** A hook cannot call `pending_questions`. Every tool response carries
 `open_questions[]`; `flush.js` caches the last set and `session-start.js` hands it to Claude
@@ -216,7 +288,8 @@ flush drains the queue. A queue older than 7 days or larger than 50 MB loses its
 
 ```
 lib/            shared, dependency-free: redact, transcript, codex-rollout, cursor-spool, post, oauth,
-                queue, home, flush, session-context, hook-io, connect-cli
+                queue, home, flush, session-context, hook-io, connect-cli, mcp-proxy,
+                distil (the background distil), ledger (checksummed records), lock
 packages/
   claude-code/  the Claude Code plugin (plugin.json, hooks/, bin/connect.js, skills/connect)
   codex/        the Codex plugin (.codex-plugin/, hooks/, bin/connect.js, skills/connect, AGENTS.md
@@ -233,8 +306,7 @@ test/           node --test; fixtures are synthetic (scripts/codex-fixtures.js w
 ## Development
 
 ```
-node --test                  # every suite
-node test/redact-weaken.js   # the mutation harness (run directly, not under node --test)
+node --test                  # every suite, the redaction table and its mutation check included
 npm run sync-lib             # refresh packages/*/lib after editing lib/
 npm run sync-texts           # regenerate the README's texts section after editing texts/standing.json
 npm ls                       # must print nothing under the package: zero dependencies
