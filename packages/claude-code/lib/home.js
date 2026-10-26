@@ -17,7 +17,7 @@
 
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
-import { mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync, chmodSync, renameSync, unlinkSync } from 'node:fs';
 
 export function homePath() {
   return process.env.WYBE_CONNECT_HOME || join(homedir(), '.wybe-connect');
@@ -59,8 +59,16 @@ export function readJson(path) {
   }
 }
 
-/** Writes atomically (temp + rename) with owner-only permissions. */
-export function writeJsonPrivate(path, value) {
+const BUSY = new Set(['EPERM', 'EACCES', 'EBUSY']);
+const RENAME_TRIES = 12;
+
+/**
+ * Writes atomically (temp + rename) with owner-only permissions. On Windows a rename over a file
+ * another hook is reading or replacing at that moment fails with EPERM, EACCES or EBUSY for a few
+ * milliseconds: it is retried with a short wait, and given up (temp file removed) only when it
+ * stays busy.
+ */
+export function writeJsonPrivate(path, value, { renameImpl = renameSync } = {}) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
@@ -69,7 +77,22 @@ export function writeJsonPrivate(path, value) {
   } catch {
     // Windows without POSIX modes: the profile directory ACL is the protection
   }
-  renameSync(tmp, path);
+  for (let i = 1; ; i++) {
+    try {
+      renameImpl(tmp, path);
+      return;
+    } catch (err) {
+      if (!BUSY.has(err?.code) || i >= RENAME_TRIES) {
+        try {
+          unlinkSync(tmp);
+        } catch {
+          // already gone
+        }
+        throw err;
+      }
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5 * i);
+    }
+  }
 }
 
 export function loadCredentials(p = paths()) {
