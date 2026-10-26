@@ -317,6 +317,7 @@ export function finishOnStop(p, sessionId, { lastMessage = '', failed = false, t
   return withTasks(p, sessionId, (st) => {
     let n = 0;
     for (const task of Object.values(st.tasks)) {
+      if (st.pendingNotices.includes(task.id)) continue; // its notice has not reached the session yet
       const ours = task.status === 'running'
         || (task.status === 'delivered' && turnPrompt !== undefined && (turnPrompt === null || turnPrompt.includes(taskMark(task.id))));
       if (!ours) continue;
