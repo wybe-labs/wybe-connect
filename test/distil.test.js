@@ -12,6 +12,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
+// No test here may look at a real Claude Code home (an import lists its transcripts).
+process.env.CLAUDE_CONFIG_DIR = mkdtempSync(join(tmpdir(), 'wybe-connect-no-home-'));
+
 const PKG = join(import.meta.dirname, '..', 'packages', 'claude-code');
 const lib = (f) => import(pathToFileURL(join(PKG, 'lib', f)).href);
 const D = await lib('distil.js');
@@ -202,7 +205,7 @@ test('distil_done with nothing to send is a success: nothing durable, and the tr
   const s = D.loadState(p);
   assert.deepEqual(s.pending, []);
   assert.ok(s.lastSuccessAt);
-  for (const f of files) assert.equal(s.distilled[f].line, 3, 'the next run starts after line 3');
+  for (const f of files) assert.equal(D.markOf(s, 'https://demo.example.test', f), 3, 'the next run starts after line 3');
 });
 
 test('a transcript that grew after its run is distilled again from where the last run stopped', async () => {

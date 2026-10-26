@@ -202,16 +202,28 @@ only the facts the run chose, redacted again by `lib/redact.js`. What makes it e
 - **Success is the node's acknowledgement.** A record counts only when the node answered
   `ok: true` with a numeric `stored`. An import counts only with `import_done: true`. An empty
   outbox, a run without `distil_done`, or claude's exit code is never a success.
+- **Each line is distilled at most once per node.** The "distilled up to" mark is kept per
+  node and per transcript file, and lasts as long as the file does. Every run reads a transcript
+  from its mark on, whatever started it: a hook, the import, or a session resumed months later.
+  The import does not let the model look for transcripts: the plugin lists every session of
+  the last 30 days that is not distilled yet (the distil runs' own left out), and the model
+  reads only those ranges.
+- **An outbox belongs to one node.** Its keys are made with the node's address in them, and it
+  is sent only to that node. After connecting to another colleague it waits on this machine,
+  and is sent if this Claude Code connects to that node again.
 - **Checksummed, append-only files** (`lib/ledger.js`). Each line carries its own checksum. A
-  torn or altered line never counts: a torn outbox redoes the run, and a torn ack re-sends that
-  record.
+  torn or altered line never counts: a torn outbox before `distil_done` redoes the run, and a
+  torn ack re-sends that record. A line damaged after `distil_done` is set aside to
+  `<run>.torn`, and the intact records are still delivered.
+- **A refusal is set aside.** A record the node refuses with a tool error is recorded as
+  refused and never sent again, so it never holds up the records and sessions behind it.
 - **A real lock** (`lib/lock.js`). A live holder is never taken over, however slow. Only a dead
   holder's lock is, and a holder checks its token before it writes. The hooks need no lock.
 - **Bounded, never silent.** Pending plus the run in flight hold at most 2000 transcripts.
   Beyond that, notes wait on disk. A failed run's transcripts go back in their place. Past
   20 000 waiting notes, a note is dropped with a count, and the next session start says so.
-- Each transcript is read from where its last delivered run stopped. A failure retries after
-  30 minutes. SessionStart tells Claude once per kind of problem.
+- A failure retries after 30 minutes. SessionStart tells Claude once per kind of problem, and
+  once for each record set aside (refused, damaged, or kept for another colleague).
 
 The node should keep each `idempotency_key` once. Until it does, a reply lost after the node
 stored the facts (beyond the 60 s delivery timeout) means that one record can be stored twice.
