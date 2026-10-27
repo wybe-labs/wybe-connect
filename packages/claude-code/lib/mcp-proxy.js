@@ -22,11 +22,19 @@ import { createInterface } from 'node:readline';
 import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
-import { NODE_ENV, connectionPaths, defaultConnection, findConnection, checkSave, saveConnection } from './connections.js';
+import { NODE_ENV, connectionPaths, defaultConnection, findConnection, checkSave, saveConnection, resolveSession, anySessionMoved } from './connections.js';
 import { spoolRemember, spoolDone } from './distil.js';
 import { redactValue } from './redact.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'wybe', version: '0.2.0' });
+
+/** A node tool as offered here: with an optional session_id, which routes the call and never leaves the machine. */
+const withSessionId = (tool) => {
+  const schema = tool?.inputSchema;
+  if (!schema || schema.type !== 'object') return tool;
+  const session = { type: 'string', description: 'This session\'s id, as the SessionStart note gives it. Required once a session on this machine was moved with connect use --session.' };
+  return { ...tool, inputSchema: { ...schema, properties: { ...(schema.properties ?? {}), session_id: session } } };
+};
 
 export const CONNECT_TOOL = Object.freeze({
   name: 'connect',
@@ -107,11 +115,17 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
   // session id, so it takes the hooks' rule without the session step: WYBE_CONNECT_NODE (unknown
   // means none, never another), else the default. Once found, it keeps that connection for its
   // life, as a session does; a `connect` from here switches it to the connection it made.
+  // A call that names its session (session_id) resolves that session's connection at the call,
+  // so `connect use <name> --session <id>` moves this server's calls along with the hooks.
   // With `paths`, it uses those as they are (a distil run's own connection, or the single layout).
   let key = null;
-  const current = () => {
+  const current = (sessionId = null) => {
     if (fixed) return fixed;
     if (!root) return null;
+    if (sessionId) {
+      const k = resolveSession(root, { sessionId, env });
+      return k ? connectionPaths(root, k) : null;
+    }
     if (!key) {
       const wanted = env[NODE_ENV];
       key = wanted ? findConnection(root, wanted) : defaultConnection(root);
@@ -119,17 +133,17 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     return key ? connectionPaths(root, key) : null;
   };
 
-  const credentials = () => {
+  const credentials = (sessionId = null) => {
     try {
-      const p = current();
+      const p = current(sessionId);
       return p ? loadCredentials(p) : null;
     } catch {
       return null;
     }
   };
 
-  async function upstream(method, params) {
-    let c = credentials();
+  async function upstream(method, params, sessionId = null) {
+    let c = credentials(sessionId);
     if (!c) return { ok: false, kind: 'not-connected', message: 'not connected' };
     let out = await forward({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, method, params, fetchImpl });
     if (!out.ok && out.kind === 'auth' && c.refreshToken) {
@@ -138,7 +152,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         c = { ...c, ...next };
         // Stored only while the file still holds the grant this call started with: a grant removed
         // or replaced meanwhile (a new grantId, lib/connections.js) is never written over.
-        const p = current();
+        const p = current(sessionId);
         let onDisk = null;
         try {
           onDisk = p ? readJson(p.credentials) : null;
@@ -294,27 +308,35 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         if (!credentials()) return reply({ tools: [CONNECT_TOOL] });
         const out = await upstream('tools/list', {});
         const tools = out.ok && Array.isArray(out.result?.tools) ? out.result.tools.filter((t) => t?.name !== CONNECT_TOOL.name) : [];
-        return reply({ tools: [...tools, CONNECT_TOOL] });
+        return reply({ tools: [...(root && !fixed ? tools.map(withSessionId) : tools), CONNECT_TOOL] });
       }
       case 'tools/call': {
         const name = params?.name;
         if (name === CONNECT_TOOL.name) return reply(await callConnect(params?.arguments));
-        if (!credentials()) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
+        const raw = params?.arguments ?? {};
+        const plain = typeof raw === 'object' && raw !== null && !Array.isArray(raw);
+        const { session_id: given, ...rest } = plain ? raw : {};
+        const sessionId = root && !fixed && typeof given === 'string' && given.trim() ? given.trim() : null;
+        // Once a session was moved, a call that names none could belong to it: refused, never sent to the default.
+        if (root && !fixed && !sessionId && anySessionMoved(root)) {
+          return reply(text('Not delivered: a session on this machine was moved to another connection, so this call must say which session it is. Call it again with session_id set to this session\'s id (the SessionStart note gives it).', true));
+        }
+        if (!credentials(sessionId)) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
         // Every argument passes through redactValue before it leaves the machine; one the walker
         // cannot read is refused rather than forwarded.
         let args;
         try {
-          args = redactValue(params?.arguments ?? {}).value;
+          args = redactValue(plain ? rest : raw).value;
         } catch {
           return reply(text('Not delivered: the arguments could not be checked for secrets, so nothing was sent.', true));
         }
-        const out = await upstream('tools/call', { name, arguments: args });
+        const out = await upstream('tools/call', { name, arguments: args }, sessionId);
         if (!out.ok) {
           const why = out.kind === 'auth' ? 'the connection was refused (revoked or expired); call `connect` again' : `the AI colleague could not be reached (${out.kind}: ${out.message})`;
           return reply(text(`Not delivered: ${why}.`, true));
         }
         const questions = openQuestionsOf(out.result);
-        const cp = current();
+        const cp = current(sessionId);
         if (questions.length && cp) writeJsonPrivate(cp.openQuestions, { fetched_at: new Date(now()).toISOString(), open_questions: questions });
         seeImport(out.result);
         return reply(out.result);
