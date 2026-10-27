@@ -366,8 +366,9 @@ function runKeyed(text, tag, hit, ctx) {
     }
   }
   out += text.slice(last);
-  // The same in a sentence without a separator: "my password is Hunter2026!", "passordet er ...".
-  return replaceGroup(out, /(?<![\p{L}\p{N}_])(?<key>passwords?|passwd|pwd|passphrase|passord(?:et)?|token|secret|api[ _-]?key|hemmelighet(?:en)?)[ \t]+(?:is|was|er|var)[ \t]+(?<v>[^\s"'`<>()[\]{},;]*[^\s"'`<>()[\]{},;.:])/dgiu, 'v', (m) => passwordShaped(m.groups.v) && isSecretValue(m.groups.v, 'password', { key: m.groups.key }), tag, hit);
+  // The same in a sentence without a separator: "my password is Hunter2026!", "passordet er ...", and with
+  // up to three words between the key word and is/er: "passordet mitt er ...", "the password for the db is ...".
+  return replaceGroup(out, /(?<![\p{L}\p{N}_])(?<key>passwords?|passwd|pwd|passphrase|passord(?:et)?|token|secret|api[ _-]?key|hemmelighet(?:en)?)(?:[ \t]+[\p{L}\p{N}_-]+){0,3}?[ \t]+(?:is|was|er|var)[ \t]+(?<v>[^\s"'`<>()[\]{},;]*[^\s"'`<>()[\]{},;.:])/dgiu, 'v', (m) => passwordShaped(m.groups.v) && isSecretValue(m.groups.v, 'password', { key: m.groups.key }), tag, hit);
 }
 
 /** One token that reads like a password: letters and digits, 6+ characters, not a version number. */
