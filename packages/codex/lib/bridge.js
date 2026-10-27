@@ -245,6 +245,8 @@ function prune(st, now) {
  * Returns { ok, level, tasks } or { ok: false, kind }.
  */
 export async function pollOnce(p, sessionId, { runStatus = 'running', token = null, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
+  // Tasks to a session are part of the sessions:* grant, like the report: without it, no inbox call.
+  if (!hasSessionScope(credentialsOf(p))) return { ok: false, kind: 'skipped' };
   const f = sessionFiles(p, sessionId);
   const acks = readTasks(f).acks.slice(0, MAX_ACKS);
   const args = { session_id: sessionId, ...(acks.length ? { ack: acks } : {}) };

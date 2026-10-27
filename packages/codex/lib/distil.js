@@ -743,7 +743,7 @@ function decide(p, s, now, node, harness, home) {
   const backoff = Number.isFinite(ms(s.lastFailureAt)) && now - ms(s.lastFailureAt) < BACKOFF_MS;
   if (backoff) return null;
   // 128 random bits: the node keeps a key once per PERSON across all their assistants and machines
-  // (wybe-node#844), and every key derives from the run id, so two runs must never share one.
+  // (the node's idempotency store), and every key derives from the run id, so two runs must never share one.
   const runId = `${iso(now).replace(/[:.]/g, '-')}-${randomBytes(16).toString('hex')}`;
   // Claude Code's plans keep their earlier shape; a Codex plan says so.
   const of = harness === 'codex' ? { harness } : {};

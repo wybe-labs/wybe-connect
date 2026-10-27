@@ -46,7 +46,7 @@ function sandbox(n = 3) {
 
 /**
  * An MCP node over real HTTP. `answers[i]` is the reply to the i-th remember: 'ok', a status code
- * (NOT stored), 'toolError' (refused, NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is wybe-node#844:
+ * (NOT stored), 'toolError' (refused, NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is the node's idempotency store:
  * a repeat of an idempotency_key on the connection stores nothing and replays the WHOLE first
  * answer (import_done included). `sends` lists every remember it saw.
  */
@@ -269,12 +269,12 @@ test('an answer lost past the timeout is re-sent with the same idempotency key, 
   node.close();
   assert.equal(r2.outcome.ok, true);
   assert.equal(node.sends.length, 2);
-  assert.match(node.sends[0].idempotency_key, /^wc1-[0-9a-f]{64}$/, 'within wybe-node#844\'s 1-200 characters');
+  assert.match(node.sends[0].idempotency_key, /^wc1-[0-9a-f]{64}$/, 'within the node\'s 1-200 characters');
   assert.equal(node.sends[0].idempotency_key, node.sends[1].idempotency_key);
   assert.deepEqual(node.stored, ['Fact 1 of 1.']);
 });
 
-test('wybe-node#844: an import whose answer was lost is confirmed by the replayed first answer, stored once', async () => {
+test('the node\'s idempotency store: an import whose answer was lost is confirmed by the replayed first answer, stored once', async () => {
   const { p, files } = sandbox();
   const node = await httpNode({ answers: [{ delayMs: 1500 }], dedupe: true });
   saveCredentials(creds(node.url), p);

@@ -29,6 +29,23 @@ function setup(node, over = {}) {
 
 const task = (over = {}) => ({ id: randomUUID(), text: 'Oppsummer endringene i PR-en og foreslå en tittel', mode: 'run', session_id: SID, ...over });
 
+test('a grant without a sessions:* scope never polls the inbox, so no task reaches the session', async () => {
+  const node = await startFakeNode();
+  try {
+    const { p } = setup(node, { scopes: ['remember'] });
+    node.tasks.push(task());
+    const out = await pollOnce(p, SID);
+    assert.equal(out.ok, false);
+    assert.equal(out.kind, 'skipped');
+    assert.equal(node.tool('inbox').length, 0);
+    // Control: the same task reaches a grant with sessions:light.
+    const { p: q } = setup(node);
+    assert.equal((await pollOnce(q, SID)).tasks.length, 1);
+  } finally {
+    await node.close();
+  }
+});
+
 test('run mode: the notice carries the task text; the task is acked as accepted on the next inbox call, and never delivered twice', async () => {
   const node = await startFakeNode();
   try {
