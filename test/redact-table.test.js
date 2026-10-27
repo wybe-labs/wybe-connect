@@ -286,6 +286,13 @@ const TABLE = [
   ['prose: password is <password-shaped>', j('my pass', 'word is ', 'Hunter2026!'), j('my pass', 'word is ', '[REDACTED:keyed-secret]')],
   ['prose: Norwegian passordet er <password-shaped>', j('Det nye pass', 'ordet er ', 'Sommer2026!', ' fra i dag'), j('Det nye pass', 'ordet er ', '[REDACTED:keyed-secret]', ' fra i dag')],
   ['ordinary: password is required', j('pass', 'word is required'), SAME],
+  // A few words may stand between the key word and «er/is» (QA round 1 on the one-sign-in PR).
+  ['prose: Norwegian passordet mitt er <password-shaped>', j('pass', 'ordet mitt er ', 'Sommer2024!'), j('pass', 'ordet mitt er ', '[REDACTED:keyed-secret]')],
+  ['prose: Norwegian Passordet til databasen er <password-shaped>', j('Pass', 'ordet til databasen er ', 'Sommer2024!'), j('Pass', 'ordet til databasen er ', '[REDACTED:keyed-secret]')],
+  ['prose: Norwegian mitt passord er <password-shaped>', j('mitt pass', 'ord er ', 'Sommer2024!'), j('mitt pass', 'ord er ', '[REDACTED:keyed-secret]')],
+  ['prose: the password for the db is <password-shaped>', j('the pass', 'word for the db is ', 'Sommer2024!'), j('the pass', 'word for the db is ', '[REDACTED:keyed-secret]')],
+  ['ordinary: Norwegian, passordet til kontoen er endret', j('Pass', 'ordet til kontoen er endret i dag'), SAME],
+  ['ordinary: the password for the db is stored in the vault', j('the pass', 'word for the db is stored in the vault'), SAME],
   ['ordinary: the token is valid for 1 hour', 'the token is valid for 1 hour', SAME],
   ['ordinary: the api key is rotated monthly', 'the api key is rotated monthly', SAME],
   ['ordinary: the secret is v1.2.3 of the chart', 'the secret is v1.2.3 of the chart', SAME],
