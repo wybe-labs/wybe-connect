@@ -127,6 +127,24 @@ test('no elicitation: the text comes back to be shown verbatim with a wait-for-y
   }
 });
 
+test('no elicitation: accepted: true before the text was shown runs nothing; it shows the text and asks again', async () => {
+  const node = await startFakeNode();
+  try {
+    const { p, t } = await withOffered(node);
+    const proxy = createProxy({ paths: p, request: async () => { throw new Error('must not ask a client without elicitation'); } });
+    await initialized(proxy, false);
+    const early = await proxy.handle(req(2, 'tools/call', { name: 'take_task', arguments: { task_id: t.id, accepted: true } }));
+    assert.equal(findTask(p, t.id).task.status, 'offered', 'a yes to a text the person never saw runs nothing');
+    assert.ok(textOf(early).includes(t.text));
+    assert.match(textOf(early), /explicit yes/);
+    // Control: once the text has been returned, the same call runs it.
+    await proxy.handle(req(3, 'tools/call', { name: 'take_task', arguments: { task_id: t.id, accepted: true } }));
+    assert.equal(findTask(p, t.id).task.status, 'running');
+  } finally {
+    await node.close();
+  }
+});
+
 test('take_task: an unknown id, a settled task, or no connection is an error', async () => {
   const node = await startFakeNode();
   try {
