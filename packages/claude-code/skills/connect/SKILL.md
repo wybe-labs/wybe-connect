@@ -1,6 +1,6 @@
 ---
 name: connect
-description: Connect this Claude Code to the person's Wybe colleague (their Wybe node) so that hooks feed it redacted session summaries and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me", "Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me", "Koble til Wybe", "Connect me to my Wybe colleague at https://<slug>.wybe.me", "connect to Wybe", "wybe connect", or any request to pair, link or hook up Claude Code with a Wybe node URL.
+description: Connect this Claude Code to the person's Wybe colleague (their Wybe node) so that a background distil feeds it the redacted essence of their work and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me", "Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me", "Koble til Wybe", "Connect me to my Wybe colleague at https://<slug>.wybe.me", "connect to Wybe", "wybe connect", or any request to pair, link or hook up Claude Code with a Wybe node URL.
 ---
 
 # Connect to Wybe
@@ -11,7 +11,9 @@ The person pasted (or said) one of these, with their own node URL:
 
 > Connect me to my Wybe AI colleague at https://dittfirma.wybe.me
 
-Your job: pair this machine with that node once, then run the first sync. Everything the
+Your job: pair this machine with that node once. The first sync is not yours to run: the node
+asks for it by itself when the connection is made (an import), and the plugin runs it in the
+background. Everything the
 plugin sends afterwards is **write-only** (the node never reads this machine, Claude Code never
 reads the node) and is **redacted on this machine first**. Say that in one sentence before you
 start; the person is granting access to their work context and should hear what it means.
@@ -21,48 +23,28 @@ start; the person is granting access to their work context and should hear what 
 1. **Take the node URL from the sentence.** It must be `https://<something>.wybe.me`. If there
    is no URL, ask for it: "Hvilken adresse har KI-kollegaen din i Wybe? (https://dittfirma.wybe.me)".
 
-2. **Make sure the plugin is installed.** If `${CLAUDE_PLUGIN_ROOT}` is set, it already is (you
-   are running from it). Otherwise tell the person to run, in Claude Code:
+2. **Make sure the plugin is installed.** Its `wybe` MCP server offers a `connect` tool. If you
+   do not have it, tell the person to run, in a terminal:
    ```
-   /plugin marketplace add wybe-labs/wybe-connect
-   /plugin install wybe-connect@wybe-connect
+   claude plugin install wybe-connect --marketplace wybe-labs/wybe-connect
    ```
-   and to paste the sentence again once the plugin is active.
+   and to start Claude Code again and paste the sentence once more.
 
-3. **Run the OAuth flow** (this stores the credential the hooks use, in
-   `~/.wybe-connect/credentials.json`, owner-only):
-   ```
-   node "${CLAUDE_PLUGIN_ROOT}/bin/connect.js" https://<slug>.wybe.me
-   ```
-   A browser window opens on `auth.wybe.me`; the person logs in with their passkey and ticks
-   the scopes they want to share (`remember`, `conversations`, `sessions:light`,
-   `sessions:full`). Wait for the command to print `Connected to ...`. If it prints an URL
-   instead of opening a browser, show that URL to the person.
-   Never paste, read or echo the contents of `credentials.json`.
+3. **Sign in once:** call the `wybe` server's `connect` tool with `node_url`. A browser opens on
+   `auth.wybe.me`; the person signs in with their passkey and ticks the scopes they want to share
+   (`remember`, `conversations`, `sessions:light`, `sessions:full`). If the answer carries a link
+   because no browser appeared, show the link. When the person says they are done, call
+   `connect` again: it answers `Connected to ...` with the granted scopes. That one sign-in
+   serves the hooks and the tools; there is nothing else to add or copy.
+   Never paste, read or echo `~/.wybe-connect/credentials.json`.
 
-4. **Add the MCP server for the interactive tools** (`remember`, `import_conversation`,
-   `pending_questions`), which use Claude Code's own OAuth session:
-   ```
-   claude mcp add --transport http wybe https://<slug>.wybe.me/mcp
-   ```
-   Claude Code will drive its own consent the first time a tool is used.
-
-5. **First sync: the opening kit.** Ask the person, in their language, for the short version
-   of these six things **about their work only**, then call the `wybe` server's `remember` tool
-   with one item per fact:
-   - projects they are working on right now
-   - how they like to work (arbeidsmåte)
-   - the tools they use
-   - ideas they are carrying around
-   - research they are doing or following
-   - recurring tasks
-   If the answer to `remember` carries `open_questions`, ask the first one right away and pass
-   the answer back with `answers: [<id>]`.
-
-6. **Confirm** in one paragraph: connected to which node, which scopes, that the hooks now
-   flush redacted session deltas at every stop/compaction/end, and that pairing can be revoked
-   under "Mine koblinger" on the node (revoking stops the flow; erasing what was learned is a
-   separate action there).
+4. **Confirm** in one paragraph: connected to which node, and which scopes. Say that the first
+   sync now runs by itself in the background: the node asked for an import, and the plugin
+   distils this machine's recent Claude Code sessions and memory into short work facts. There is
+   no step for the person. From then on, the same distil runs at most every 6 hours. Pairing
+   can be revoked under "Mine koblinger" on the node (revoking stops the flow; erasing what was
+   learned is a separate action there). Do not interview the person or send facts yourself now:
+   the import already covers it, and a second first sync would store everything twice.
 
 ## Never
 

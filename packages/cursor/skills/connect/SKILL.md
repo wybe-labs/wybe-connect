@@ -11,7 +11,9 @@ The person pasted (or said) one of these, with their own address:
 
 > Connect me to my Wybe AI colleague at https://dittfirma.wybe.me
 
-Your job: pair this machine with that address once, then run the first sync. Everything the
+Your job: pair this machine with that address once. The first sync is not a step here: the
+colleague asks for it by itself when the connection is made (an import request in its tool
+answers), and its own instructions say how to answer it. Everything the
 plugin sends afterwards is **write-only** (nothing is ever read back into Cursor) and is
 **redacted on this machine first**. Say that in one sentence before you start.
 
@@ -37,13 +39,8 @@ The plugin root is the directory two levels above this `SKILL.md` (it holds `bin
    `mcpServers` in `~/.cursor/mcp.json` (merge; never overwrite other servers). Cursor runs its
    own sign-in the first time a tool is used.
 
-4. **First sync: the opening kit.** Ask, in the person's language, for the short version of
-   these six things **about their work only**, then call the `wybe` server's `remember` tool with
-   one item per fact: current projects, how they like to work, tools, ideas, research, recurring
-   tasks. If the answer carries `open_questions`, ask the first one and pass the answer back with
-   `answers: [<id>]`.
-
-5. **Confirm** in one paragraph: connected to which address, which scopes, that the hooks send
+4. **Confirm** in one paragraph: connected to which address, which scopes, that the first sync
+   is the colleague's import and starts by itself (no step for the person), that the hooks send
    redacted session summaries at every stop, and that the pairing can be revoked under "Mine
    koblinger" (revoking stops the flow; erasing what was learned is a separate action).
 

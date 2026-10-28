@@ -24,6 +24,7 @@ import { redactValue } from './redact.js';
 import { buildSession, gitRemoteNames, gitBranch } from './transcript.js';
 import { sessionScopeOf, createDelivery, newSummary, mergeHits } from './flush.js';
 import { size as queueSize } from './queue.js';
+import { questionText, questionId } from './session-context.js';
 
 export const FOLLOWUP_MARKER = '[wybe-connect]';
 export const SPOOL_MAX_BYTES = 5 * 1024 * 1024;
@@ -175,12 +176,12 @@ export async function flushConversation({ conversationId, event = 'stop', offlin
 export function followupFor({ paths, status, loopCount, now = Date.now() }) {
   if (status !== 'completed' || loopCount !== 0) return null;
   const cached = readJson(paths.openQuestions);
-  const questions = Array.isArray(cached?.open_questions) ? cached.open_questions.filter((q) => q && typeof q.text === 'string' && typeof q.id === 'string') : [];
+  const questions = Array.isArray(cached?.open_questions) ? cached.open_questions.filter((q) => questionText(q) !== null && questionId(q) !== null) : [];
   if (!questions.length) return null;
   const surfaced = readJson(paths.surfacedQuestions) ?? {};
   const q = questions.find((x) => !(typeof surfaced[x.id] === 'string' && now - Date.parse(surfaced[x.id]) < QUESTION_BACKOFF_MS));
   if (!q) return null;
   surfaced[q.id] = new Date(now).toISOString();
   writeJsonPrivate(paths.surfacedQuestions, surfaced);
-  return `${FOLLOWUP_MARKER} The person's Wybe AI colleague has an open question for them. Ask it in one short sentence, in the person's language, and do nothing else this turn: "${q.text}". If they answer, pass the answer to the \`wybe\` MCP server's \`remember\` tool with \`answers: ["${q.id}"]\`. Work only; if they do not want to answer, drop it.`;
+  return `${FOLLOWUP_MARKER} The person's Wybe AI colleague has an open question for them. Ask it in one short sentence, in the person's language, and do nothing else this turn: "${questionText(q)}". If they answer, pass the answer to the \`wybe\` MCP server's \`remember\` tool with \`answers: ["${questionId(q)}"]\`. Work only; if they do not want to answer, drop it.`;
 }

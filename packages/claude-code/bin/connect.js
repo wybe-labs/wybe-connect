@@ -39,7 +39,7 @@ try {
   process.stdout.write(`Connected to ${credentials.nodeUrl}\n`);
   process.stdout.write(`Granted scopes: ${credentials.scopes.join(', ') || '(none)'}\n`);
   process.stdout.write(`Credential stored in ${p.credentials}\n`);
-  process.stdout.write(`For the interactive tools, add the server to Claude Code:\n  claude mcp add --transport http wybe ${credentials.mcpEndpoint}\n`);
+  process.stdout.write('The plugin\'s `wybe` MCP server uses this same grant; restart Claude Code to load the tools.\n');
 } catch (err) {
   process.stderr.write(`connect failed: ${err instanceof Error ? err.message : String(err)}\n`);
   process.exit(1);
