@@ -8,7 +8,7 @@ import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createProxy } from '../lib/mcp-proxy.js';
-import { saveConnection, useConnection } from '../lib/connections.js';
+import { removeConnection, saveConnection, sessionPaths, useConnection } from '../lib/connections.js';
 
 const A = 'https://node-a.example.invalid';
 const B = 'https://node-b.example.invalid';
@@ -71,6 +71,40 @@ test('once a session has been moved, a call without session_id is refused and re
   const node = recordingNode();
   const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
   const r = await proxy.handle(remember(1, null));
+  assert.equal(r.result.isError, true);
+  assert.match(r.result.content[0].text, /session_id/);
+  assert.deepEqual(sentTo(node), []);
+});
+
+// QA round 2 on #6: a move to a connection that was later removed left every new session refused for good, and
+// a one-connection session is never told its id. Only a moved session that could be sent elsewhere refuses.
+test('a session moved to a connection that was then removed: a new session without session_id goes to the default', async () => {
+  const root = twoConnections();
+  useConnection(root, 'node-b.example.invalid', { sessionId: 'sess-old' });
+  removeConnection(root, 'node-b.example.invalid');
+  sessionPaths(root, { sessionId: 'sess-new', env: {} });
+  const node = recordingNode();
+  const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+  const r = await proxy.handle(remember(1, null));
+  assert.notEqual(r.result.isError, true, r.result.content?.[0]?.text);
+  assert.deepEqual(sentTo(node), [`${A}/mcp`]);
+});
+
+test('a session moved to the default connection: a call without session_id goes there, nothing to tell apart', async () => {
+  const root = twoConnections();
+  useConnection(root, 'node-a.example.invalid', { sessionId: 'sess-one' });
+  const node = recordingNode();
+  const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+  await proxy.handle(remember(1, null));
+  assert.deepEqual(sentTo(node), [`${A}/mcp`]);
+});
+
+test('after a move elsewhere, a session_id no session on this machine has is refused and reaches no node', async () => {
+  const root = twoConnections();
+  useConnection(root, 'node-b.example.invalid', { sessionId: 'sess-two' });
+  const node = recordingNode();
+  const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+  const r = await proxy.handle(remember(1, 'sess-two-typo'));
   assert.equal(r.result.isError, true);
   assert.match(r.result.content[0].text, /session_id/);
   assert.deepEqual(sentTo(node), []);
