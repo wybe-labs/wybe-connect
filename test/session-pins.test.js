@@ -92,7 +92,8 @@ function distilOfS(then) {
 
 const rows = {
   R3: async () => {
-    // A move to a removed connection does not lock out a session opened meanwhile, with or without its id.
+    // A move to a removed connection does not lock out a session opened meanwhile: it delivers by its id. Without
+    // one the call is refused, with one connection left too, since it could be the session pinned to none.
     const root = home();
     saveConnection(root, grant('a'));
     saveConnection(root, grant('b'));
@@ -104,10 +105,11 @@ const rows = {
     const node = recordingNode();
     const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
     await proxy.handle(req(0, 'tools/list'));
-    await proxy.handle(remember(1, null)); // one connection: the id is optional
+    assert.equal((await proxy.handle(remember(1, null))).result.content[0].text, NO_SESSION, 'one connection, sess-old pinned to none');
+    await proxy.handle(remember(2, 'sess-T'));
     saveConnection(root, grant('b'));
-    assert.equal((await proxy.handle(remember(2, null))).result.content[0].text, NO_SESSION, 'two connections: the id is required');
-    await proxy.handle(remember(3, 'sess-T'));
+    assert.equal((await proxy.handle(remember(3, null))).result.content[0].text, NO_SESSION, 'two connections');
+    await proxy.handle(remember(4, 'sess-T'));
     assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
   },
   R3b: async () => {
@@ -197,16 +199,32 @@ const rows = {
     assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
   },
   pinnedToNone: async () => {
-    // S pinned to none: refused with its id. With one connection left, a call without an id goes there (S2).
+    // R4a through the server: S pinned to B, B removed, A alone. S is refused with its id, and a call without one
+    // is refused too (it could be S's), never sent to A. Once S chooses A, every pin is on A and the id is optional.
     const { root } = nullPinned();
     assert.equal(pinnedConnection(root, 'S'), null);
     const node = recordingNode();
     const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
-    await proxy.handle(req(0, 'tools/list'));
+    const listed = (await proxy.handle(req(0, 'tools/list'))).result.tools.find((t) => t.name === 'remember');
+    assert.deepEqual(listed.inputSchema.required, ['session_id']);
     assert.match((await proxy.handle(remember(1, 'S'))).result.content[0].text, /connect use <name> --session S/);
+    assert.equal((await proxy.handle(remember(2, null))).result.content[0].text, NO_SESSION);
     assert.deepEqual(sent(node), []);
-    await proxy.handle(remember(2, null));
+    useConnection(root, H('a'), { sessionId: 'S' });
+    await proxy.handle(remember(3, null));
     assert.deepEqual(sent(node), [`${N('a')}/mcp`]);
+  },
+  pinnedToAnotherName: async () => {
+    // One connection, and a session fixed to a name that now holds another node: a call without an id is refused.
+    const root = home();
+    saveConnection(root, grant('x'), { name: 'work' });
+    useConnection(root, 'work', { sessionId: 'S' });
+    removeConnection(root, 'work');
+    saveConnection(root, grant('y'), { name: 'work' });
+    const node = recordingNode();
+    const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+    assert.equal((await proxy.handle(remember(1, null))).result.content[0].text, NO_SESSION);
+    assert.deepEqual(sent(node), []);
   },
   clearAfterMove: () => {
     // /clear gives a new session_id: a new session, where any new one goes; it never inherits the old one's move.
@@ -398,10 +416,15 @@ const rows = {
           const got = sent(t.node).slice(before);
           for (const g of got) if (g !== `https://${k}/mcp`) crossed.push(`seed ${seed} ${t.sid} named -> ${g} (hook ${k}): ${log.join('; ')}`);
           if (k && !got.length) locked.push(`seed ${seed} ${t.sid}: ${log.join('; ')}`);
-          if (connectionNames(root).length >= 2) {
+          // A call without an id may go only where it cannot be another session's: one connection, every session on it.
+          const now = connectionNames(root);
+          if (now.length) {
+            const required = now.length > 1 || open.some((o) => pinnedConnection(root, o.sid) === null);
             const b2 = sent(t.node).length;
             const idless = await t.proxy.handle(remember(3, null));
-            if (sent(t.node).length > b2 || idless.result.content[0].text !== NO_SESSION) crossed.push(`seed ${seed} ${t.sid} id-less delivered: ${log.join('; ')}`);
+            const went = sent(t.node).slice(b2);
+            if (required && (went.length || idless.result.content[0].text !== NO_SESSION)) crossed.push(`seed ${seed} ${t.sid} id-less delivered: ${log.join('; ')}`);
+            if (!required && went.join() !== `https://${now[0]}/mcp`) crossed.push(`seed ${seed} ${t.sid} id-less with one connection -> ${went}: ${log.join('; ')}`);
           }
         }
         clock += 7 * 3600e3;

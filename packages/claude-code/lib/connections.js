@@ -334,6 +334,23 @@ export function sessionTranscript(root, sessionId) {
   };
 }
 
+/**
+ * Whether a call must say which session it is: always with two or more connections, and with one while any
+ * session's pin sends elsewhere (to none, or to a name no longer here). A call that named no session could then be
+ * that session's, and it must never reach the one connection left. With one connection and every pin on it, no.
+ */
+export function sessionIdRequired(root) {
+  const names = knownKeys(root);
+  if (names.length !== 1) return names.length > 1;
+  const dir = join(root, 'state', 'sessions');
+  if (!existsSync(dir)) return false;
+  return readdirSync(dir).some((f) => {
+    if (!f.endsWith('.json')) return false;
+    const p = readJson(join(dir, f));
+    return !!p && 'connection' in p && livePin(root, p) !== names[0];
+  });
+}
+
 /** Deletes the pins whose transcript is gone: a pin lives as long as its transcript. One with no known transcript stays. */
 export function prunePins(root) {
   const dir = join(root, 'state', 'sessions');

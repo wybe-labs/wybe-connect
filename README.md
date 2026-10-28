@@ -130,9 +130,10 @@ A session is the harness's `session_id`: `/clear` starts a new one (where any ne
 `/resume` keeps it. A move sends the session's later transcript lines to the new connection; the
 lines written before it stay with the one it left, and a removed connection's lines go nowhere.
 In Claude Code the background distil is kept per connection too. The plugin's `wybe` MCP server
-remembers no session: with one connection its tools go there, with two or more every call passes
-the `session_id` the SessionStart note gives, and a call without it is refused. Its `connect`
-tool stores a new connection and makes it the default.
+remembers no session: with one connection, and every session on it, its tools go there. With two
+or more, or a session sent elsewhere (a removed connection pins its sessions to none until
+`connect.js use`), every call passes the `session_id` the SessionStart note gives, and a call
+without it is refused. Its `connect` tool stores a new connection and makes it the default.
 
 ## Claude Desktop, claude.ai and ChatGPT (no hooks)
 
