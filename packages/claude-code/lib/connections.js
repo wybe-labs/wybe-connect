@@ -5,12 +5,13 @@
 //   connections/<name>/credentials.json the grant (same shape as the old single credentials.json)
 //   connections/<name>/queue/           payloads this node has not taken yet
 //   connections/<name>/open-questions.json, surfaced-questions.json
+//   connections/<name>/spool/           Cursor records written while a conversation used this connection
 //   state/sessions/<session>.json       { connection, nodeUrl, moved?, transcriptPath?, segments } the connection a
 //                                       session uses, fixed at its first hook; segments [{ connection, nodeUrl,
 //                                       fromLine }] say which node each of its transcript's lines belongs to
 // A session is the harness's session_id as the hook receives it: /clear gives a new one (a new session), /resume
 // keeps it (test/fixtures/claude-code-session-start.jsonl, a real SessionStart input with source "resume").
-//   state/<transcript-id>.json, spool/  shared: a transcript belongs to one session
+//   state/<transcript-id>.json          shared: a transcript belongs to one session
 // <name> is the node's host (dittfirma.wybe.me; a port becomes _8443) unless connect was given --name.
 //
 // Which connection a session uses, first match wins:
@@ -29,7 +30,7 @@
 
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, utimesSync } from 'node:fs';
 import { paths as legacyPaths, readJson, writeJsonPrivate, loadCredentials, saveCredentials } from './home.js';
 
 export const NODE_ENV = 'WYBE_CONNECT_NODE';
@@ -66,6 +67,7 @@ export function connectionPaths(root, key) {
     queue: join(dir, 'queue'),
     openQuestions: join(dir, 'open-questions.json'),
     surfacedQuestions: join(dir, 'surfaced-questions.json'),
+    spool: join(dir, 'spool'),
   };
 }
 
@@ -251,6 +253,8 @@ function pin(root, sessionId, key, { moved = false, transcriptPath = null } = {}
   let segments = segmentsOf(was);
   const last = segments[segments.length - 1];
   if (!last || last.connection !== key || last.nodeUrl !== nodeUrl) {
+    // A first stay starts at line 0, so lines written before any connection existed go to the first one: the one
+    // exception to "each line goes to the node it was written on", since no node had them (the first-run import).
     const fromLine = last && path ? linesIn(path) ?? last.fromLine : 0;
     if (last && last.fromLine >= fromLine) segments = segments.filter((s) => s.fromLine < fromLine);
     segments = [...segments, { connection: key, nodeUrl, fromLine }];
@@ -331,14 +335,22 @@ export function sessionIdRequired(root) {
   });
 }
 
-/** Deletes the pins whose transcript is gone: a pin lives as long as its transcript. One with no known transcript stays. */
-export function prunePins(root) {
+/** How long a pin with no known transcript outlives the last hook that resolved it: the grace for a session that has not written a line yet. */
+export const PIN_GRACE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Deletes the pins whose transcript is gone (a pin lives as long as its transcript), and those with no known transcript
+ * that no hook has resolved for PIN_GRACE_MS (the file's time is that hook's).
+ */
+export function prunePins(root, now = Date.now()) {
   const dir = join(root, 'state', 'sessions');
   if (!existsSync(dir)) return;
   for (const f of readdirSync(dir)) {
     if (!f.endsWith('.json')) continue;
-    const p = readJson(join(dir, f));
-    if (typeof p?.transcriptPath === 'string' && !existsSync(p.transcriptPath)) rmSync(join(dir, f), { force: true });
+    const file = join(dir, f);
+    const p = readJson(file);
+    const gone = typeof p?.transcriptPath === 'string' ? !existsSync(p.transcriptPath) : now - statSync(file).mtimeMs > PIN_GRACE_MS;
+    if (gone) rmSync(file, { force: true });
   }
 }
 
@@ -398,21 +410,36 @@ export function connectionNames(root) {
 }
 
 /**
- * The connection this session uses (see the order at the top), fixed for the session on first call. A hook passes
- * the session's transcript, which the pin keeps: a move counts its lines, and the pin lives as long as it does.
+ * The connection a session uses (see the order at the top), without fixing it: its pin, else where a new session
+ * goes. The MCP server reads this; it never writes a pin, since it knows no transcript.
+ */
+export function sessionConnection(root, { sessionId = null, env = process.env } = {}) {
+  migrateLegacy(root);
+  const pinned = pinnedConnection(root, sessionId);
+  if (pinned !== undefined) return pinned;
+  const wanted = env[NODE_ENV];
+  return wanted ? findConnection(root, wanted) : defaultConnection(root);
+}
+
+/**
+ * The connection this session uses, fixed for the session on a hook's first call. A hook passes the session's
+ * transcript, which the pin keeps: a move counts its lines, and the pin lives as long as it does. A pin with no
+ * transcript yet has its time renewed, so prunePins keeps it while hooks still resolve it.
  */
 export function resolveSession(root, { sessionId = null, env = process.env, transcriptPath = null } = {}) {
-  migrateLegacy(root);
   const transcript = existingTranscript(transcriptPath);
-  const pinned = pinnedConnection(root, sessionId);
-  if (pinned !== undefined) {
+  const key = sessionConnection(root, { sessionId, env });
+  const was = sessionId ? readJson(pinPath(root, sessionId)) : null;
+  if (was && 'connection' in was) {
     recordTranscript(root, sessionId, transcript);
-    return pinned;
+    if (!transcript && typeof was.transcriptPath !== 'string') {
+      const t = new Date();
+      utimesSync(pinPath(root, sessionId), t, t);
+    }
+    return key;
   }
-  const wanted = env[NODE_ENV];
-  const key = wanted ? findConnection(root, wanted) : defaultConnection(root);
   // an unknown WYBE_CONNECT_NODE is pinned too: that session stays unconnected, never on another node
-  if (sessionId && (key || wanted)) pin(root, sessionId, key, { transcriptPath: transcript });
+  if (sessionId && (key || env[NODE_ENV])) pin(root, sessionId, key, { transcriptPath: transcript });
   return key;
 }
 

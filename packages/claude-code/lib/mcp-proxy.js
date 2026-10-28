@@ -22,7 +22,7 @@ import { createInterface } from 'node:readline';
 import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
-import { NODE_ENV, connectionPaths, defaultConnection, findConnection, checkSave, saveConnection, resolveSession, pinnedConnection, sessionIdRequired } from './connections.js';
+import { NODE_ENV, connectionPaths, defaultConnection, findConnection, checkSave, saveConnection, sessionConnection, pinnedConnection, sessionIdRequired } from './connections.js';
 import { spoolRemember, spoolDone } from './distil.js';
 import { redactValue } from './redact.js';
 
@@ -126,6 +126,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
   // so `connect use <name> --session <id>` moves this server's calls along with the hooks.
   // The server remembers no session: its process outlives /clear, so it never stands for one. With
   // two or more connections, or a session pinned elsewhere, every call names its session; one that does not is refused.
+  // It never writes a pin either (it knows no transcript): an id no hook has fixed goes where a new session goes.
   // With `paths`, it uses those as they are (a distil run's own connection, or the single layout).
   let key = null;
   const idRequired = () => !!root && !fixed && sessionIdRequired(root);
@@ -133,7 +134,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     if (fixed) return fixed;
     if (!root) return null;
     if (sessionId) {
-      const k = resolveSession(root, { sessionId, env });
+      const k = sessionConnection(root, { sessionId, env });
       return k ? connectionPaths(root, k) : null;
     }
     if (!key) {
@@ -244,11 +245,12 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     return text(`A browser window is opening on the Wybe sign-in page. Ask the person to sign in with their passkey and tick what they want to share, then call connect again to confirm. If no browser opened, they can open this link: ${state.url}`);
   }
 
-  const seeImport = (result) => {
+  // An import request goes to the connection that answered: the call's own, never this server's default.
+  const seeImport = (result, answered) => {
     const at = onImportRequest ? importRequestOf(result) : null;
-    if (at) {
+    if (at && answered) {
       try {
-        onImportRequest(at, current());
+        onImportRequest(at, answered);
       } catch {
         // the scheduler is best effort here; the next answer carries the request again
       }
@@ -261,7 +263,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     if (!onImportRequest || !c || !c.scopes.includes('remember')) return null;
     const out = await upstream('tools/call', { name: 'pending_questions', arguments: {} });
     if (!out.ok) return null;
-    seeImport(out.result);
+    seeImport(out.result, current());
     return importRequestOf(out.result);
   }
 
@@ -350,7 +352,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         const questions = openQuestionsOf(out.result);
         const cp = current(sessionId);
         if (questions.length && cp) writeJsonPrivate(cp.openQuestions, { fetched_at: new Date(now()).toISOString(), open_questions: questions });
-        seeImport(out.result);
+        seeImport(out.result, cp);
         return reply(out.result);
       }
       default:

@@ -11,10 +11,22 @@
 
 import { readHookInput, failOpen, queueNotice } from '../lib/hook-io.js';
 import { fileURLToPath } from 'node:url';
+import { existsSync } from 'node:fs';
 import { harnessHome, loadCredentials, readJson } from '../lib/home.js';
-import { sessionPaths, sessionNote } from '../lib/connections.js';
+import { connectionNames, connectionPaths, sessionPaths, sessionNote } from '../lib/connections.js';
 import { buildContext } from '../lib/session-context.js';
-import { record, flushConversation, followupFor, conversationIdOf } from '../lib/cursor-spool.js';
+import { record, flushConversation, followupFor, conversationIdOf, spoolFile } from '../lib/cursor-spool.js';
+
+// Each record is spooled under the connection in use when it was written. A conversation moved since (or a default
+// changed) leaves records under another connection: they go to that connection's node, never to this one's.
+async function flushElsewhere(root, here, conversationId, event, offline) {
+  if (!conversationId) return;
+  for (const k of connectionNames(root)) {
+    if (k === here) continue;
+    const p = connectionPaths(root, k);
+    if (existsSync(spoolFile(p, conversationId))) await flushConversation({ conversationId, event, offline, paths: p });
+  }
+}
 
 let out = {};
 let event = null;
@@ -40,6 +52,7 @@ try {
       record(input, { paths });
       break;
     case 'stop': {
+      await flushElsewhere(root, paths.connection, sessionId, event, false);
       const summary = await flushConversation({ conversationId: conversationIdOf(input), event, paths });
       process.stderr.write(queueNotice(summary));
       const followup = followupFor({ paths, status: input.status, loopCount: input.loop_count });
@@ -47,6 +60,7 @@ try {
       break;
     }
     case 'sessionEnd':
+      await flushElsewhere(root, paths.connection, sessionId, event, true);
       await flushConversation({ conversationId: conversationIdOf(input), event, offline: true, paths });
       break;
     default:

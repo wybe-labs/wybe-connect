@@ -91,7 +91,7 @@ test('cursor LIGHT: every hook answers in its documented shape; the spool on dis
   for (const [name, out] of outputs.slice(1)) {
     assert.deepEqual(out, name === 'beforeSubmitPrompt' ? { continue: true } : {}, name);
   }
-  const spoolText = readFileSync(join(cursorHome, 'spool', `${CONV}.jsonl`), 'utf8');
+  const spoolText = readFileSync(join(conn(cursorHome), 'spool', `${CONV}.jsonl`), 'utf8');
   for (const needle of [...NEVER, ...FULL_ONLY]) assert.ok(!spoolText.includes(needle), `${needle} was written to the light spool`);
   assert.ok(spoolText.includes('[REDACTED:url-userinfo]'), 'the spool is redacted before it is written');
 
@@ -100,7 +100,7 @@ test('cursor LIGHT: every hook answers in its documented shape; the spool on dis
   assert.deepEqual(JSON.parse(stop.stdout), {}, 'no questions cached, so no followup');
   assert.match(stop.stderr, /node not reachable \(network\); 1 delta\(s\) queued locally/);
   assert.ok(!stop.stderr.includes(TOKEN));
-  assert.equal(existsSync(join(cursorHome, 'spool', `${CONV}.jsonl`)), false, 'the spool was consumed');
+  assert.equal(existsSync(join(conn(cursorHome), 'spool', `${CONV}.jsonl`)), false, 'the spool was consumed');
   assert.equal(existsSync(join(conn(home), 'queue')), false, 'Claude Code\'s queue is not touched');
 
   const queued = readdirSync(join(conn(cursorHome), 'queue'));
@@ -180,7 +180,7 @@ test('cursor without a credential or a sessions scope: prompts are never blocked
   assert.deepEqual(await run(events[0], home), { code: 0, stdout: `${JSON.stringify({ additional_context: `This session is not connected yet; its session_id is ${CONV}.` })}\n`, stderr: '' });
   writeCredentials(cursorHome, REFUSED, ['remember', 'conversations']);
   assert.deepEqual(await run(events[1], home), { code: 0, stdout: '{"continue":true}\n', stderr: '' });
-  assert.equal(existsSync(join(cursorHome, 'spool')), false);
+  assert.equal(existsSync(join(conn(cursorHome), 'spool')), false);
   const stop = await run(events.at(-1), home);
   assert.deepEqual(stop, { code: 0, stdout: '{}\n', stderr: '' });
   const bad = await run('{not json', home);
