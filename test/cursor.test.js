@@ -176,7 +176,8 @@ test('cursor without a credential or a sessions scope: prompts are never blocked
   const r = await run(events[1], home);
   assert.deepEqual(r, { code: 0, stdout: '{"continue":true}\n', stderr: '' });
   assert.equal(existsSync(join(cursorHome, 'spool')), false);
-  assert.deepEqual(await run(events[0], home), { code: 0, stdout: '{}\n', stderr: '' });
+  // Not connected yet, the session is still told its id (a connection made from inside it needs it later).
+  assert.deepEqual(await run(events[0], home), { code: 0, stdout: `${JSON.stringify({ additional_context: `This session is not connected yet; its session_id is ${CONV}.` })}\n`, stderr: '' });
   writeCredentials(cursorHome, REFUSED, ['remember', 'conversations']);
   assert.deepEqual(await run(events[1], home), { code: 0, stdout: '{"continue":true}\n', stderr: '' });
   assert.equal(existsSync(join(cursorHome, 'spool')), false);

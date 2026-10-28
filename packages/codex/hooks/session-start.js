@@ -17,8 +17,8 @@ try {
   const root = harnessHome('codex');
   const p = sessionPaths(root, { sessionId });
   let context = buildContext({ credentials: loadCredentials(p), cached: readJson(p.openQuestions) });
-  const note = context && sessionNote(root, p.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
-  if (note) context += `\n${note}`;
+  const note = sessionNote(root, p.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
+  context = [context, note].filter(Boolean).join('\n');
   if (context) {
     process.stdout.write(`${JSON.stringify({ hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: context } })}\n`);
   }
