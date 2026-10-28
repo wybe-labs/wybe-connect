@@ -402,6 +402,10 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         // Once a session was moved to another connection, a call that names no session, or one this machine
         // has never seen, could be that session's: refused, never sent to the default.
         const unseen = !!sessionId && pinnedConnection(root, sessionId) === undefined;
+        // A session pinned to none (its connection was removed) fails closed: no default, no name added again.
+        if (sessionId && pinnedConnection(root, sessionId) === null) {
+          return reply(text(`Not delivered: this session sends to no connection. Ask the person which connection to use, then run \`connect use <name> --session ${sessionId}\` (the SessionStart note gives the full command).`, true));
+        }
         if (root && !fixed && (!sessionId || unseen)) {
           current(); // fixes key: where a call naming no known session goes
           if (sessionMovedElsewhere(root, key)) {

@@ -274,9 +274,9 @@ export function useConnection(root, ref, { sessionId = null } = {}) {
 }
 
 /**
- * Deletes the local grant and what is queued for it. The pairing on the node stays until revoked there. A move
- * to it ends with it: those sessions' pins go, so a connection added again under the name does not bring back a
- * move that refuses every session naming none.
+ * Deletes the local grant and what is queued for it. The pairing on the node stays until revoked there. A pin is
+ * never deleted: a session moved to it is pinned to none, so it sends nowhere until the person chooses a
+ * connection with `use <name> --session <id>`, never to the default or to a connection added again under the name.
  */
 export function removeConnection(root, ref) {
   const key = mustFind(root, ref);
@@ -288,7 +288,7 @@ export function removeConnection(root, ref) {
     for (const f of readdirSync(dir)) {
       if (!f.endsWith('.json')) continue;
       const p = readJson(join(dir, f));
-      if (p?.moved === true && p.connection === key) rmSync(join(dir, f), { force: true });
+      if (p?.moved === true && p.connection === key) writeJsonPrivate(join(dir, f), { connection: null, nodeUrl: null, moved: true });
     }
   }
   return { key, dropped };
@@ -327,12 +327,16 @@ export function resolveSession(root, { sessionId = null, env = process.env } = {
 }
 
 /**
- * A line for the SessionStart context: this session's id whenever it has one (a connection added later, and a
- * move of another session, then need it in every call), and the other connections when there are any; else null.
- * `command` is how to run this harness's bin/connect.js.
+ * A line for the SessionStart context: this session's id whenever it has one, connected or not (a connection added
+ * later, and a move of another session, then need it in every call), and the other connections when there are any;
+ * else null. `command` is how to run this harness's bin/connect.js.
  */
 export function sessionNote(root, key, { sessionId = null, command }) {
   const others = knownKeys(root).filter((k) => k !== key);
+  if (!key && sessionId && pinnedConnection(root, sessionId) === null) {
+    return `This session sends to no connection; its session_id is ${sessionId}. Nothing is sent until the person chooses one; to do so, run: ${command} use <name> --session ${sessionId}`;
+  }
+  if (!key && sessionId) return `This session is not connected yet; its session_id is ${sessionId}.`;
   if (!key || (!others.length && !sessionId)) return null;
   if (!others.length) return `This session sends to the connection ${key}; its session_id is ${sessionId}.`;
   const how = sessionId ? ` If the person asks to send this session to another one, run: ${command} use <name> --session ${sessionId}` : '';

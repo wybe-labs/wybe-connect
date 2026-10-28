@@ -22,8 +22,8 @@ try {
     const p = sessionPaths(root, { sessionId });
     const credentials = loadCredentials(p);
     let context = buildContext({ credentials, cached: readJson(p.openQuestions) });
-    const note = context && sessionNote(root, p.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
-    if (note) context += `\n${note}`;
+    const note = sessionNote(root, p.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
+    context = [context, note].filter(Boolean).join('\n');
     const notice = credentials ? distilNotice(p, { harness: 'codex' }) : null;
     const all = [context, notice].filter(Boolean).join('\n');
     if (all) {

@@ -28,8 +28,8 @@ try {
   switch (event) {
     case 'sessionStart': {
       let context = buildContext({ credentials: loadCredentials(paths), cached: readJson(paths.openQuestions) });
-      const note = context && sessionNote(root, paths.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
-      if (note) context += `\n${note}`;
+      const note = sessionNote(root, paths.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
+      context = [context, note].filter(Boolean).join('\n');
       if (context) out = { additional_context: context };
       break;
     }
