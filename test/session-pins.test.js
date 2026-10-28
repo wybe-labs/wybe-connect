@@ -13,7 +13,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFile
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createProxy, NO_SESSION } from '../lib/mcp-proxy.js';
-import { connectionNames, connectionPaths, pinnedConnection, prunePins, removeConnection, saveConnection, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
+import { connectionNames, connectionPaths, pinnedConnection, prunePins, removeConnection, saveConnection, sessionLines, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
 import * as D from '../lib/distil.js';
 const { maybeRun, noteSession } = D;
 
@@ -284,6 +284,41 @@ const rows = {
       useConnection(root, H('b'), { sessionId: 'S' });
       removeConnection(root, H('b'));
     }), { a: [[0, 1]], b: [] }, 'B removed: A still has its own line');
+  },
+  removedThenAddedAgain: () => {
+    // A removed after S left it, then connected again (the same node): S's lines from its stay on A still go nowhere.
+    const root = home();
+    saveConnection(root, grant('a'));
+    saveConnection(root, grant('b'));
+    useConnection(root, H('a'));
+    const dir = join(root, 'transcripts');
+    mkdirSync(dir, { recursive: true });
+    const tr = join(dir, 'S.jsonl');
+    writeFileSync(tr, 'a1\n');
+    hookNode(root, 'S', tr);
+    useConnection(root, H('b'), { sessionId: 'S' });
+    appendFileSync(tr, 'b1\n');
+    assert.deepEqual(sessionLines(root, 'S', H('a')), [[0, 1]], 'control: A has its stay');
+    removeConnection(root, H('a'));
+    saveConnection(root, grant('a'));
+    assert.deepEqual(sessionLines(root, 'S', H('a')), []);
+    assert.deepEqual(sessionLines(root, 'S', H('b')), [[1, null]]);
+  },
+  noteRecordsTranscript: () => {
+    // A session resolved without its transcript (the MCP server's first call) learns it from its distil note, so a
+    // later move still has a boundary.
+    const root = home();
+    saveConnection(root, grant('a'));
+    saveConnection(root, grant('b'));
+    useConnection(root, H('a'));
+    const dir = join(root, 'transcripts');
+    mkdirSync(dir, { recursive: true });
+    const tr = join(dir, 'S.jsonl');
+    writeFileSync(tr, 'a1\n');
+    noteSession(sessionPaths(root, { sessionId: 'S', env: {} }), { transcriptPath: tr, sessionId: 'S' });
+    useConnection(root, H('b'), { sessionId: 'S' });
+    assert.deepEqual(sessionLines(root, 'S', H('a')), [[0, 1]]);
+    assert.deepEqual(sessionLines(root, 'S', H('b')), [[1, null]]);
   },
   twoMoves: () => {
     // A -> B -> A: one segment per stay, each line to the node it was written on.
