@@ -41,8 +41,14 @@ function recordingNode() {
 }
 const sent = (n) => n.calls.filter((c) => c.rpc === 'tools/call').map((c) => c.url);
 const home = () => mkdtempSync(join(tmpdir(), 'wybe-connect-pins-'));
-// Ages pins as if their last hook was at `at` (a pin's file time is when a hook last resolved it).
-const setPinSeen = (root, sids, at) => { for (const s of sids) utimesSync(join(root, 'state', 'sessions', `${s}.json`), at / 1000, at / 1000); };
+// Ages pins as if their last hook was at `at` (seenAt, and the file's time for a pin written before seenAt).
+const setPinSeen = (root, sids, at) => {
+  for (const s of sids) {
+    const f = join(root, 'state', 'sessions', `${s}.json`);
+    writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), seenAt: at }));
+    utimesSync(f, at / 1000, at / 1000);
+  }
+};
 // What a SessionStart hook does: pin, and always the note, connected or not.
 const startSession = (root, sid) => {
   const p = sessionPaths(root, { sessionId: sid, env: {} });
@@ -619,6 +625,99 @@ test('session pins cursorSpool: a record goes only to the connection in use when
     await ev('stop', { status: 'completed', loop_count: 0 });
     const got = (n) => ({ a: n.seen.some((s) => s.includes('WRITTEN-ON-A')), b: n.seen.some((s) => s.includes('WRITTEN-ON-B')) });
     assert.deepEqual({ a: got(a), b: got(b) }, { a: { a: true, b: false }, b: { a: false, b: true } });
+  } finally {
+    a.server.close();
+    b.server.close();
+  }
+});
+
+// The proxy keeps no default of its own: an id-less call goes where a new session goes at that call, so a server that
+// first met A still delivers to B once B is the only connection and every pin is on it.
+test('session pins noCachedDefault: one connection left, every pin on it, an id-less call reaches it and its tools are listed', async () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  hookNode(root, 'S');
+  const node = recordingNode();
+  const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+  await proxy.handle(req(0, 'tools/list'));
+  await proxy.handle(remember(1, null));
+  saveConnection(root, grant('b'));
+  removeConnection(root, H('a'));
+  useConnection(root, H('b'), { sessionId: 'S' });
+  const r = await proxy.handle(remember(2, null));
+  const listed = (await proxy.handle(req(3, 'tools/list'))).result.tools.map((t) => t.name);
+  assert.deepEqual({ sent: sent(node), error: r.result.isError ?? false, lists: listed.includes('remember') }, { sent: [`${N('a')}/mcp`, `${N('b')}/mcp`], error: false, lists: true });
+});
+
+// A SessionStart may come before Claude Code has written the transcript file. The pin keeps that path anyway, so a move
+// in the session's first turn still counts its lines: A keeps them and B starts at the boundary.
+test('session pins firstTurnMove: a transcript written after SessionStart still gives the move its boundary', () => {
+  const root = home();
+  saveConnection(root, grant('b'));
+  saveConnection(root, grant('a'));
+  const dir = join(root, 'tr');
+  mkdirSync(dir, { recursive: true });
+  const tr = join(dir, 'S.jsonl');
+  assert.equal(hookNode(root, 'S', tr), H('a'));
+  for (let i = 0; i < 4; i++) appendFileSync(tr, `{"type":"user","message":"line ${i}"}\n`);
+  useConnection(root, H('b'), { sessionId: 'S' });
+  appendFileSync(tr, '{"type":"user","message":"line 4"}\n');
+  assert.equal(hookNode(root, 'S', tr), H('b'));
+  assert.deepEqual({ a: sessionLines(root, 'S', H('a')), b: sessionLines(root, 'S', H('b')) }, { a: [[0, 4]], b: [[4, null]] });
+});
+
+// The 24 hours of a pin with no transcript run from the last hook that resolved it; removing a connection or moving the
+// session rewrites the pin but does not renew it. Cursor's sessionStart prunes too.
+test('session pins pruneClock: remove and move do not renew a pin; Cursor prunes at sessionStart', async () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  saveConnection(root, grant('b'));
+  saveConnection(root, grant('c'));
+  hookNode(root, 'idle', join(root, 'never-written.jsonl'));
+  const day = 24 * 3600e3;
+  setPinSeen(root, ['idle'], Date.now() - day - 60e3);
+  useConnection(root, H('b'), { sessionId: 'idle' });
+  removeConnection(root, H('c'));
+  prunePins(root);
+  assert.equal(pinnedConnection(root, 'idle'), undefined, 'a move and a remove renewed the pin');
+  const cursorHome = join(root, 'cursor');
+  saveConnection(cursorHome, grant('a'));
+  sessionPaths(cursorHome, { sessionId: 'old', env: {} });
+  setPinSeen(cursorHome, ['old'], Date.now() - day - 60e3);
+  await runHook(HOOKS.cursor[0], { conversation_id: 'new', hook_event_name: 'sessionStart' }, root);
+  assert.equal(pinnedConnection(cursorHome, 'old'), undefined, 'Cursor\'s sessionStart did not prune');
+  assert.equal(pinnedConnection(cursorHome, 'new'), H('a'));
+});
+
+// Codex sends the rollout from its Stop hook. Each connection reads only the lines the session wrote while on it, from a
+// cursor of its own: a turn written on A before `connect use B --session` goes to A at the next Stop, never to B.
+test('session pins codexStop: a turn written on A before the move goes to A, the rest to B', async () => {
+  const [a, b] = [await httpNode(), await httpNode()];
+  try {
+    const root = home();
+    const codexHome = join(root, 'codex');
+    const g = (n) => ({ ...grant('a'), nodeUrl: n.base, resource: `${n.base}/mcp`, mcpEndpoint: `${n.base}/mcp`, scopes: ['sessions:full'] });
+    const kB = saveConnection(codexHome, g(b));
+    const kA = saveConnection(codexHome, g(a));
+    const sid = '0190c0de-0000-7000-8000-00000000c0de';
+    const project = join(root, 'atlas-demo');
+    mkdirSync(join(project, '.git'), { recursive: true });
+    const lines = readFileSync(join(import.meta.dirname, 'fixtures', 'codex-rollout.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => `${l}\n`);
+    const rollout = join(root, `rollout-2026-01-01T00-00-00-${sid}.jsonl`);
+    writeFileSync(rollout, lines.slice(0, 21).join(''));
+    const ev = (name, more = {}) => ({ session_id: sid, transcript_path: rollout, cwd: project, hook_event_name: name, model: 'm', permission_mode: 'default', ...more });
+    await runHook('packages/codex/hooks/session-start.js', ev('SessionStart', { source: 'startup' }), root);
+    await runHook('packages/codex/hooks/flush.js', ev('Stop', { turn_id: 'turn-1' }), root);
+    assert.equal(a.seen.length, 1, 'control: turn 1 went to A');
+    appendFileSync(rollout, lines.slice(21, 24).join(''));
+    useConnection(codexHome, kB, { sessionId: sid });
+    appendFileSync(rollout, lines.slice(24).join(''));
+    await runHook('packages/codex/hooks/flush.js', ev('Stop', { turn_id: 'turn-2' }), root);
+    const toB = b.seen.join('\n');
+    const toA = a.seen.slice(1).join('\n');
+    assert.ok(b.seen.length >= 1, 'control: B got the part after the move');
+    assert.deepEqual({ onB: toB.includes('cap the retries at five'), onA: toA.includes('cap the retries at five') }, { onB: false, onA: true });
+    assert.equal(kA, connectionNames(codexHome).find((k) => k === kA));
   } finally {
     a.server.close();
     b.server.close();

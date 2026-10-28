@@ -88,8 +88,10 @@ test('codex Stop, node unreachable: exit 0, one stderr line, delta queued under 
   assert.ok(!r.stderr.includes(TOKEN));
   assert.equal(existsSync(join(conn(home), 'queue')), false, 'Claude Code\'s queue is not touched');
 
-  const cursor = JSON.parse(readFileSync(join(codexHome, 'state', `rollout-2026-09-22T09-00-00-${SID}.json`), 'utf8'));
+  // the session is on the connection `node`, so the cursor is that connection's own
+  const cursor = JSON.parse(readFileSync(join(codexHome, 'state', `rollout-2026-09-22T09-00-00-${SID}.node.json`), 'utf8'));
   assert.equal(cursor.byteOffset, statSync(rollout).size);
+  assert.equal(cursor.line, readFileSync(rollout, 'utf8').split('\n').length - 1);
   const queued = readdirSync(join(conn(codexHome), 'queue'));
   assert.equal(queued.length, 1);
   const payload = JSON.parse(readFileSync(join(conn(codexHome), 'queue', queued[0]), 'utf8'));
