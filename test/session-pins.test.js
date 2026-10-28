@@ -14,7 +14,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createProxy, NO_SESSION } from '../lib/mcp-proxy.js';
-import { connectionNames, connectionPaths, pinnedConnection, prunePins, removeConnection, saveConnection, sessionLines, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
+import { connectionNames, connectionPaths, markWritten, pinnedConnection, prunePins, removeConnection, saveConnection, sessionLines, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
 import * as D from '../lib/distil.js';
 const { maybeRun, noteSession } = D;
 
@@ -735,6 +735,65 @@ test('session pins takeTaskNamedSession: take_task naming S on B looks for the t
   removeConnection(root, H('b'));
   const none = await proxy.handle(req(2, 'tools/call', { name: 'take_task', arguments: { task_id: 'task-1' } }));
   assert.match(none.result.content[0].text, /Not connected/, 'control: with no connection at all it is not connected');
+});
+
+// The 24 hours are only the grace for a session that has not written yet. A Cursor conversation has no transcript, so
+// its first spooled record marks its pin written; from then on the pin is not timed, and a null pin or a move holds.
+const cursorDay = async (moveToB) => {
+  const [a, b] = [await httpNode(), await httpNode()];
+  try {
+    const root = home();
+    const ch = join(root, 'cursor');
+    const g = (n) => ({ ...grant('a'), nodeUrl: n.base, resource: `${n.base}/mcp`, mcpEndpoint: `${n.base}/mcp`, scopes: ['sessions:light'] });
+    const kA = saveConnection(ch, g(a));
+    const kB = saveConnection(ch, g(b));
+    useConnection(ch, kA);
+    const ev = (sid, hook_event_name, more = {}) => runHook(HOOKS.cursor[0], { conversation_id: sid, hook_event_name, workspace_roots: [], ...more }, root);
+    const turn = async (sid, prompt) => { await ev(sid, 'beforeSubmitPrompt', { prompt }); await ev(sid, 'stop', { status: 'completed', loop_count: 0 }); };
+    await ev('S', 'sessionStart');
+    if (moveToB) useConnection(ch, kB, { sessionId: 'S' });
+    await turn('S', 'DAY-ONE');
+    if (!moveToB) removeConnection(ch, kA);
+    setPinSeen(ch, ['S'], Date.now() - 25 * 3600e3);
+    await ev('T', 'sessionStart');
+    await turn('S', 'NEXT-DAY');
+    const got = (n, s) => n.seen.some((x) => x.includes(s));
+    return { dayOneOnB: got(b, 'DAY-ONE'), nextDayOnA: got(a, 'NEXT-DAY'), nextDayOnB: got(b, 'NEXT-DAY') };
+  } finally {
+    a.server.close();
+    b.server.close();
+  }
+};
+test('session pins cursorWrittenNullPin: a Cursor conversation pinned to none still sends nowhere a day later', async () => {
+  assert.deepEqual(await cursorDay(false), { dayOneOnB: false, nextDayOnA: false, nextDayOnB: false });
+});
+test('session pins cursorWrittenMove: a Cursor conversation moved to B is still on B a day later', async () => {
+  assert.deepEqual(await cursorDay(true), { dayOneOnB: true, nextDayOnA: false, nextDayOnB: true });
+});
+test('session pins writtenSurvivesMove: a move after the conversation wrote keeps its pin untimed', () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  saveConnection(root, grant('b'));
+  useConnection(root, H('a'));
+  sessionPaths(root, { sessionId: 'S', env: {} });
+  markWritten(root, 'S');
+  useConnection(root, H('b'), { sessionId: 'S' });
+  setPinSeen(root, ['S'], Date.now() - 25 * 3600e3);
+  prunePins(root);
+  assert.equal(pinnedConnection(root, 'S'), H('b'));
+});
+test('session pins pendingWritten: a transcript first given before it existed keeps its pin once written, a day later too', () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  const dir = join(root, 'tr');
+  mkdirSync(dir, { recursive: true });
+  const tr = join(dir, 'S.jsonl');
+  assert.equal(hookNode(root, 'S', tr), H('a'));
+  appendFileSync(tr, '{"type":"user","message":"line 0"}\n{"type":"user","message":"line 1"}\n');
+  prunePins(root, Date.now() + 25 * 3600e3);
+  saveConnection(root, grant('b'));
+  hookNode(root, 'S', tr);
+  assert.deepEqual({ pin: pinnedConnection(root, 'S'), b: sessionLines(root, 'S', H('b')) }, { pin: H('a'), b: [] });
 });
 
 // /resume through the real hook, with SessionStart inputs copied from a real Claude Code run: the resumed session

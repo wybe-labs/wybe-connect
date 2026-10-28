@@ -283,7 +283,7 @@ function pin(root, sessionId, key, { moved = false, transcriptPath = null, pendi
     if (last && last.fromLine >= fromLine) segments = segments.filter((s) => s.fromLine < fromLine);
     segments = [...segments, { connection: key, nodeUrl, fromLine }];
   }
-  writeJsonPrivate(pinPath(root, sessionId), { connection: key, nodeUrl, ...(moved ? { moved: true } : {}), ...(path ? { transcriptPath: path } : pending ? { pendingTranscript: pending } : {}), seenAt, segments });
+  writeJsonPrivate(pinPath(root, sessionId), { connection: key, nodeUrl, ...(moved ? { moved: true } : {}), ...(path ? { transcriptPath: path } : pending ? { pendingTranscript: pending } : {}), seenAt, ...(was?.written === true ? { written: true } : {}), segments });
 }
 
 /**
@@ -376,8 +376,19 @@ export function sessionIdRequired(root) {
 export const PIN_GRACE_MS = 24 * 60 * 60 * 1000;
 
 /**
- * Deletes the pins whose transcript is gone (a pin lives as long as its transcript), and those with no known transcript
- * that no hook has resolved for PIN_GRACE_MS (seenAt; a pin written before it has its file's time).
+ * Marks a session as having written, for a harness with no transcript (Cursor spools its records): from then on its pin
+ * is not timed, so a move or a pin to none holds however long the conversation is idle.
+ */
+export function markWritten(root, sessionId) {
+  if (!sessionId) return;
+  const was = readJson(pinPath(root, sessionId));
+  if (was && 'connection' in was && was.written !== true) writeJsonPrivate(pinPath(root, sessionId), { ...was, written: true });
+}
+
+/**
+ * Deletes the pins whose transcript is gone (a pin lives as long as its transcript; a pending one counts once it
+ * exists). One with no transcript is timed only until it has written: the grace for a session that has not written
+ * a line yet, PIN_GRACE_MS after the last hook that resolved it (seenAt; a pin written before it has its file's time).
  */
 export function prunePins(root, now = Date.now()) {
   const dir = join(root, 'state', 'sessions');
@@ -387,7 +398,8 @@ export function prunePins(root, now = Date.now()) {
     const file = join(dir, f);
     const p = readJson(file);
     const seen = Number.isFinite(p?.seenAt) ? p.seenAt : statSync(file).mtimeMs;
-    const gone = typeof p?.transcriptPath === 'string' ? !existsSync(p.transcriptPath) : now - seen > PIN_GRACE_MS;
+    const transcript = typeof p?.transcriptPath === 'string' ? p.transcriptPath : existingTranscript(p?.pendingTranscript);
+    const gone = transcript ? !existsSync(transcript) : p?.written !== true && now - seen > PIN_GRACE_MS;
     if (gone) rmSync(file, { force: true });
   }
 }
