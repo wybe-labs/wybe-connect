@@ -50,8 +50,9 @@ try {
     case 'afterFileEdit':
     case 'afterAgentResponse':
     case 'postToolUse':
-      // a spooled record is this conversation's writing: its pin is no longer timed (prunePins)
-      if (record(input, { paths })) markWritten(root, sessionId);
+      // the conversation is writing, spooled or not (pinned to none, or no sessions scope): its pin is no longer timed (prunePins)
+      record(input, { paths });
+      markWritten(root, sessionId);
       break;
     case 'stop': {
       await flushElsewhere(root, paths.connection, sessionId, event, false);

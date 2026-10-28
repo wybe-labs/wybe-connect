@@ -14,7 +14,8 @@ import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSyn
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createProxy, NO_SESSION } from '../lib/mcp-proxy.js';
-import { connectionNames, connectionPaths, markWritten, pinnedConnection, prunePins, removeConnection, saveConnection, sessionLines, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
+import { connectionNames, connectionPaths, markWritten, pinnedConnection, prunePins, recordTranscript, removeConnection, saveConnection, sessionIdRequired, sessionLines, sessionNote, sessionPaths, sessionTranscript, useConnection } from '../lib/connections.js';
+import { flush } from '../lib/flush.js';
 import * as D from '../lib/distil.js';
 const { maybeRun, noteSession } = D;
 
@@ -764,6 +765,97 @@ const cursorDay = async (moveToB) => {
     b.server.close();
   }
 };
+// A Cursor hook that would spool is the conversation writing, whether or not anything was spooled: pinned to none, or
+// on a connection without a sessions scope, nothing is, and the pin must hold all the same.
+const cursorUnspooled = async (moveToRememberOnly) => {
+  const [a, b] = [await httpNode(), await httpNode()];
+  try {
+    const root = home();
+    const ch = join(root, 'cursor');
+    const g = (n, scopes) => ({ ...grant('a'), nodeUrl: n.base, resource: `${n.base}/mcp`, mcpEndpoint: `${n.base}/mcp`, scopes });
+    const kB = saveConnection(ch, g(b, moveToRememberOnly ? ['remember'] : ['sessions:light']));
+    const kA = saveConnection(ch, g(a, ['sessions:light']));
+    useConnection(ch, kA);
+    const ev = (sid, hook_event_name, more = {}) => runHook(HOOKS.cursor[0], { conversation_id: sid, hook_event_name, workspace_roots: [], ...more }, root);
+    const turn = async (sid, prompt) => { await ev(sid, 'beforeSubmitPrompt', { prompt }); await ev(sid, 'stop', { status: 'completed', loop_count: 0 }); };
+    await ev('S', 'sessionStart');
+    if (moveToRememberOnly) useConnection(ch, kB, { sessionId: 'S' });
+    else removeConnection(ch, kA);
+    await turn('S', 'DAY-ONE');
+    const fresh = pinnedConnection(ch, 'S');
+    setPinSeen(ch, ['S'], Date.now() - 25 * 3600e3);
+    await ev('T', 'sessionStart');
+    await turn('S', 'NEXT-DAY');
+    const got = (n, s) => n.seen.some((x) => x.includes(s));
+    return { fresh, pin: pinnedConnection(ch, 'S'), onA: got(a, 'DAY-ONE') || got(a, 'NEXT-DAY'), onB: got(b, 'DAY-ONE') || got(b, 'NEXT-DAY'), kB };
+  } finally {
+    a.server.close();
+    b.server.close();
+  }
+};
+test('session pins cursorNullPinUnspooled: pinned to none before anything spooled, a Cursor conversation still sends nowhere a day later', async () => {
+  const r = await cursorUnspooled(false);
+  assert.deepEqual({ fresh: r.fresh, pin: r.pin, onA: r.onA, onB: r.onB }, { fresh: null, pin: null, onA: false, onB: false });
+});
+test('session pins cursorMoveUnspooled: moved to a connection without a sessions scope, a Cursor conversation is still there a day later', async () => {
+  const r = await cursorUnspooled(true);
+  assert.deepEqual({ fresh: r.fresh, pin: r.pin, onA: r.onA }, { fresh: r.kB, pin: r.kB, onA: false });
+});
+
+// A written pin is not timed by the 24 hours, but a conversation idle for WRITTEN_PIN_IDLE_MS is over: its pin goes, so
+// pins on a removed connection do not keep id-less calls refused for good. The 25 hours above are the control.
+test('session pins writtenExpires: written pins idle past their month are pruned, and id-less calls are taken again', () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  saveConnection(root, grant('b'));
+  useConnection(root, H('a'));
+  for (const s of ['S1', 'S2']) { sessionPaths(root, { sessionId: s, env: {} }); markWritten(root, s); }
+  removeConnection(root, H('a'));
+  setPinSeen(root, ['S1', 'S2'], Date.now() - 25 * 3600e3);
+  prunePins(root);
+  assert.deepEqual({ kept: pinnedConnection(root, 'S1'), required: sessionIdRequired(root) }, { kept: null, required: true }, 'control: a day idle, the written pins hold');
+  setPinSeen(root, ['S1', 'S2'], Date.now() - 31 * 24 * 3600e3);
+  prunePins(root);
+  assert.deepEqual({ S1: pinnedConnection(root, 'S1'), S2: pinnedConnection(root, 'S2'), required: sessionIdRequired(root) }, { S1: undefined, S2: undefined, required: false });
+});
+
+// A distil note can give a session's transcript before the file exists; once it does, the session's transcript is that
+// path, so a move counts its lines.
+test('session pins pendingFromNote: a transcript a note gave before it existed is the session\'s once written', () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  hookNode(root, 'S');
+  const tr = join(root, 'S.jsonl');
+  recordTranscript(root, 'S', tr);
+  assert.equal(sessionTranscript(root, 'S').transcriptPath, null, 'control: not yet written');
+  appendFileSync(tr, '{"type":"user","message":"line 0"}\n');
+  assert.deepEqual(sessionTranscript(root, 'S'), { connection: H('a'), transcriptPath: tr });
+});
+
+// A connection's first own cursor starts where the shared cursor stopped: lines a flush without ranges already sent
+// (the session not fixed yet) are not sent again once the session has ranges.
+test('session pins ownCursorFromShared: lines sent from the shared cursor are not sent again from the connection\'s own', async () => {
+  const n = await httpNode();
+  try {
+    const root = home();
+    const k = saveConnection(root, { ...grant('a'), nodeUrl: n.base, resource: `${n.base}/mcp`, mcpEndpoint: `${n.base}/mcp`, scopes: ['sessions:full'] });
+    const lines = readFileSync(join(import.meta.dirname, 'fixtures', 'session.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => `${l}\n`);
+    const tr = join(root, 'S.jsonl');
+    writeFileSync(tr, lines.slice(0, 5).join(''));
+    const p = { ...connectionPaths(root, k), connection: k };
+    await flush({ transcriptPath: tr, sessionId: 'S', paths: p });
+    assert.ok(n.seen.some((x) => x.includes('retry with backoff')), 'control: the first turn went from the shared cursor');
+    appendFileSync(tr, lines.slice(5).join(''));
+    const before = n.seen.length;
+    await flush({ transcriptPath: tr, sessionId: 'S', paths: p, lines: [[0, null]] });
+    const after = n.seen.slice(before).join('\n');
+    assert.ok(after.length > 0, 'control: the rest was sent');
+    assert.equal(after.includes('retry with backoff'), false);
+  } finally {
+    n.server.close();
+  }
+});
+
 test('session pins cursorWrittenNullPin: a Cursor conversation pinned to none still sends nowhere a day later', async () => {
   assert.deepEqual(await cursorDay(false), { dayOneOnB: false, nextDayOnA: false, nextDayOnB: false });
 });
