@@ -76,16 +76,17 @@ test('once a session has been moved, a call without session_id is refused and re
   assert.deepEqual(sentTo(node), []);
 });
 
-// A move to a connection that was later removed must not leave every new session refused for good, and a
-// session opened with one connection must still learn its id. Only a moved session that could be sent elsewhere refuses.
-test('a session moved to a connection that was then removed: a new session without session_id goes to the default', async () => {
+// A move to a connection that was later removed must not lock out a new session: it delivers by its id. Without
+// an id the call is refused while the old session is pinned to none, since it could be that session's.
+test('a session moved to a connection that was then removed: a new session delivers by its id, a call without one is refused', async () => {
   const root = twoConnections();
   useConnection(root, 'node-b.example.invalid', { sessionId: 'sess-old' });
   removeConnection(root, 'node-b.example.invalid');
   sessionPaths(root, { sessionId: 'sess-new', env: {} });
   const node = recordingNode();
   const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
-  const r = await proxy.handle(remember(1, null));
+  assert.equal((await proxy.handle(remember(1, null))).result.content[0].text, NO_SESSION);
+  const r = await proxy.handle(remember(2, 'sess-new'));
   assert.notEqual(r.result.isError, true, r.result.content?.[0]?.text);
   assert.deepEqual(sentTo(node), [`${A}/mcp`]);
 });
