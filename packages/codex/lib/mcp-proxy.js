@@ -145,8 +145,11 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
   // life, as a session does; a `connect` from here switches it to the connection it made.
   // A call that names its session (session_id) resolves that session's connection at the call,
   // so `connect use <name> --session <id>` moves this server's calls along with the hooks.
+  // A stdio server serves one session, so once a call has named it, a later call that leaves the
+  // optional session_id out is still that session's: never sent to the default in its place.
   // With `paths`, it uses those as they are (a distil run's own connection, or the single layout).
   let key = null;
+  let served = null;
   const current = (sessionId = null) => {
     if (fixed) return fixed;
     if (!root) return null;
@@ -398,7 +401,9 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         const raw = params?.arguments ?? {};
         const plain = typeof raw === 'object' && raw !== null && !Array.isArray(raw);
         const { session_id: given, ...rest } = plain ? raw : {};
-        const sessionId = root && !fixed && typeof given === 'string' && given.trim() ? given.trim() : null;
+        const named = root && !fixed && typeof given === 'string' && given.trim() ? given.trim() : null;
+        if (named) served = named;
+        const sessionId = named ?? served;
         // Once a session was moved to another connection, a call that names no session, or one this machine
         // has never seen, could be that session's: refused, never sent to the default.
         const unseen = !!sessionId && pinnedConnection(root, sessionId) === undefined;

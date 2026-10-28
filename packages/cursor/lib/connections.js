@@ -244,18 +244,32 @@ function pin(root, sessionId, key, { moved = false } = {}) {
 }
 
 /**
- * Whether a session was sent by `use --session` (its pin says moved) to a connection that still exists and
- * is not `key`: a call that names no session could then be that session's, bound for another node. A move
- * to a removed connection, or to `key` itself, leaves nothing to tell apart.
+ * Where a stored pin sends: its connection while that still exists for the node it was pinned with, else null
+ * (pinned to none, removed, or the name now holds another node). The one reading of a pin: the hooks, the
+ * MCP server and distil all go through it.
+ */
+function livePin(root, pinned) {
+  const key = pinned.connection;
+  if (typeof key !== 'string' || !knownKeys(root).includes(key)) return null;
+  const now = readGrant(connectionPaths(root, key));
+  return now && typeof pinned.nodeUrl === 'string' && originOf(now.nodeUrl) === originOf(pinned.nodeUrl) ? key : null;
+}
+
+/**
+ * Whether a session was sent by `use --session` (its pin says moved) to a connection that still sends and is not
+ * `key`: a call that names no session could then be that session's, bound for another node. A move to none, or
+ * to `key` itself, leaves nothing to tell apart (a server that knows it serves a session pinned to none refuses
+ * on its own, lib/mcp-proxy.js).
  */
 export function sessionMovedElsewhere(root, key) {
   const dir = join(root, 'state', 'sessions');
   if (!existsSync(dir)) return false;
-  const known = knownKeys(root);
   return readdirSync(dir).some((f) => {
     if (!f.endsWith('.json')) return false;
     const p = readJson(join(dir, f));
-    return p?.moved === true && typeof p.connection === 'string' && p.connection !== key && known.includes(p.connection);
+    if (p?.moved !== true || !('connection' in p)) return false;
+    const live = livePin(root, p);
+    return live !== null && live !== key;
   });
 }
 
@@ -294,10 +308,14 @@ export function removeConnection(root, ref) {
   return { key, dropped };
 }
 
-/** The connection a session is fixed to: a name, null (fixed to none), or undefined while it is not fixed. */
+/**
+ * The connection a session sends to by its pin: a name, null (fixed to none, see livePin), or undefined while it
+ * is not fixed.
+ */
 export function pinnedConnection(root, sessionId) {
+  if (!sessionId) return undefined;
   const pinned = readJson(pinPath(root, sessionId));
-  return pinned && 'connection' in pinned ? pinned.connection : undefined;
+  return pinned && 'connection' in pinned ? livePin(root, pinned) : undefined;
 }
 
 /** The names of every connection in this home. */
@@ -309,16 +327,8 @@ export function connectionNames(root) {
 /** The connection this session uses (see the order at the top), fixed for the session on first call. */
 export function resolveSession(root, { sessionId = null, env = process.env } = {}) {
   migrateLegacy(root);
-  const known = knownKeys(root);
-  if (sessionId) {
-    const pinned = readJson(pinPath(root, sessionId));
-    if (pinned && 'connection' in pinned) {
-      const key = pinned.connection;
-      if (typeof key !== 'string' || !known.includes(key)) return null;
-      const now = readGrant(connectionPaths(root, key));
-      return now && typeof pinned.nodeUrl === 'string' && originOf(now.nodeUrl) === originOf(pinned.nodeUrl) ? key : null;
-    }
-  }
+  const pinned = pinnedConnection(root, sessionId);
+  if (pinned !== undefined) return pinned;
   const wanted = env[NODE_ENV];
   const key = wanted ? findConnection(root, wanted) : defaultConnection(root);
   // an unknown WYBE_CONNECT_NODE is pinned too: that session stays unconnected, never on another node
