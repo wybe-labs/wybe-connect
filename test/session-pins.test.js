@@ -5,11 +5,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createProxy } from '../lib/mcp-proxy.js';
-import { pinnedConnection, removeConnection, saveConnection, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
+import { connectionNames, connectionPaths, pinnedConnection, removeConnection, saveConnection, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
+import { maybeRun, noteSession } from '../lib/distil.js';
 
 const N = (c) => `https://node-${c}.example.invalid`;
 const H = (c) => `node-${c}.example.invalid`;
@@ -40,6 +41,39 @@ const startSession = (root, sid) => {
   return { key: p.connection, note: sessionNote(root, p.connection, { sessionId: sid, command: 'connect' }) };
 };
 const hookNode = (root, sid) => sessionPaths(root, { sessionId: sid, env: {} }).connection;
+
+// S opened on A with B also connected, the person moves S to B, then removes B: S is pinned to none.
+function nullPinned() {
+  const root = home();
+  saveConnection(root, grant('a'));
+  saveConnection(root, grant('b'));
+  useConnection(root, H('a'));
+  const S = startSession(root, 'S');
+  useConnection(root, H('b'), { sessionId: 'S' });
+  removeConnection(root, H('b'));
+  return { root, S };
+}
+
+// S's transcript noted for A's distil at its first Stop (one line), then `then(root)`, then a second turn; returns
+// the ranges of S that A's next distil run would read.
+function distilOfS(then) {
+  const root = home();
+  saveConnection(root, grant('a'));
+  saveConnection(root, grant('b'));
+  useConnection(root, H('a'));
+  const dir = join(root, 'transcripts');
+  mkdirSync(dir, { recursive: true });
+  const tr = join(dir, 'S.jsonl');
+  writeFileSync(tr, '{"type":"user","message":"turn 1 on A"}\n');
+  const pA = sessionPaths(root, { sessionId: 'S', env: {} });
+  assert.equal(pA.connection, H('a'));
+  noteSession(pA, { transcriptPath: tr, sessionId: 'S', now: Date.now() });
+  then(root);
+  appendFileSync(tr, '{"type":"user","message":"turn 2"}\n{"type":"assistant","message":"..."}\n');
+  const spawnImpl = () => ({ pid: 4242, on() {}, unref() {} });
+  const plan = maybeRun({ paths: connectionPaths(root, H('a')), env: {}, now: Date.now() + 7 * 3600e3, spawnImpl, claudeHome: join(root, 'no-claude') });
+  return (plan?.transcripts ?? []).filter((t) => t.sessionId === 'S').map((t) => [t.fromLine, t.toLine]);
+}
 
 const rows = {
   R3: async () => {
@@ -146,6 +180,143 @@ const rows = {
     assert.equal((await proxy.handle(remember(2, null))).result.isError, true, 'without an id: refused');
     await proxy.handle(remember(3, 'sess-T'));
     assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
+  },
+  R5a: async () => {
+    // S pinned to none: refused with its id, and S's own server does not send the retry without the optional
+    // session_id to the default A. (A server that never named a session still does: R3.)
+    const { root } = nullPinned();
+    assert.equal(pinnedConnection(root, 'S'), null);
+    const node = recordingNode();
+    const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+    await proxy.handle(req(0, 'tools/list'));
+    assert.equal((await proxy.handle(remember(1, 'S'))).result.isError, true);
+    assert.equal((await proxy.handle(remember(2, null))).result.isError, true);
+    assert.deepEqual(sent(node), []);
+    // Positive control: once S chooses a connection, a call without an id reaches the default again.
+    useConnection(root, H('a'), { sessionId: 'S' });
+    await proxy.handle(remember(3, null));
+    assert.deepEqual(sent(node), [`${N('a')}/mcp`]);
+  },
+  R5b: () => {
+    // A transcript noted on A is distilled into A only while S still sends to A: never after a move, to B or to none.
+    assert.deepEqual(distilOfS(() => {}), [[0, 3]], 'control: S still on A, A reads all of it');
+    assert.deepEqual(distilOfS((root) => useConnection(root, H('b'), { sessionId: 'S' })), [], 'moved to B');
+    assert.deepEqual(distilOfS((root) => {
+      useConnection(root, H('b'), { sessionId: 'S' });
+      removeConnection(root, H('b'));
+    }), [], 'moved to B, B removed');
+    assert.deepEqual(distilOfS((root) => useConnection(root, H('a'), { sessionId: 'S' })), [[0, 3]], 'moved to A itself');
+  },
+  nullPin: async () => {
+    // Pinned to none survives another remove, the same name added again and a default change; `use` clears it.
+    const { root, S } = nullPinned();
+    assert.match(S.note, /--session S$/);
+    assert.equal(hookNode(root, 'S'), null);
+    assert.match(startSession(root, 'S').note, /sends to no connection; its session_id is S\. .*use <name> --session S$/);
+    saveConnection(root, grant('c'));
+    removeConnection(root, H('c'));
+    saveConnection(root, grant('b'));
+    assert.equal(hookNode(root, 'S'), null);
+    useConnection(root, H('a'));
+    assert.equal(hookNode(root, 'S'), null);
+    const node = recordingNode();
+    const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+    await proxy.handle(req(0, 'tools/list'));
+    const r = await proxy.handle(remember(1, 'S'));
+    assert.match(r.result.content[0].text, /connect use <name> --session S/);
+    assert.deepEqual(sent(node), []);
+    useConnection(root, H('b'), { sessionId: 'S' });
+    assert.equal(hookNode(root, 'S'), H('b'));
+    await proxy.handle(remember(2, 'S'));
+    assert.deepEqual(sent(node), [`${N('b')}/mcp`]);
+  },
+  everyday: async () => {
+    // One connection, no moves: session start, a call without session_id and one with it all go to A.
+    const root = home();
+    saveConnection(root, grant('a'));
+    const node = recordingNode();
+    const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+    await proxy.handle(req(0, 'tools/list'));
+    await proxy.handle(remember(1, null));
+    assert.equal(startSession(root, 't1').key, H('a'));
+    await proxy.handle(remember(2, null));
+    await proxy.handle(remember(3, 't1'));
+    assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`, `${N('a')}/mcp`]);
+  },
+  noIdRule: async () => {
+    // On a server that has named no session, a call without one is refused only while a moved session sends to a
+    // live connection other than the default.
+    const root = home();
+    saveConnection(root, grant('a'));
+    saveConnection(root, grant('b'));
+    useConnection(root, H('a'));
+    const node = recordingNode();
+    const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+    await proxy.handle(req(0, 'tools/list'));
+    useConnection(root, H('a'), { sessionId: 'toA' }); // moved to the default: nothing to tell apart
+    assert.notEqual((await proxy.handle(remember(1, null))).result.isError, true);
+    useConnection(root, H('b'), { sessionId: 'toB' });
+    assert.equal((await proxy.handle(remember(2, null))).result.isError, true);
+    removeConnection(root, H('b'));
+    assert.notEqual((await proxy.handle(remember(3, null))).result.isError, true, 'toB now sends to none');
+    assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
+    // The same server once told it serves toB: a call without an id is toB's, pinned to none, and refused.
+    assert.equal((await proxy.handle(remember(4, 'toB'))).result.isError, true);
+    assert.equal((await proxy.handle(remember(5, null))).result.isError, true);
+    assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
+  },
+  fuzz: async () => {
+    // Random connects, defaults, moves, removes and opens: an open session naming itself is never locked out while
+    // it has a connection, and neither its hooks nor its tools ever reach another node than its own.
+    const locked = [];
+    const crossed = [];
+    for (let seed = 1; seed <= 60; seed++) {
+      let st = seed >>> 0;
+      const r = () => ((st = (st * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+      const root = home();
+      const log = [];
+      const open = [];
+      for (let step = 0; step < 14; step++) {
+        const names = connectionNames(root);
+        const c = 'abc'[Math.floor(r() * 3)];
+        const op = Math.floor(r() * 6);
+        try {
+          if (op === 0) { saveConnection(root, grant(c)); log.push(`connect ${c}`); }
+          else if (op === 1 && names.includes(H(c))) { useConnection(root, H(c)); log.push(`use ${c}`); }
+          else if (op === 2 && names.includes(H(c)) && open.length) {
+            const t = open[Math.floor(r() * open.length)];
+            useConnection(root, H(c), { sessionId: t.sid });
+            t.want = N(c);
+            log.push(`use ${c} --session ${t.sid}`);
+          } else if (op === 3 && names.includes(H(c))) { removeConnection(root, H(c)); log.push(`remove ${c}`); }
+          else if (op >= 4) {
+            const sid = `t${open.length}`;
+            const s = startSession(root, sid);
+            const node = recordingNode();
+            const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+            await proxy.handle(req(0, 'tools/list'));
+            assert.match(s.note ?? '', new RegExp(`${sid}\\b`), `note without id: ${s.note}`);
+            open.push({ sid, proxy, node, want: s.key ? `https://${s.key}` : undefined });
+            log.push(`open ${sid}`);
+          }
+        } catch (e) {
+          if (e.code === 'ERR_ASSERTION') throw e;
+          log.push(`(${e.message})`);
+        }
+        for (const t of open) {
+          const k = hookNode(root, t.sid);
+          if (k && t.want === undefined) t.want = `https://${k}`;
+          if (k && `https://${k}` !== t.want) crossed.push(`seed ${seed} ${t.sid} hook -> ${k}: ${log.join('; ')}`);
+          if (!k) continue;
+          const before = sent(t.node).length;
+          await t.proxy.handle(remember(2, t.sid));
+          const got = sent(t.node).slice(before);
+          for (const g of got) if (g !== `${t.want}/mcp`) crossed.push(`seed ${seed} ${t.sid} tool -> ${g}: ${log.join('; ')}`);
+          if (!got.length) locked.push(`seed ${seed} ${t.sid}: ${log.join('; ')}`);
+        }
+      }
+    }
+    assert.deepEqual({ locked: locked.slice(0, 3), crossed: crossed.slice(0, 3) }, { locked: [], crossed: [] });
   },
 };
 
