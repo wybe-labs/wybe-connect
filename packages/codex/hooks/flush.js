@@ -31,7 +31,7 @@ try {
   if (!process.env[DISTIL_ENV] && typeof input.agent_id !== 'string') {
     const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
     const root = harnessHome('codex');
-    const p = sessionPaths(root, { sessionId });
+    const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null });
     if (p.connection && personRollout(input.transcript_path)) {
       noteSession(p, {
         transcriptPath: input.transcript_path,

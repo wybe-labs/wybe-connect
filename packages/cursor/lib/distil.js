@@ -39,7 +39,7 @@ import { withLock, acquire, isAlive as defaultAlive } from './lock.js';
 import { appendRecord, readRecords } from './ledger.js';
 import { paths as legacyPaths, harnessHome, loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
 import { rolloutHead, stripCodexInjected } from './codex-rollout.js';
-import { connectionPaths, checkedName, connectionNames, pinnedConnection, NODE_ENV } from './connections.js';
+import { connectionPaths, checkedName, connectionNames, recordTranscript, sessionLines, NODE_ENV } from './connections.js';
 import { callTool } from './post.js';
 import { refreshTokens } from './oauth.js';
 import { redactValue } from './redact.js';
@@ -205,6 +205,7 @@ const noteName = (path) => `${createHash('sha256').update(path).digest('hex').sl
 export function noteSession(p, { transcriptPath, sessionId = null, cwd = null, now = Date.now(), maxNoteFiles = MAX_NOTE_FILES }) {
   const path = safeTranscriptPath(transcriptPath);
   if (!path || !hasRemember(p)) return null;
+  if (p.root && typeof sessionId === 'string') recordTranscript(p.root, sessionId, path); // a move counts these lines
   const dp = distilPaths(p);
   mkdirSync(dp.notes, { recursive: true, mode: 0o700 });
   const file = join(dp.notes, noteName(path));
@@ -431,8 +432,10 @@ function countLines(path) {
 
 /**
  * The oldest pending ranges that have new lines for this node, within the run's caps: each
- * transcript from its mark on, and never twice in one run. Pending entries with nothing new, whose
- * file is gone, or whose session now sends elsewhere (moved, or pinned to none), leave pending.
+ * transcript from its mark on, and never twice in one run. A moved session's transcript gives this
+ * node only the lines written while the session was on it (lib/connections.js sessionLines), one
+ * stretch per run; one with a later stretch here stays pending. Pending entries with nothing new,
+ * whose file is gone, or with no lines here (moved away, or pinned to none) leave pending.
  */
 function pick(p, s, node) {
   const take = [];
@@ -440,16 +443,29 @@ function pick(p, s, node) {
   let chars = 0;
   const keep = [];
   for (const x of s.pending) {
-    if (p.connection && !sendsHere(p, x.sessionId)) continue; // its work belongs to the connection it was moved to
+    const here = p.connection ? linesHere(p, x.sessionId) : null;
+    if (here && !here.length) continue; // its lines belong to another connection, or to none
     const key = transcriptKey(x.path);
     if (seen.has(key)) continue; // the same transcript under another spelling: one range is enough
     if (take.length >= MAX_RUN_TRANSCRIPTS || chars + x.path.length > MAX_RUN_PATH_CHARS) {
       keep.push(x);
       continue;
     }
-    const toLine = countLines(x.path);
-    const fromLine = markOf(s, node, x.path) ?? 0;
-    if (toLine === null || toLine <= fromLine) continue; // deleted by Claude Code, or nothing new
+    const lines = countLines(x.path);
+    if (lines === null) continue; // deleted by Claude Code
+    const mark = markOf(s, node, x.path) ?? 0;
+    let fromLine = mark;
+    let toLine = lines;
+    let later = false;
+    if (here) {
+      const i = here.findIndex(([, end]) => end === null || end > mark);
+      if (i < 0) continue; // every stretch here is read
+      fromLine = Math.max(mark, here[i][0]);
+      if (here[i][1] !== null) toLine = Math.min(lines, here[i][1]);
+      later = here.slice(i + 1).some(([from]) => from < lines);
+    }
+    if (later) keep.push(x);
+    if (toLine <= fromLine) continue; // nothing new
     take.push({ ...x, fromLine, toLine });
     seen.add(key);
     chars += x.path.length;
@@ -615,17 +631,15 @@ export function importTranscripts(claudeHome, now) {
 }
 
 /**
- * Whether a session's transcript may go into this connection's distil, an import's or an ongoing run's: a
- * session fixed to another connection (or to none) belongs to that one, so its work never reaches this node.
- * A session that was never fixed (older than the connections, or never hooked) is the person's for any.
+ * The lines of a session's transcript that may go into this connection's distil, an import's or an ongoing run's:
+ * the stretches the session spent on this connection, so its work on another (or on none) never reaches this
+ * node. Null for a session that was never fixed (older than the connections, or never hooked): the person's for any.
  */
-function sendsHere(p, sessionId) {
-  if (!sessionId) return true;
+function linesHere(p, sessionId) {
   try {
-    const pin = pinnedConnection(p.root, sessionId);
-    return pin === undefined || pin === p.connection;
+    return sessionLines(p.root, sessionId, p.connection);
   } catch {
-    return false; // an unreadable pin: not provably ours
+    return []; // an unreadable pin: not provably ours
   }
 }
 
@@ -639,7 +653,7 @@ function enqueueImport(p, s, harness, home, now) {
   for (const t of harness === 'codex' ? importRollouts(home, now) : importTranscripts(home, now)) {
     const key = transcriptKey(t.path);
     if (have.has(key)) continue;
-    if (p.connection && !sendsHere(p, t.sessionId)) continue;
+    if (p.connection && linesHere(p, t.sessionId)?.length === 0) continue;
     have.add(key);
     if (s.pending.length + inFlight(s) < MAX_PENDING) s.pending.push({ path: t.path, sessionId: t.sessionId, cwd: null, notedAt: iso(t.mtimeMs) });
     else noteSession(p, { transcriptPath: t.path, sessionId: t.sessionId, now: t.mtimeMs });

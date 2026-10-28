@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
-import { createProxy, CONNECT_TOOL } from '../lib/mcp-proxy.js';
+import { createProxy, CONNECT_TOOL, NO_SESSION } from '../lib/mcp-proxy.js';
 import { paths, saveCredentials, loadCredentials } from '../lib/home.js';
 import { distilPaths } from '../lib/distil.js';
 import { readRecords } from '../lib/ledger.js';
@@ -233,18 +233,20 @@ test('connections: the server\'s connect stores a connection of its own with a g
   assert.ok(existsSync(connectionPaths(root, 'node-a.example.invalid').openQuestions), 'open questions cached for that connection');
 });
 
-test('connections: the server uses WYBE_CONNECT_NODE, else the default, keeps the connection it found, and an unknown name is no connection', async () => {
+test('connections: a new session goes by WYBE_CONNECT_NODE, else the default, and keeps it; an unknown name is no connection', async () => {
   const root = mkdtempSync(join(tmpdir(), 'wybe-connect-proxy-conn-'));
   saveConnection(root, at(A, { accessToken: TOK_A }));
   saveConnection(root, at(B, { accessToken: TOK_B })); // B is the default now
   const node = anyBearerNode();
   const named = createProxy({ root, env: { WYBE_CONNECT_NODE: 'node-a.example.invalid' }, fetchImpl: node.fetchImpl });
   const byDefault = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
-  await named.handle(remember(1));
-  await byDefault.handle(remember(2));
-  useConnection(root, 'node-a.example.invalid'); // the default moves; a running server keeps its own
-  await byDefault.handle(remember(3));
+  const withId = (id, sid) => req(id, 'tools/call', { name: 'remember', arguments: { items: [{ content: 'x' }], session_id: sid } });
+  await named.handle(withId(1, 's1'));
+  await byDefault.handle(withId(2, 's2'));
+  useConnection(root, 'node-a.example.invalid'); // the default moves; a session already fixed keeps its own
+  await byDefault.handle(withId(3, 's2'));
   assert.deepEqual(node.calls.filter((c) => c.rpc === 'tools/call').map((c) => c.auth), [`Bearer ${TOK_A}`, `Bearer ${TOK_B}`, `Bearer ${TOK_B}`]);
+  assert.equal((await byDefault.handle(remember(4))).result.content[0].text, NO_SESSION, 'two connections: a call names its session');
   const unknown = createProxy({ root, env: { WYBE_CONNECT_NODE: 'node-c.example.invalid' }, fetchImpl: node.fetchImpl });
   assert.deepEqual((await unknown.handle(req(4, 'tools/list'))).result.tools.map((t) => t.name), ['connect'], 'never another node');
 });

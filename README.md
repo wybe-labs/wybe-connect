@@ -126,9 +126,13 @@ uses the connection its first hook found: one it was moved to (`connect.js use <
 <id>`), else `WYBE_CONNECT_NODE=<name>` in the harness's environment, else the default (the one
 connected or `use`d last, or the only one). `connect.js list` and `connect.js remove <name>`
 manage them. A 0.1 `credentials.json` moves under its node on the first hook, queue included.
-In Claude Code the background distil is kept per connection too, and the plugin's `wybe` MCP
-server (which gets no session id) uses the connection `WYBE_CONNECT_NODE` names when Claude Code
-starts, else the default; its `connect` tool stores a new connection and makes it the default.
+A session is the harness's `session_id`: `/clear` starts a new one (where any new session goes),
+`/resume` keeps it. A move sends the session's later transcript lines to the new connection; the
+lines written before it stay with the one it left, and a removed connection's lines go nowhere.
+In Claude Code the background distil is kept per connection too. The plugin's `wybe` MCP server
+remembers no session: with one connection its tools go there, with two or more every call passes
+the `session_id` the SessionStart note gives, and a call without it is refused. Its `connect`
+tool stores a new connection and makes it the default.
 
 ## Claude Desktop, claude.ai and ChatGPT (no hooks)
 

@@ -15,7 +15,7 @@ try {
   if (!process.env[DISTIL_ENV]) {
     const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
     const root = homePath();
-    const p = sessionPaths(root, { sessionId });
+    const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null });
     if (p.connection) {
       noteSession(p, {
         transcriptPath: input.transcript_path,

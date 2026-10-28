@@ -1,16 +1,21 @@
-// One rule for session pins (lib/connections.js): every session is told its id, including one opened before
-// any connection existed; removing a connection never deletes a pin, a session moved to it is pinned to none;
-// and a session pinned to none fails closed, never sent to the default or to a connection added again under
-// the same name. Its calls say to choose one with `connect use <name>`.
+// The session model (lib/connections.js), one table:
+// S1 a session is the hook's session_id: /clear is a new session (WYBE_CONNECT_NODE, else the default), /resume
+//    keeps its id and so its pin. Every session is told its id. Removing a connection never deletes a pin: a session
+//    moved to it is pinned to none and fails closed, never sent to the default or to a name added again.
+// S2 the MCP server remembers no session: with two or more connections every call names its session, and one that
+//    does not is refused; with one connection the id is optional.
+// S3 each transcript line goes to the node the session was on when it was written: a move starts a segment at the
+//    transcript's line count, the earlier lines stay with the connection it left, and a removed one's go nowhere.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createProxy } from '../lib/mcp-proxy.js';
-import { connectionNames, connectionPaths, pinnedConnection, removeConnection, saveConnection, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
-import { maybeRun, noteSession } from '../lib/distil.js';
+import { createProxy, NO_SESSION } from '../lib/mcp-proxy.js';
+import { connectionNames, connectionPaths, pinnedConnection, prunePins, removeConnection, saveConnection, sessionLines, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
+import * as D from '../lib/distil.js';
+const { maybeRun, noteSession } = D;
 
 const N = (c) => `https://node-${c}.example.invalid`;
 const H = (c) => `node-${c}.example.invalid`;
@@ -40,7 +45,11 @@ const startSession = (root, sid) => {
   const p = sessionPaths(root, { sessionId: sid, env: {} });
   return { key: p.connection, note: sessionNote(root, p.connection, { sessionId: sid, command: 'connect' }) };
 };
-const hookNode = (root, sid) => sessionPaths(root, { sessionId: sid, env: {} }).connection;
+const hookNode = (root, sid, transcriptPath = null) => sessionPaths(root, { sessionId: sid, env: {}, transcriptPath }).connection;
+const spawnImpl = () => ({ pid: 4242, on() {}, unref() {} });
+const distilRun = (root, key, now) => maybeRun({ paths: connectionPaths(root, key), env: {}, now, alive: () => false, spawnImpl, claudeHome: join(root, 'no-claude') });
+const ANY = Symbol('any connection');
+const rangesOf = (plan, sid) => (plan?.transcripts ?? []).filter((t) => t.sessionId === sid).map((t) => [t.fromLine, t.toLine]);
 
 // S opened on A with B also connected, the person moves S to B, then removes B: S is pinned to none.
 function nullPinned() {
@@ -54,8 +63,8 @@ function nullPinned() {
   return { root, S };
 }
 
-// S's transcript noted for A's distil at its first Stop (one line), then `then(root)`, then a second turn; returns
-// the ranges of S that A's next distil run would read.
+// S's turn 1 (one line) on A, noted for A's distil at its Stop; then `then(root)`; then turn 2 (two lines), noted at
+// its Stop on wherever S's hooks go now. Returns the ranges of S each connection's next distil run reads.
 function distilOfS(then) {
   const root = home();
   saveConnection(root, grant('a'));
@@ -65,14 +74,20 @@ function distilOfS(then) {
   mkdirSync(dir, { recursive: true });
   const tr = join(dir, 'S.jsonl');
   writeFileSync(tr, '{"type":"user","message":"turn 1 on A"}\n');
-  const pA = sessionPaths(root, { sessionId: 'S', env: {} });
+  const t0 = Date.now();
+  const pA = sessionPaths(root, { sessionId: 'S', env: {}, transcriptPath: tr });
   assert.equal(pA.connection, H('a'));
-  noteSession(pA, { transcriptPath: tr, sessionId: 'S', now: Date.now() });
+  noteSession(pA, { transcriptPath: tr, sessionId: 'S', now: t0 });
   then(root);
   appendFileSync(tr, '{"type":"user","message":"turn 2"}\n{"type":"assistant","message":"..."}\n');
-  const spawnImpl = () => ({ pid: 4242, on() {}, unref() {} });
-  const plan = maybeRun({ paths: connectionPaths(root, H('a')), env: {}, now: Date.now() + 7 * 3600e3, spawnImpl, claudeHome: join(root, 'no-claude') });
-  return (plan?.transcripts ?? []).filter((t) => t.sessionId === 'S').map((t) => [t.fromLine, t.toLine]);
+  const now = sessionPaths(root, { sessionId: 'S', env: {}, transcriptPath: tr });
+  if (now.connection) noteSession(now, { transcriptPath: tr, sessionId: 'S', now: t0 + 1000 });
+  const later = t0 + 7 * 3600e3;
+  const names = connectionNames(root);
+  return {
+    a: names.includes(H('a')) ? rangesOf(distilRun(root, H('a'), later), 'S') : [],
+    b: names.includes(H('b')) ? rangesOf(distilRun(root, H('b'), later), 'S') : [],
+  };
 }
 
 const rows = {
@@ -89,11 +104,11 @@ const rows = {
     const node = recordingNode();
     const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
     await proxy.handle(req(0, 'tools/list'));
-    await proxy.handle(remember(1, null));
+    await proxy.handle(remember(1, null)); // one connection: the id is optional
     saveConnection(root, grant('b'));
-    await proxy.handle(remember(2, null));
+    assert.equal((await proxy.handle(remember(2, null))).result.content[0].text, NO_SESSION, 'two connections: the id is required');
     await proxy.handle(remember(3, 'sess-T'));
-    assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`, `${N('a')}/mcp`]);
+    assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
   },
   R3b: async () => {
     // A session opened with one connection is told its id and delivers naming it after another is moved to B.
@@ -181,31 +196,226 @@ const rows = {
     await proxy.handle(remember(3, 'sess-T'));
     assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
   },
-  R5a: async () => {
-    // S pinned to none: refused with its id, and S's own server does not send the retry without the optional
-    // session_id to the default A. (A server that never named a session still does: R3.)
+  pinnedToNone: async () => {
+    // S pinned to none: refused with its id. With one connection left, a call without an id goes there (S2).
     const { root } = nullPinned();
     assert.equal(pinnedConnection(root, 'S'), null);
     const node = recordingNode();
     const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
     await proxy.handle(req(0, 'tools/list'));
-    assert.equal((await proxy.handle(remember(1, 'S'))).result.isError, true);
-    assert.equal((await proxy.handle(remember(2, null))).result.isError, true);
+    assert.match((await proxy.handle(remember(1, 'S'))).result.content[0].text, /connect use <name> --session S/);
     assert.deepEqual(sent(node), []);
-    // Positive control: once S chooses a connection, a call without an id reaches the default again.
-    useConnection(root, H('a'), { sessionId: 'S' });
-    await proxy.handle(remember(3, null));
+    await proxy.handle(remember(2, null));
     assert.deepEqual(sent(node), [`${N('a')}/mcp`]);
   },
-  R5b: () => {
-    // A transcript noted on A is distilled into A only while S still sends to A: never after a move, to B or to none.
-    assert.deepEqual(distilOfS(() => {}), [[0, 3]], 'control: S still on A, A reads all of it');
-    assert.deepEqual(distilOfS((root) => useConnection(root, H('b'), { sessionId: 'S' })), [], 'moved to B');
+  clearAfterMove: () => {
+    // /clear gives a new session_id: a new session, where any new one goes; it never inherits the old one's move.
+    const root = home();
+    saveConnection(root, grant('a'));
+    saveConnection(root, grant('b'));
+    useConnection(root, H('a'));
+    startSession(root, 'S1');
+    useConnection(root, H('b'), { sessionId: 'S1' });
+    assert.equal(startSession(root, 'S2').key, H('a'), 'the default');
+    assert.equal(sessionPaths(root, { sessionId: 'S3', env: { WYBE_CONNECT_NODE: H('b') } }).connection, H('b'), 'WYBE_CONNECT_NODE in that terminal');
+    assert.equal(hookNode(root, 'S1'), H('b'), 'control: the moved session itself stays on B');
+  },
+  idlessTwo: async () => {
+    // Two connections: session_id is required on every node tool, and a call without it is refused in one line,
+    // never guessed: not the default, not the session that called last (the server outlives /clear).
+    const root = home();
+    saveConnection(root, grant('a'));
+    saveConnection(root, grant('b'));
+    useConnection(root, H('a'));
+    startSession(root, 'S1');
+    const node = recordingNode();
+    const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+    const listed = (await proxy.handle(req(0, 'tools/list'))).result.tools.find((t) => t.name === 'remember');
+    assert.deepEqual(listed.inputSchema.required, ['session_id']);
+    useConnection(root, H('b'), { sessionId: 'S1' });
+    await proxy.handle(remember(1, 'S1'));
+    startSession(root, 'S2'); // /clear: same server process
+    const r = await proxy.handle(remember(2, null));
+    assert.equal(r.result.content[0].text, NO_SESSION);
+    assert.equal(r.result.isError, true);
+    await proxy.handle(remember(3, 'S2'));
+    assert.deepEqual(sent(node), [`${N('b')}/mcp`, `${N('a')}/mcp`]);
+  },
+  idlessOne: async () => {
+    // One connection: session_id is optional and every call goes there.
+    const root = home();
+    saveConnection(root, grant('a'));
+    const node = recordingNode();
+    const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+    const listed = (await proxy.handle(req(0, 'tools/list'))).result.tools.find((t) => t.name === 'remember');
+    assert.equal(listed.inputSchema.required, undefined);
+    assert.equal(typeof listed.inputSchema.properties.session_id, 'object');
+    await proxy.handle(remember(1, null));
+    await proxy.handle(remember(2, 't1'));
+    assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
+  },
+  unseenId: async () => {
+    // A named id this machine has never seen goes where a new session goes, and is fixed there.
+    const root = home();
+    saveConnection(root, grant('a'));
+    saveConnection(root, grant('b'));
+    useConnection(root, H('b'));
+    const node = recordingNode();
+    const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+    await proxy.handle(req(0, 'tools/list'));
+    await proxy.handle(remember(1, 'never-seen'));
+    useConnection(root, H('a'));
+    await proxy.handle(remember(2, 'never-seen'));
+    assert.deepEqual(sent(node), [`${N('b')}/mcp`, `${N('b')}/mcp`]);
+  },
+  stayOnA: () => {
+    // Turn 1 was written on A, turn 2 after the move to B: A keeps line 0, B starts at the boundary, never at 0.
+    assert.deepEqual(distilOfS(() => {}), { a: [[0, 3]], b: [] }, 'control: no move, A reads all of it');
+    assert.deepEqual(distilOfS((root) => useConnection(root, H('b'), { sessionId: 'S' })), { a: [[0, 1]], b: [[1, 3]] });
+    assert.deepEqual(distilOfS((root) => useConnection(root, H('a'), { sessionId: 'S' })), { a: [[0, 3]], b: [] }, 'moved to A itself');
+  },
+  removedGoesNowhere: () => {
+    // A removed connection's unsent lines are dropped, never sent to the connection the session moved to.
+    assert.deepEqual(distilOfS((root) => {
+      useConnection(root, H('b'), { sessionId: 'S' });
+      removeConnection(root, H('a'));
+    }), { a: [], b: [[1, 3]] }, 'A removed after the move');
     assert.deepEqual(distilOfS((root) => {
       useConnection(root, H('b'), { sessionId: 'S' });
       removeConnection(root, H('b'));
-    }), [], 'moved to B, B removed');
-    assert.deepEqual(distilOfS((root) => useConnection(root, H('a'), { sessionId: 'S' })), [[0, 3]], 'moved to A itself');
+    }), { a: [[0, 1]], b: [] }, 'B removed: A still has its own line');
+  },
+  removedThenAddedAgain: () => {
+    // A removed after S left it, then connected again (the same node): S's lines from its stay on A still go nowhere.
+    const root = home();
+    saveConnection(root, grant('a'));
+    saveConnection(root, grant('b'));
+    useConnection(root, H('a'));
+    const dir = join(root, 'transcripts');
+    mkdirSync(dir, { recursive: true });
+    const tr = join(dir, 'S.jsonl');
+    writeFileSync(tr, 'a1\n');
+    hookNode(root, 'S', tr);
+    useConnection(root, H('b'), { sessionId: 'S' });
+    appendFileSync(tr, 'b1\n');
+    assert.deepEqual(sessionLines(root, 'S', H('a')), [[0, 1]], 'control: A has its stay');
+    removeConnection(root, H('a'));
+    saveConnection(root, grant('a'));
+    assert.deepEqual(sessionLines(root, 'S', H('a')), []);
+    assert.deepEqual(sessionLines(root, 'S', H('b')), [[1, null]]);
+  },
+  noteRecordsTranscript: () => {
+    // A session resolved without its transcript (the MCP server's first call) learns it from its distil note, so a
+    // later move still has a boundary.
+    const root = home();
+    saveConnection(root, grant('a'));
+    saveConnection(root, grant('b'));
+    useConnection(root, H('a'));
+    const dir = join(root, 'transcripts');
+    mkdirSync(dir, { recursive: true });
+    const tr = join(dir, 'S.jsonl');
+    writeFileSync(tr, 'a1\n');
+    noteSession(sessionPaths(root, { sessionId: 'S', env: {} }), { transcriptPath: tr, sessionId: 'S' });
+    useConnection(root, H('b'), { sessionId: 'S' });
+    assert.deepEqual(sessionLines(root, 'S', H('a')), [[0, 1]]);
+    assert.deepEqual(sessionLines(root, 'S', H('b')), [[1, null]]);
+  },
+  twoMoves: () => {
+    // A -> B -> A: one segment per stay, each line to the node it was written on.
+    const root = home();
+    saveConnection(root, grant('a'));
+    saveConnection(root, grant('b'));
+    useConnection(root, H('a'));
+    const dir = join(root, 'transcripts');
+    mkdirSync(dir, { recursive: true });
+    const tr = join(dir, 'S.jsonl');
+    writeFileSync(tr, 'a1\n');
+    noteSession(sessionPaths(root, { sessionId: 'S', env: {}, transcriptPath: tr }), { transcriptPath: tr, sessionId: 'S' });
+    useConnection(root, H('b'), { sessionId: 'S' });
+    appendFileSync(tr, 'b1\nb2\n');
+    noteSession(sessionPaths(root, { sessionId: 'S', env: {} }), { transcriptPath: tr, sessionId: 'S' });
+    useConnection(root, H('a'), { sessionId: 'S' });
+    appendFileSync(tr, 'a2\n');
+    const pin = JSON.parse(readFileSync(join(root, 'state', 'sessions', 'S.json'), 'utf8'));
+    assert.deepEqual(pin.segments.map((s) => [s.connection, s.fromLine]), [[H('a'), 0], [H('b'), 1], [H('a'), 3]]);
+    const later = Date.now() + 7 * 3600e3;
+    assert.deepEqual(rangesOf(distilRun(root, H('a'), later), 'S'), [[0, 1]], 'A reads its first stay');
+    assert.equal(D.loadState(connectionPaths(root, H('a'))).pending.filter((x) => x.sessionId === 'S').length, 1, 'and keeps S pending for its second');
+    assert.deepEqual(rangesOf(distilRun(root, H('b'), later), 'S'), [[1, 3]]);
+  },
+  fuzz: async () => {
+    // Random connects, defaults, moves, removes and new sessions, a turn per open session each step and every
+    // connection's distil run: no tool call or distil line ever reaches another node than the one the session was on
+    // when that line was written, a call without an id is refused while there are several connections, and an open
+    // session naming itself is never locked out.
+    const locked = [];
+    const crossed = [];
+    for (let seed = 1; seed <= 200; seed++) {
+      let st = (seed * 7919) >>> 0;
+      const r = () => ((st = (st * 1664525 + 1013904223) >>> 0) / 2 ** 32);
+      const root = home();
+      const dir = join(root, 'tr');
+      mkdirSync(dir, { recursive: true });
+      const log = [];
+      const open = [];
+      let clock = Date.now();
+      for (let step = 0; step < 10; step++) {
+        const names = connectionNames(root);
+        const c = 'abc'[Math.floor(r() * 3)];
+        const op = Math.floor(r() * 6);
+        try {
+          if (op === 0) { saveConnection(root, grant(c)); log.push(`connect ${c}`); }
+          else if (op === 1 && names.includes(H(c))) { useConnection(root, H(c)); log.push(`use ${c}`); }
+          else if (op === 2 && names.includes(H(c)) && open.length) {
+            const t = open[Math.floor(r() * open.length)];
+            useConnection(root, H(c), { sessionId: t.sid });
+            log.push(`use ${c} --session ${t.sid}`);
+          } else if (op === 3 && names.includes(H(c))) { removeConnection(root, H(c)); log.push(`remove ${c}`); }
+          else if (op >= 4) {
+            const sid = `t${open.length}`;
+            const tr = join(dir, `${sid}.jsonl`);
+            writeFileSync(tr, '');
+            const s = startSession(root, sid);
+            assert.match(s.note ?? '', new RegExp(`${sid}\\b`), `note without id: ${s.note}`);
+            const node = recordingNode();
+            const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+            await proxy.handle(req(0, 'tools/list'));
+            open.push({ sid, tr, proxy, node, owners: [] });
+            log.push(`open ${sid}`);
+          }
+        } catch (e) {
+          if (e.code === 'ERR_ASSERTION') throw e;
+          log.push(`(${e.message})`);
+        }
+        for (const t of open) {
+          const k = hookNode(root, t.sid, t.tr);
+          appendFileSync(t.tr, `{"type":"user","message":"${t.sid} step ${step}"}\n`);
+          // a line written while the session is not fixed yet (no connection at all) is the person's, for any
+          t.owners.push(k ?? (pinnedConnection(root, t.sid) === undefined ? ANY : null));
+          if (k) noteSession(connectionPaths(root, k), { transcriptPath: t.tr, sessionId: t.sid, now: clock });
+          const before = sent(t.node).length;
+          await t.proxy.handle(remember(2, t.sid));
+          const got = sent(t.node).slice(before);
+          for (const g of got) if (g !== `https://${k}/mcp`) crossed.push(`seed ${seed} ${t.sid} named -> ${g} (hook ${k}): ${log.join('; ')}`);
+          if (k && !got.length) locked.push(`seed ${seed} ${t.sid}: ${log.join('; ')}`);
+          if (connectionNames(root).length >= 2) {
+            const b2 = sent(t.node).length;
+            const idless = await t.proxy.handle(remember(3, null));
+            if (sent(t.node).length > b2 || idless.result.content[0].text !== NO_SESSION) crossed.push(`seed ${seed} ${t.sid} id-less delivered: ${log.join('; ')}`);
+          }
+        }
+        clock += 7 * 3600e3;
+        for (const name of connectionNames(root)) {
+          for (const range of distilRun(root, name, clock)?.transcripts ?? []) {
+            const t = open.find((o) => o.sid === range.sessionId);
+            for (let line = range.fromLine; line < range.toLine; line++) {
+              if (t.owners[line] !== name && t.owners[line] !== ANY) crossed.push(`seed ${seed} distil ${name} reads ${t.sid} line ${line} (written on ${t.owners[line]}): ${log.join('; ')}`);
+            }
+          }
+        }
+      }
+    }
+    assert.deepEqual({ locked: locked.slice(0, 3), crossed: crossed.slice(0, 3), n: locked.length + crossed.length }, { locked: [], crossed: [], n: 0 });
   },
   nullPin: async () => {
     // Pinned to none survives another remove, the same name added again and a default change; `use` clears it.
@@ -243,80 +453,24 @@ const rows = {
     await proxy.handle(remember(3, 't1'));
     assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`, `${N('a')}/mcp`]);
   },
-  noIdRule: async () => {
-    // On a server that has named no session, a call without one is refused only while a moved session sends to a
-    // live connection other than the default.
+  prune: () => {
+    // A pin lives as long as its transcript: pruned when it is gone, kept while it exists or is not known.
     const root = home();
     saveConnection(root, grant('a'));
-    saveConnection(root, grant('b'));
-    useConnection(root, H('a'));
-    const node = recordingNode();
-    const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
-    await proxy.handle(req(0, 'tools/list'));
-    useConnection(root, H('a'), { sessionId: 'toA' }); // moved to the default: nothing to tell apart
-    assert.notEqual((await proxy.handle(remember(1, null))).result.isError, true);
-    useConnection(root, H('b'), { sessionId: 'toB' });
-    assert.equal((await proxy.handle(remember(2, null))).result.isError, true);
-    removeConnection(root, H('b'));
-    assert.notEqual((await proxy.handle(remember(3, null))).result.isError, true, 'toB now sends to none');
-    assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
-    // The same server once told it serves toB: a call without an id is toB's, pinned to none, and refused.
-    assert.equal((await proxy.handle(remember(4, 'toB'))).result.isError, true);
-    assert.equal((await proxy.handle(remember(5, null))).result.isError, true);
-    assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
-  },
-  fuzz: async () => {
-    // Random connects, defaults, moves, removes and opens: an open session naming itself is never locked out while
-    // it has a connection, and neither its hooks nor its tools ever reach another node than its own.
-    const locked = [];
-    const crossed = [];
-    for (let seed = 1; seed <= 60; seed++) {
-      let st = seed >>> 0;
-      const r = () => ((st = (st * 1664525 + 1013904223) >>> 0) / 2 ** 32);
-      const root = home();
-      const log = [];
-      const open = [];
-      for (let step = 0; step < 14; step++) {
-        const names = connectionNames(root);
-        const c = 'abc'[Math.floor(r() * 3)];
-        const op = Math.floor(r() * 6);
-        try {
-          if (op === 0) { saveConnection(root, grant(c)); log.push(`connect ${c}`); }
-          else if (op === 1 && names.includes(H(c))) { useConnection(root, H(c)); log.push(`use ${c}`); }
-          else if (op === 2 && names.includes(H(c)) && open.length) {
-            const t = open[Math.floor(r() * open.length)];
-            useConnection(root, H(c), { sessionId: t.sid });
-            t.want = N(c);
-            log.push(`use ${c} --session ${t.sid}`);
-          } else if (op === 3 && names.includes(H(c))) { removeConnection(root, H(c)); log.push(`remove ${c}`); }
-          else if (op >= 4) {
-            const sid = `t${open.length}`;
-            const s = startSession(root, sid);
-            const node = recordingNode();
-            const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
-            await proxy.handle(req(0, 'tools/list'));
-            assert.match(s.note ?? '', new RegExp(`${sid}\\b`), `note without id: ${s.note}`);
-            open.push({ sid, proxy, node, want: s.key ? `https://${s.key}` : undefined });
-            log.push(`open ${sid}`);
-          }
-        } catch (e) {
-          if (e.code === 'ERR_ASSERTION') throw e;
-          log.push(`(${e.message})`);
-        }
-        for (const t of open) {
-          const k = hookNode(root, t.sid);
-          if (k && t.want === undefined) t.want = `https://${k}`;
-          if (k && `https://${k}` !== t.want) crossed.push(`seed ${seed} ${t.sid} hook -> ${k}: ${log.join('; ')}`);
-          if (!k) continue;
-          const before = sent(t.node).length;
-          await t.proxy.handle(remember(2, t.sid));
-          const got = sent(t.node).slice(before);
-          for (const g of got) if (g !== `${t.want}/mcp`) crossed.push(`seed ${seed} ${t.sid} tool -> ${g}: ${log.join('; ')}`);
-          if (!got.length) locked.push(`seed ${seed} ${t.sid}: ${log.join('; ')}`);
-        }
-      }
-    }
-    assert.deepEqual({ locked: locked.slice(0, 3), crossed: crossed.slice(0, 3) }, { locked: [], crossed: [] });
+    const dir = join(root, 'transcripts');
+    mkdirSync(dir, { recursive: true });
+    const gone = join(dir, 'gone.jsonl');
+    const kept = join(dir, 'kept.jsonl');
+    writeFileSync(gone, 'x\n');
+    writeFileSync(kept, 'x\n');
+    hookNode(root, 'gone', gone);
+    hookNode(root, 'kept', kept);
+    hookNode(root, 'unknown', join(dir, 'not-written-yet.jsonl'));
+    rmSync(gone);
+    prunePins(root);
+    assert.equal(pinnedConnection(root, 'gone'), undefined);
+    assert.equal(pinnedConnection(root, 'kept'), H('a'));
+    assert.equal(pinnedConnection(root, 'unknown'), H('a'), 'a transcript not written yet is never recorded, so never pruned');
   },
 };
 
@@ -347,3 +501,23 @@ for (const [harness, [script, input, context]] of Object.entries(HOOKS)) {
     assert.equal(context(JSON.parse(out || '{}')), 'This session is not connected yet; its session_id is sess-first.');
   });
 }
+
+// /resume through the real hook, with SessionStart inputs copied from a real Claude Code run: the resumed session
+// keeps its session_id, so it keeps its pin (here, a move to B); a startup input with a new id goes to the default.
+test('session pins resume: a resumed session keeps its id, and so its move', async () => {
+  const [startup, resume] = readFileSync(join(import.meta.dirname, 'fixtures', 'claude-code-session-start.jsonl'), 'utf8').trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(resume.source, 'resume');
+  assert.equal(resume.session_id, startup.session_id, 'Claude Code resumes under the same id');
+  assert.equal(resume.transcript_path, startup.transcript_path);
+  const root = home();
+  saveConnection(root, grant('a'));
+  saveConnection(root, grant('b'));
+  useConnection(root, H('a'));
+  await runHook(HOOKS['claude-code'][0], startup, root);
+  assert.equal(pinnedConnection(root, startup.session_id), H('a'));
+  useConnection(root, H('b'), { sessionId: startup.session_id });
+  const out = JSON.parse(await runHook(HOOKS['claude-code'][0], resume, root) || '{}');
+  assert.match(out.hookSpecificOutput?.additionalContext ?? '', new RegExp(`sends to the connection node-b\\.example\\.invalid;.*session_id is ${resume.session_id}`));
+  const fresh = JSON.parse(await runHook(HOOKS['claude-code'][0], { ...startup, session_id: 'after-clear', source: 'clear' }, root) || '{}');
+  assert.match(fresh.hookSpecificOutput?.additionalContext ?? '', /sends to the connection node-a\.example\.invalid;.*session_id is after-clear/);
+});
