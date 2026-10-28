@@ -13,7 +13,7 @@ import { readHookInput, failOpen, queueNotice } from '../lib/hook-io.js';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { harnessHome, loadCredentials, readJson } from '../lib/home.js';
-import { connectionNames, connectionPaths, sessionPaths, sessionNote } from '../lib/connections.js';
+import { connectionNames, connectionPaths, prunePins, sessionPaths, sessionNote } from '../lib/connections.js';
 import { buildContext } from '../lib/session-context.js';
 import { record, flushConversation, followupFor, conversationIdOf, spoolFile } from '../lib/cursor-spool.js';
 
@@ -36,6 +36,7 @@ try {
   // every event resolves the conversation's own connection (lib/connections.js)
   const root = harnessHome('cursor');
   const sessionId = conversationIdOf(input);
+  if (event === 'sessionStart') prunePins(root);
   const paths = sessionPaths(root, { sessionId });
   switch (event) {
     case 'sessionStart': {

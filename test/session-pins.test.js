@@ -41,8 +41,14 @@ function recordingNode() {
 }
 const sent = (n) => n.calls.filter((c) => c.rpc === 'tools/call').map((c) => c.url);
 const home = () => mkdtempSync(join(tmpdir(), 'wybe-connect-pins-'));
-// Ages pins as if their last hook was at `at` (a pin's file time is when a hook last resolved it).
-const setPinSeen = (root, sids, at) => { for (const s of sids) utimesSync(join(root, 'state', 'sessions', `${s}.json`), at / 1000, at / 1000); };
+// Ages pins as if their last hook was at `at` (seenAt, and the file's time for a pin written before seenAt).
+const setPinSeen = (root, sids, at) => {
+  for (const s of sids) {
+    const f = join(root, 'state', 'sessions', `${s}.json`);
+    writeFileSync(f, JSON.stringify({ ...JSON.parse(readFileSync(f, 'utf8')), seenAt: at }));
+    utimesSync(f, at / 1000, at / 1000);
+  }
+};
 // What a SessionStart hook does: pin, and always the note, connected or not.
 const startSession = (root, sid) => {
   const p = sessionPaths(root, { sessionId: sid, env: {} });
@@ -647,6 +653,88 @@ test('session pins cursorSpool: a record goes only to the connection in use when
     a.server.close();
     b.server.close();
   }
+});
+
+// The proxy keeps no default of its own: an id-less call goes where a new session goes at that call, so a server that
+// first met A still delivers to B once B is the only connection and every pin is on it.
+test('session pins noCachedDefault: one connection left, every pin on it, an id-less call reaches it and its tools are listed', async () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  hookNode(root, 'S');
+  const node = recordingNode();
+  const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+  await proxy.handle(req(0, 'tools/list'));
+  await proxy.handle(remember(1, null));
+  saveConnection(root, grant('b'));
+  removeConnection(root, H('a'));
+  useConnection(root, H('b'), { sessionId: 'S' });
+  const r = await proxy.handle(remember(2, null));
+  const listed = (await proxy.handle(req(3, 'tools/list'))).result.tools.map((t) => t.name);
+  assert.deepEqual({ sent: sent(node), error: r.result.isError ?? false, lists: listed.includes('remember') }, { sent: [`${N('a')}/mcp`, `${N('b')}/mcp`], error: false, lists: true });
+});
+
+// A SessionStart may come before Claude Code has written the transcript file. The pin keeps that path anyway, so a move
+// in the session's first turn still counts its lines: A keeps them and B starts at the boundary.
+test('session pins firstTurnMove: a transcript written after SessionStart still gives the move its boundary', () => {
+  const root = home();
+  saveConnection(root, grant('b'));
+  saveConnection(root, grant('a'));
+  const dir = join(root, 'tr');
+  mkdirSync(dir, { recursive: true });
+  const tr = join(dir, 'S.jsonl');
+  assert.equal(hookNode(root, 'S', tr), H('a'));
+  for (let i = 0; i < 4; i++) appendFileSync(tr, `{"type":"user","message":"line ${i}"}\n`);
+  useConnection(root, H('b'), { sessionId: 'S' });
+  appendFileSync(tr, '{"type":"user","message":"line 4"}\n');
+  assert.equal(hookNode(root, 'S', tr), H('b'));
+  assert.deepEqual({ a: sessionLines(root, 'S', H('a')), b: sessionLines(root, 'S', H('b')) }, { a: [[0, 4]], b: [[4, null]] });
+});
+
+// The 24 hours of a pin with no transcript run from the last hook that resolved it; removing a connection or moving the
+// session rewrites the pin but does not renew it. Cursor's sessionStart prunes too.
+test('session pins pruneClock: remove and move do not renew a pin; Cursor prunes at sessionStart', async () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  saveConnection(root, grant('b'));
+  saveConnection(root, grant('c'));
+  hookNode(root, 'idle', join(root, 'never-written.jsonl'));
+  const day = 24 * 3600e3;
+  setPinSeen(root, ['idle'], Date.now() - day - 60e3);
+  useConnection(root, H('b'), { sessionId: 'idle' });
+  removeConnection(root, H('c'));
+  prunePins(root);
+  assert.equal(pinnedConnection(root, 'idle'), undefined, 'a move and a remove renewed the pin');
+  const cursorHome = join(root, 'cursor');
+  saveConnection(cursorHome, grant('a'));
+  sessionPaths(cursorHome, { sessionId: 'old', env: {} });
+  setPinSeen(cursorHome, ['old'], Date.now() - day - 60e3);
+  await runHook(HOOKS.cursor[0], { conversation_id: 'new', hook_event_name: 'sessionStart' }, root);
+  assert.equal(pinnedConnection(cursorHome, 'old'), undefined, 'Cursor\'s sessionStart did not prune');
+  assert.equal(pinnedConnection(cursorHome, 'new'), H('a'));
+});
+
+// take_task resolves the session it names, never the server's first default: after that default is removed, a call
+// naming S (on B) looks for its task instead of answering «Not connected».
+test('session pins takeTaskNamedSession: take_task naming S on B looks for the task after the first default is gone', async () => {
+  const root = home();
+  saveConnection(root, grant('b'));
+  saveConnection(root, grant('a'));
+  hookNode(root, 'S');
+  useConnection(root, H('b'), { sessionId: 'S' });
+  const proxy = createProxy({ root, env: {}, fetchImpl: recordingNode().fetchImpl });
+  await proxy.handle(req(0, 'tools/list'));
+  removeConnection(root, H('a'));
+  saveConnection(root, grant('c'));
+  const r = await proxy.handle(req(1, 'tools/call', { name: 'take_task', arguments: { task_id: 'task-1', session_id: 'S' } }));
+  assert.match(r.result.content[0].text, /^No task /);
+  // A server whose own default is none (WYBE_CONNECT_NODE names no connection here) still serves S by S's connection.
+  const elsewhere = createProxy({ root, env: { WYBE_CONNECT_NODE: H('z') }, fetchImpl: recordingNode().fetchImpl });
+  const named = await elsewhere.handle(req(3, 'tools/call', { name: 'take_task', arguments: { task_id: 'task-1', session_id: 'S' } }));
+  assert.match(named.result.content[0].text, /^No task /);
+  removeConnection(root, H('c'));
+  removeConnection(root, H('b'));
+  const none = await proxy.handle(req(2, 'tools/call', { name: 'take_task', arguments: { task_id: 'task-1' } }));
+  assert.match(none.result.content[0].text, /Not connected/, 'control: with no connection at all it is not connected');
 });
 
 // /resume through the real hook, with SessionStart inputs copied from a real Claude Code run: the resumed session

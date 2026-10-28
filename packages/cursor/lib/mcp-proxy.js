@@ -23,7 +23,7 @@ import { createInterface } from 'node:readline';
 import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
-import { NODE_ENV, connectionPaths, connectionNames, defaultConnection, findConnection, checkSave, saveConnection, sessionConnection, pinnedConnection, sessionIdRequired } from './connections.js';
+import { connectionPaths, connectionNames, checkSave, saveConnection, sessionConnection, pinnedConnection, sessionIdRequired } from './connections.js';
 import { spoolRemember, spoolDone } from './distil.js';
 import { redactValue } from './redact.js';
 import { renewStored } from './connect-cli.js';
@@ -146,30 +146,21 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
   let pending = null; // { nodeUrl, url, done, error }
   const shown = new Set(); // ids of tasks whose text this server has returned to the session
   let canElicit = false; // the client declared the elicitation capability at initialize
-  // With `root` (a harness home), the server uses one connection (lib/connections.js). It gets no
-  // session id, so it takes the hooks' rule without the session step: WYBE_CONNECT_NODE (unknown
-  // means none, never another), else the default. Once found, it keeps that connection for its
-  // life, as a session does; a `connect` from here switches it to the connection it made.
+  // With `root` (a harness home), a call that names no session takes the hooks' rule without the session step, at
+  // that call: WYBE_CONNECT_NODE (unknown means none, never another), else the default (a `connect` from here, or a
+  // renewal, makes that connection the default). It keeps no connection of its own, so one removed meanwhile is never used.
   // A call that names its session (session_id) resolves that session's connection at the call,
   // so `connect use <name> --session <id>` moves this server's calls along with the hooks.
   // The server remembers no session: its process outlives /clear, so it never stands for one. With
   // two or more connections, or a session pinned elsewhere, every call names its session; one that does not is refused.
   // It never writes a pin either (it knows no transcript): an id no hook has fixed goes where a new session goes.
   // With `paths`, it uses those as they are (a distil run's own connection, or the single layout).
-  let key = null;
   const idRequired = () => !!root && !fixed && sessionIdRequired(root);
   const current = (sessionId = null) => {
     if (fixed) return fixed;
     if (!root) return null;
-    if (sessionId) {
-      const k = sessionConnection(root, { sessionId, env });
-      return k ? connectionPaths(root, k) : null;
-    }
-    if (!key) {
-      const wanted = env[NODE_ENV];
-      key = wanted ? findConnection(root, wanted) : defaultConnection(root);
-    }
-    return key ? connectionPaths(root, key) : null;
+    const k = sessionConnection(root, { sessionId, env });
+    return k ? connectionPaths(root, k) : null;
   };
 
   const credentials = (sessionId = null) => {
@@ -211,7 +202,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
       saveCredentials(creds, fixed);
       return;
     }
-    key = saveConnection(root, creds);
+    saveConnection(root, creds);
   }
 
   function startConnect(nodeUrl) {
@@ -270,7 +261,6 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
       // Already connected to this node under the same fixed client: renew, never a second grant.
       const renewed = await renewStored(root, origin, { clientId, fetchImpl });
       if (renewed) {
-        key = renewed.key;
         notify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
         return text(`Connected to ${renewed.credentials.nodeUrl} (scopes: ${renewed.credentials.scopes.join(', ')}); the stored grant was renewed, no new sign-in. The Wybe tools are available now.`);
       }
