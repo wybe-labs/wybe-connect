@@ -13,7 +13,7 @@ import { readHookInput, failOpen, queueNotice } from '../lib/hook-io.js';
 import { fileURLToPath } from 'node:url';
 import { existsSync } from 'node:fs';
 import { harnessHome, loadCredentials, readJson } from '../lib/home.js';
-import { connectionNames, connectionPaths, markWritten, prunePins, sessionPaths, sessionNote } from '../lib/connections.js';
+import { connectionNames, connectionPaths, prunePins, sessionPaths, sessionNote } from '../lib/connections.js';
 import { buildContext } from '../lib/session-context.js';
 import { record, flushConversation, followupFor, conversationIdOf, spoolFile } from '../lib/cursor-spool.js';
 
@@ -50,9 +50,7 @@ try {
     case 'afterFileEdit':
     case 'afterAgentResponse':
     case 'postToolUse':
-      // the conversation is writing, spooled or not (pinned to none, or no sessions scope): its pin is no longer timed (prunePins)
       record(input, { paths });
-      markWritten(root, sessionId);
       break;
     case 'stop': {
       await flushElsewhere(root, paths.connection, sessionId, event, false);

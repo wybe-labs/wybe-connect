@@ -30,7 +30,7 @@
 
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { paths as legacyPaths, readJson, writeJsonPrivate, loadCredentials, saveCredentials } from './home.js';
 
 export const NODE_ENV = 'WYBE_CONNECT_NODE';
@@ -272,9 +272,6 @@ function pin(root, sessionId, key, { moved = false, transcriptPath = null, pendi
   const pending = pendingTranscript ?? (typeof was?.pendingTranscript === 'string' ? was.pendingTranscript : null);
   // A transcript that was not written yet when its path was first given counts once it exists.
   const path = transcriptPath ?? (typeof was?.transcriptPath === 'string' ? was.transcriptPath : null) ?? existingTranscript(pending);
-  // seenAt is when a hook last resolved the pin (prunePins), or when the person moved this session to a connection: a
-  // move is their choice for it now. A remove rewrites other pins without renewing them.
-  const seenAt = !moved && Number.isFinite(was?.seenAt) ? was.seenAt : Date.now();
   let segments = segmentsOf(was);
   const last = segments[segments.length - 1];
   if (!last || last.connection !== key || last.nodeUrl !== nodeUrl) {
@@ -284,7 +281,7 @@ function pin(root, sessionId, key, { moved = false, transcriptPath = null, pendi
     if (last && last.fromLine >= fromLine) segments = segments.filter((s) => s.fromLine < fromLine);
     segments = [...segments, { connection: key, nodeUrl, fromLine }];
   }
-  writeJsonPrivate(pinPath(root, sessionId), { connection: key, nodeUrl, ...(moved ? { moved: true } : {}), ...(path ? { transcriptPath: path } : pending ? { pendingTranscript: pending } : {}), seenAt, ...(was?.written === true ? { written: true } : {}), segments });
+  writeJsonPrivate(pinPath(root, sessionId), { connection: key, nodeUrl, ...(moved ? { moved: true } : {}), ...(path ? { transcriptPath: path } : pending ? { pendingTranscript: pending } : {}), segments });
 }
 
 /**
@@ -360,6 +357,8 @@ export function sessionTranscript(root, sessionId) {
  * Whether a call must say which session it is: always with two or more connections, and with one while any
  * session's pin sends elsewhere (to none, or to a name no longer here). A call that named no session could then be
  * that session's, and it must never reach the one connection left. With one connection and every pin on it, no.
+ * Pins are never pruned by time (prunePins), so a stale pin with no transcript, pinned to none or moved, keeps the id
+ * required until `connect use` rewrites it. That cost is accepted: the model passes the id from its SessionStart note.
  */
 export function sessionIdRequired(root) {
   const names = knownKeys(root);
@@ -373,42 +372,21 @@ export function sessionIdRequired(root) {
   });
 }
 
-/** How long a pin with no known transcript outlives the last hook that resolved it: the grace for a session that has not written a line yet. */
-export const PIN_GRACE_MS = 24 * 60 * 60 * 1000;
-
 /**
- * Marks a session as having written, for a harness with no transcript (Cursor spools its records): from then on its pin
- * is not timed, so a move or a pin to none holds however long the conversation is idle.
+ * Deletes the pins whose transcript is gone: a pin lives as long as its transcript (a pending one counts once it
+ * exists). Nothing else prunes a pin, at any age: one with no transcript file (Cursor, Codex with a null
+ * transcript_path, a session that has not written yet) stays until `connect use` rewrites it, so pruning never changes
+ * where a live session's lines or calls go.
  */
-export function markWritten(root, sessionId) {
-  if (!sessionId) return;
-  const was = readJson(pinPath(root, sessionId));
-  if (was && 'connection' in was && was.written !== true) writeJsonPrivate(pinPath(root, sessionId), { ...was, written: true });
-}
-
-/**
- * How long a written pin with no transcript (Cursor) outlives the last hook that resolved it: a conversation idle this
- * long is over, and its pin must not keep id-less calls refused (sessionIdRequired) for good.
- */
-export const WRITTEN_PIN_IDLE_MS = 30 * 24 * 60 * 60 * 1000;
-
-/**
- * Deletes the pins whose transcript is gone (a pin lives as long as its transcript; a pending one counts once it
- * exists). One with no transcript is timed by PIN_GRACE_MS until it has written, the grace for a session that has not
- * written a line yet, and by WRITTEN_PIN_IDLE_MS after: both from the last hook that resolved it (seenAt; a pin written
- * before it has its file's time).
- */
-export function prunePins(root, now = Date.now()) {
+export function prunePins(root) {
   const dir = join(root, 'state', 'sessions');
   if (!existsSync(dir)) return;
   for (const f of readdirSync(dir)) {
     if (!f.endsWith('.json')) continue;
     const file = join(dir, f);
     const p = readJson(file);
-    const seen = Number.isFinite(p?.seenAt) ? p.seenAt : statSync(file).mtimeMs;
     const transcript = typeof p?.transcriptPath === 'string' ? p.transcriptPath : existingTranscript(p?.pendingTranscript);
-    const gone = transcript ? !existsSync(transcript) : now - seen > (p?.written === true ? WRITTEN_PIN_IDLE_MS : PIN_GRACE_MS);
-    if (gone) rmSync(file, { force: true });
+    if (transcript && !existsSync(transcript)) rmSync(file, { force: true });
   }
 }
 
@@ -481,8 +459,7 @@ export function sessionConnection(root, { sessionId = null, env = process.env } 
 
 /**
  * The connection this session uses, fixed for the session on a hook's first call. A hook passes the session's
- * transcript, which the pin keeps: a move counts its lines, and the pin lives as long as it does. A pin with no
- * transcript yet has its time renewed, so prunePins keeps it while hooks still resolve it.
+ * transcript, which the pin keeps: a move counts its lines, and the pin lives as long as it does.
  */
 export function resolveSession(root, { sessionId = null, env = process.env, transcriptPath = null } = {}) {
   const transcript = existingTranscript(transcriptPath);
@@ -490,8 +467,6 @@ export function resolveSession(root, { sessionId = null, env = process.env, tran
   const was = sessionId ? readJson(pinPath(root, sessionId)) : null;
   if (was && 'connection' in was) {
     recordTranscript(root, sessionId, transcriptPath);
-    const now = readJson(pinPath(root, sessionId));
-    if (now && typeof now.transcriptPath !== 'string') writeJsonPrivate(pinPath(root, sessionId), { ...now, seenAt: Date.now() });
     return key;
   }
   // an unknown WYBE_CONNECT_NODE is pinned too: that session stays unconnected, never on another node
