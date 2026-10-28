@@ -8,14 +8,15 @@
 import { fileURLToPath } from 'node:url';
 import { readHookInput, failOpen } from '../lib/hook-io.js';
 import { harnessHome, loadCredentials, readJson } from '../lib/home.js';
-import { sessionPaths, sessionNote } from '../lib/connections.js';
+import { prunePins, sessionPaths, sessionNote } from '../lib/connections.js';
 import { buildContext } from '../lib/session-context.js';
 
 try {
   const input = await readHookInput();
   const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
   const root = harnessHome('codex');
-  const p = sessionPaths(root, { sessionId });
+  prunePins(root);
+  const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null });
   let context = buildContext({ credentials: loadCredentials(p), cached: readJson(p.openQuestions) });
   const note = sessionNote(root, p.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
   context = [context, note].filter(Boolean).join('\n');

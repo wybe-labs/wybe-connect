@@ -7,8 +7,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { createProxy } from '../lib/mcp-proxy.js';
-import { removeConnection, saveConnection, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
+import { createProxy, NO_SESSION } from '../lib/mcp-proxy.js';
+import { pinnedConnection, removeConnection, saveConnection, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
 
 const A = 'https://node-a.example.invalid';
 const B = 'https://node-b.example.invalid';
@@ -99,12 +99,11 @@ test('a session moved to a connection that was removed and then added again: a s
   useConnection(root, 'node-a.example.invalid');
   const node = recordingNode();
   const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
-  const r = await proxy.handle(remember(1, null));
+  // Two connections again: a call names its session, and the one opened meanwhile delivers by its id.
+  assert.equal((await proxy.handle(remember(1, null))).result.content[0].text, NO_SESSION);
+  const r = await proxy.handle(remember(2, 'sess-new'));
   assert.notEqual(r.result.isError, true, r.result.content?.[0]?.text);
   assert.deepEqual(sentTo(node), [`${A}/mcp`]);
-  // Positive control: a session moved to B after the re-add is again told apart.
-  useConnection(root, 'node-b.example.invalid', { sessionId: 'sess-later' });
-  assert.equal((await proxy.handle(remember(2, null))).result.isError, true);
 });
 
 test('a session opened with one connection is told its id, so it still works once another session is moved elsewhere', async () => {
@@ -123,33 +122,34 @@ test('a session opened with one connection is told its id, so it still works onc
   assert.deepEqual(sentTo(node), [`${A}/mcp`]);
 });
 
-test('a session moved to the default connection: a call without session_id goes there, nothing to tell apart', async () => {
+test('two connections, a session moved to the default: a call without session_id is still refused, never guessed', async () => {
   const root = twoConnections();
   useConnection(root, 'node-a.example.invalid', { sessionId: 'sess-one' });
   const node = recordingNode();
   const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
-  await proxy.handle(remember(1, null));
+  assert.equal((await proxy.handle(remember(1, null))).result.content[0].text, NO_SESSION);
+  await proxy.handle(remember(2, 'sess-one'));
   assert.deepEqual(sentTo(node), [`${A}/mcp`]);
 });
 
-test('after a move elsewhere, a session_id no session on this machine has is refused and reaches no node', async () => {
+test('a session_id no session on this machine has goes where a new session goes, and is fixed there', async () => {
   const root = twoConnections();
   useConnection(root, 'node-b.example.invalid', { sessionId: 'sess-two' });
   const node = recordingNode();
   const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
-  const r = await proxy.handle(remember(1, 'sess-two-typo'));
-  assert.equal(r.result.isError, true);
-  assert.match(r.result.content[0].text, /session_id/);
-  assert.deepEqual(sentTo(node), []);
+  await proxy.handle(remember(1, 'sess-new'));
+  assert.equal(pinnedConnection(root, 'sess-new'), 'node-a.example.invalid');
+  assert.deepEqual(sentTo(node), [`${A}/mcp`]);
 });
 
-test('no session moved: a call without session_id goes to the default, as before; tools/list offers session_id', async () => {
+test('no session moved, two connections: a call without session_id is refused; tools/list requires session_id', async () => {
   const root = twoConnections();
   const node = recordingNode();
   const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
-  await proxy.handle(remember(1, null));
-  assert.deepEqual(sentTo(node), [`${A}/mcp`]);
+  assert.equal((await proxy.handle(remember(1, null))).result.content[0].text, NO_SESSION);
+  assert.deepEqual(sentTo(node), []);
   const list = await proxy.handle(req(2, 'tools/list'));
   const tool = list.result.tools.find((t) => t.name === 'remember');
   assert.equal(tool.inputSchema.properties.session_id.type, 'string');
+  assert.deepEqual(tool.inputSchema.required, ['session_id']);
 });

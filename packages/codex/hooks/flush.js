@@ -18,7 +18,7 @@ try {
     const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
     const summary = await flush({
       harness: 'codex',
-      paths: sessionPaths(harnessHome('codex'), { sessionId }),
+      paths: sessionPaths(harnessHome('codex'), { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null }),
       transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null,
       sessionId,
       cwd: typeof input.cwd === 'string' ? input.cwd : null,

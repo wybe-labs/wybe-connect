@@ -22,19 +22,26 @@ import { createInterface } from 'node:readline';
 import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
-import { NODE_ENV, connectionPaths, defaultConnection, findConnection, checkSave, saveConnection, resolveSession, pinnedConnection, sessionMovedElsewhere } from './connections.js';
+import { NODE_ENV, connectionPaths, connectionNames, defaultConnection, findConnection, checkSave, saveConnection, resolveSession, pinnedConnection } from './connections.js';
 import { spoolRemember, spoolDone } from './distil.js';
 import { redactValue } from './redact.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'wybe', version: '0.2.0' });
 
-/** A node tool as offered here: with an optional session_id, which routes the call and never leaves the machine. */
-const withSessionId = (tool) => {
+/**
+ * A node tool as offered here: with a session_id, which routes the call and never leaves the machine. Required
+ * while this machine has two or more connections, optional with one.
+ */
+const withSessionId = (tool, required) => {
   const schema = tool?.inputSchema;
   if (!schema || schema.type !== 'object') return tool;
-  const session = { type: 'string', description: 'This session\'s id, as the SessionStart note gives it. Required once a session on this machine was moved with connect use --session.' };
-  return { ...tool, inputSchema: { ...schema, properties: { ...(schema.properties ?? {}), session_id: session } } };
+  const session = { type: 'string', description: 'This session\'s id, as the SessionStart note gives it. Required while the person has two or more connections.' };
+  const withId = { ...schema, properties: { ...(schema.properties ?? {}), session_id: session } };
+  if (required) withId.required = [...new Set([...(Array.isArray(schema.required) ? schema.required : []), 'session_id'])];
+  return { ...tool, inputSchema: withId };
 };
+
+export const NO_SESSION = 'Not delivered: pass session_id from the SessionStart note.';
 
 export const CONNECT_TOOL = Object.freeze({
   name: 'connect',
@@ -117,11 +124,11 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
   // life, as a session does; a `connect` from here switches it to the connection it made.
   // A call that names its session (session_id) resolves that session's connection at the call,
   // so `connect use <name> --session <id>` moves this server's calls along with the hooks.
-  // A stdio server serves one session, so once a call has named it, a later call that leaves the
-  // optional session_id out is still that session's: never sent to the default in its place.
+  // The server remembers no session: its process outlives /clear, so it never stands for one. With
+  // two or more connections every call names its session, and one that does not is refused.
   // With `paths`, it uses those as they are (a distil run's own connection, or the single layout).
   let key = null;
-  let served = null;
+  const severalConnections = () => !!root && !fixed && connectionNames(root).length >= 2;
   const current = (sessionId = null) => {
     if (fixed) return fixed;
     if (!root) return null;
@@ -311,7 +318,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         if (!credentials()) return reply({ tools: [CONNECT_TOOL] });
         const out = await upstream('tools/list', {});
         const tools = out.ok && Array.isArray(out.result?.tools) ? out.result.tools.filter((t) => t?.name !== CONNECT_TOOL.name) : [];
-        return reply({ tools: [...(root && !fixed ? tools.map(withSessionId) : tools), CONNECT_TOOL] });
+        return reply({ tools: [...(root && !fixed ? tools.map((t) => withSessionId(t, severalConnections())) : tools), CONNECT_TOOL] });
       }
       case 'tools/call': {
         const name = params?.name;
@@ -319,23 +326,12 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         const raw = params?.arguments ?? {};
         const plain = typeof raw === 'object' && raw !== null && !Array.isArray(raw);
         const { session_id: given, ...rest } = plain ? raw : {};
-        const named = root && !fixed && typeof given === 'string' && given.trim() ? given.trim() : null;
-        if (named) served = named;
-        const sessionId = named ?? served;
-        // Once a session was moved to another connection, a call that names no session, or one this machine
-        // has never seen, could be that session's: refused, never sent to the default.
-        const unseen = !!sessionId && pinnedConnection(root, sessionId) === undefined;
+        const sessionId = root && !fixed && typeof given === 'string' && given.trim() ? given.trim() : null;
+        // With two or more connections a call says which session it is; one that does not is never guessed.
+        if (root && !fixed && !sessionId && severalConnections()) return reply(text(NO_SESSION, true));
         // A session pinned to none (its connection was removed) fails closed: no default, no name added again.
         if (sessionId && pinnedConnection(root, sessionId) === null) {
           return reply(text(`Not delivered: this session sends to no connection. Ask the person which connection to use, then run \`connect use <name> --session ${sessionId}\` (the SessionStart note gives the full command).`, true));
-        }
-        if (root && !fixed && (!sessionId || unseen)) {
-          current(); // fixes key: where a call naming no known session goes
-          if (sessionMovedElsewhere(root, key)) {
-            return reply(text(unseen
-              ? 'Not delivered: no session on this machine has that session_id. Call it again with session_id set to this session\'s id (the SessionStart note gives it).'
-              : 'Not delivered: a session on this machine was moved to another connection, so this call must say which session it is. Call it again with session_id set to this session\'s id (the SessionStart note gives it).', true));
-          }
         }
         if (!credentials(sessionId)) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
         // Every argument passes through redactValue before it leaves the machine; one the walker

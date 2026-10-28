@@ -5,7 +5,11 @@
 //   connections/<name>/credentials.json the grant (same shape as the old single credentials.json)
 //   connections/<name>/queue/           payloads this node has not taken yet
 //   connections/<name>/open-questions.json, surfaced-questions.json
-//   state/sessions/<session>.json       { connection } the connection a session uses, fixed at its first hook
+//   state/sessions/<session>.json       { connection, nodeUrl, moved?, transcriptPath?, segments } the connection a
+//                                       session uses, fixed at its first hook; segments [{ connection, nodeUrl,
+//                                       fromLine }] say which node each of its transcript's lines belongs to
+// A session is the harness's session_id as the hook receives it: /clear gives a new one (a new session), /resume
+// keeps it (test/fixtures/claude-code-session-start.jsonl, a real SessionStart input with source "resume").
 //   state/<transcript-id>.json, spool/  shared: a transcript belongs to one session
 // <name> is the node's host (dittfirma.wybe.me; a port becomes _8443) unless connect was given --name.
 //
@@ -25,7 +29,7 @@
 
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, renameSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync } from 'node:fs';
 import { paths as legacyPaths, readJson, writeJsonPrivate, loadCredentials, saveCredentials } from './home.js';
 
 export const NODE_ENV = 'WYBE_CONNECT_NODE';
@@ -217,10 +221,41 @@ export function saveConnection(root, credentials, { name = null } = {}) {
   return key;
 }
 
-/** Fixes a session to a connection and the node it is for, so a name reused later does not move it. */
-function pin(root, sessionId, key, { moved = false } = {}) {
+/** Lines in a transcript file (a line is written whole, so the count is a line boundary), or null when it cannot be read. */
+function linesIn(path) {
+  try {
+    const buf = readFileSync(path);
+    let n = 0;
+    for (let i = 0; i < buf.length; i++) if (buf[i] === 0x0a) n += 1;
+    return n;
+  } catch {
+    return null;
+  }
+}
+
+/** A pin's segments, oldest first: [{ connection, nodeUrl, fromLine }]. A pin written before segments is one, from line 0. */
+function segmentsOf(pinned) {
+  if (!pinned || !('connection' in pinned)) return [];
+  if (!Array.isArray(pinned.segments)) return [{ connection: pinned.connection, nodeUrl: pinned.nodeUrl ?? null, fromLine: 0 }];
+  return pinned.segments.filter((s) => s && typeof s === 'object' && Number.isInteger(s.fromLine) && s.fromLine >= 0);
+}
+
+/**
+ * Fixes a session to a connection and the node it is for, so a name reused later does not move it. A move starts a
+ * segment at the transcript's line count: the lines before it stay with the connection the session was on.
+ */
+function pin(root, sessionId, key, { moved = false, transcriptPath = null } = {}) {
   const nodeUrl = key ? readGrant(connectionPaths(root, key))?.nodeUrl ?? null : null;
-  writeJsonPrivate(pinPath(root, sessionId), { connection: key, nodeUrl, ...(moved ? { moved: true } : {}) });
+  const was = readJson(pinPath(root, sessionId));
+  const path = transcriptPath ?? (typeof was?.transcriptPath === 'string' ? was.transcriptPath : null);
+  let segments = segmentsOf(was);
+  const last = segments[segments.length - 1];
+  if (!last || last.connection !== key || last.nodeUrl !== nodeUrl) {
+    const fromLine = last && path ? linesIn(path) ?? last.fromLine : 0;
+    if (last && last.fromLine >= fromLine) segments = segments.filter((s) => s.fromLine < fromLine);
+    segments = [...segments, { connection: key, nodeUrl, fromLine }];
+  }
+  writeJsonPrivate(pinPath(root, sessionId), { connection: key, nodeUrl, ...(moved ? { moved: true } : {}), ...(path ? { transcriptPath: path } : {}), segments });
 }
 
 /**
@@ -236,21 +271,58 @@ function livePin(root, pinned) {
 }
 
 /**
- * Whether a session was sent by `use --session` (its pin says moved) to a connection that still sends and is not
- * `key`: a call that names no session could then be that session's, bound for another node. A move to none, or
- * to `key` itself, leaves nothing to tell apart (a server that knows it serves a session pinned to none refuses
- * on its own, lib/mcp-proxy.js).
+ * Whether a moved session's earlier lines follow it to the connection it moves to. They stay: each line goes to the
+ * node the session was on when it was written. Flipping this gives a later segment every line from 0 instead.
  */
-export function sessionMovedElsewhere(root, key) {
-  const dir = join(root, 'state', 'sessions');
-  if (!existsSync(dir)) return false;
-  return readdirSync(dir).some((f) => {
-    if (!f.endsWith('.json')) return false;
-    const p = readJson(join(dir, f));
-    if (p?.moved !== true || !('connection' in p)) return false;
-    const live = livePin(root, p);
-    return live !== null && live !== key;
+const EARLIER_LINES_FOLLOW_A_MOVE = false;
+
+/**
+ * The lines of a session's transcript that belong to connection `key`: [[fromLine, toLine]] per segment the session
+ * spent there while `key` still holds that segment's node (toLine null: still open), oldest first. Null while the
+ * session is not fixed (its lines are the person's, for any connection). A removed connection's lines go nowhere.
+ */
+export function sessionLines(root, sessionId, key) {
+  if (!sessionId) return null;
+  const pinned = readJson(pinPath(root, sessionId));
+  if (!pinned || !('connection' in pinned)) return null;
+  const segments = segmentsOf(pinned);
+  const out = [];
+  segments.forEach((s, i) => {
+    if (livePin(root, s) !== key) return;
+    out.push([EARLIER_LINES_FOLLOW_A_MOVE && i > 0 ? 0 : s.fromLine, i + 1 < segments.length ? segments[i + 1].fromLine : null]);
   });
+  return out;
+}
+
+/** Only a transcript that exists: one not written yet must not get its session's pin pruned (prunePins). */
+const existingTranscript = (path) => (typeof path === 'string' && path && existsSync(path) ? path : null);
+
+/** Keeps a fixed session's transcript in its pin (a hook's input, or a distil note), so a move can count its lines. */
+export function recordTranscript(root, sessionId, transcriptPath) {
+  const path = existingTranscript(transcriptPath);
+  if (!sessionId || !path) return;
+  const was = readJson(pinPath(root, sessionId));
+  if (was && 'connection' in was && was.transcriptPath !== path) writeJsonPrivate(pinPath(root, sessionId), { ...was, transcriptPath: path });
+}
+
+/** The connection a session sends to by its pin (see pinnedConnection) and its transcript as a hook gave it, or nulls. */
+export function sessionTranscript(root, sessionId) {
+  const pinned = sessionId ? readJson(pinPath(root, sessionId)) : null;
+  return {
+    connection: pinned && 'connection' in pinned ? livePin(root, pinned) : null,
+    transcriptPath: typeof pinned?.transcriptPath === 'string' ? pinned.transcriptPath : null,
+  };
+}
+
+/** Deletes the pins whose transcript is gone: a pin lives as long as its transcript. One with no known transcript stays. */
+export function prunePins(root) {
+  const dir = join(root, 'state', 'sessions');
+  if (!existsSync(dir)) return;
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.json')) continue;
+    const p = readJson(join(dir, f));
+    if (typeof p?.transcriptPath === 'string' && !existsSync(p.transcriptPath)) rmSync(join(dir, f), { force: true });
+  }
 }
 
 function mustFind(root, ref) {
@@ -269,8 +341,9 @@ export function useConnection(root, ref, { sessionId = null } = {}) {
 
 /**
  * Deletes the local grant and what is queued for it. The pairing on the node stays until revoked there. A pin is
- * never deleted: a session moved to it is pinned to none, so it sends nowhere until the person chooses a
- * connection with `use <name> --session <id>`, never to the default or to a connection added again under the name.
+ * never deleted: a session on it is pinned to none, so it sends nowhere until the person chooses a connection
+ * with `use <name> --session <id>`, never to the default or to a connection added again under the name. A
+ * session's lines from its time on the removed connection go nowhere, the same way.
  */
 export function removeConnection(root, ref) {
   const key = mustFind(root, ref);
@@ -282,7 +355,10 @@ export function removeConnection(root, ref) {
     for (const f of readdirSync(dir)) {
       if (!f.endsWith('.json')) continue;
       const p = readJson(join(dir, f));
-      if (p?.moved === true && p.connection === key) writeJsonPrivate(join(dir, f), { connection: null, nodeUrl: null, moved: true });
+      if (!p || !('connection' in p)) continue;
+      const segments = segmentsOf(p).map((s) => (s.connection === key ? { connection: null, nodeUrl: null, fromLine: s.fromLine } : s));
+      const top = p.connection === key ? { connection: null, nodeUrl: null } : { connection: p.connection, nodeUrl: p.nodeUrl ?? null };
+      writeJsonPrivate(join(dir, f), { ...p, ...top, segments });
     }
   }
   return { key, dropped };
@@ -304,15 +380,22 @@ export function connectionNames(root) {
   return knownKeys(root);
 }
 
-/** The connection this session uses (see the order at the top), fixed for the session on first call. */
-export function resolveSession(root, { sessionId = null, env = process.env } = {}) {
+/**
+ * The connection this session uses (see the order at the top), fixed for the session on first call. A hook passes
+ * the session's transcript, which the pin keeps: a move counts its lines, and the pin lives as long as it does.
+ */
+export function resolveSession(root, { sessionId = null, env = process.env, transcriptPath = null } = {}) {
   migrateLegacy(root);
+  const transcript = existingTranscript(transcriptPath);
   const pinned = pinnedConnection(root, sessionId);
-  if (pinned !== undefined) return pinned;
+  if (pinned !== undefined) {
+    recordTranscript(root, sessionId, transcript);
+    return pinned;
+  }
   const wanted = env[NODE_ENV];
   const key = wanted ? findConnection(root, wanted) : defaultConnection(root);
   // an unknown WYBE_CONNECT_NODE is pinned too: that session stays unconnected, never on another node
-  if (sessionId && (key || wanted)) pin(root, sessionId, key);
+  if (sessionId && (key || wanted)) pin(root, sessionId, key, { transcriptPath: transcript });
   return key;
 }
 
@@ -329,8 +412,8 @@ export function sessionNote(root, key, { sessionId = null, command }) {
   if (!key && sessionId) return `This session is not connected yet; its session_id is ${sessionId}.`;
   if (!key || (!others.length && !sessionId)) return null;
   if (!others.length) return `This session sends to the connection ${key}; its session_id is ${sessionId}.`;
-  const how = sessionId ? ` If the person asks to send this session to another one, run: ${command} use <name> --session ${sessionId}` : '';
-  return `This session sends to the connection ${key}; the person is also connected to ${others.join(', ')}.${how}`;
+  if (!sessionId) return `This session sends to the connection ${key}; the person is also connected to ${others.join(', ')}.`;
+  return `This session sends to the connection ${key}; the person is also connected to ${others.join(', ')}. Its session_id is ${sessionId}: pass it as session_id in every Wybe tool call. If the person asks to send this session to another one, run: ${command} use <name> --session ${sessionId}`;
 }
 
 /** The paths for this session's connection; credentials, queue and caches are null when it has none. */
