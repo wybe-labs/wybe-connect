@@ -252,8 +252,9 @@ function pin(root, sessionId, key, { moved = false, transcriptPath = null, pendi
   const pending = pendingTranscript ?? (typeof was?.pendingTranscript === 'string' ? was.pendingTranscript : null);
   // A transcript that was not written yet when its path was first given counts once it exists.
   const path = transcriptPath ?? (typeof was?.transcriptPath === 'string' ? was.transcriptPath : null) ?? existingTranscript(pending);
-  // seenAt is when a hook last resolved the pin (prunePins); a move or a remove rewrites the pin without renewing it.
-  const seenAt = Number.isFinite(was?.seenAt) ? was.seenAt : Date.now();
+  // seenAt is when a hook last resolved the pin (prunePins), or when the person moved this session to a connection: a
+  // move is their choice for it now. A remove rewrites other pins without renewing them.
+  const seenAt = !moved && Number.isFinite(was?.seenAt) ? was.seenAt : Date.now();
   let segments = segmentsOf(was);
   const last = segments[segments.length - 1];
   if (!last || last.connection !== key || last.nodeUrl !== nodeUrl) {

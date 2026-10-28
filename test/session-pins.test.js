@@ -667,20 +667,23 @@ test('session pins firstTurnMove: a transcript written after SessionStart still 
   assert.deepEqual({ a: sessionLines(root, 'S', H('a')), b: sessionLines(root, 'S', H('b')) }, { a: [[0, 4]], b: [[4, null]] });
 });
 
-// The 24 hours of a pin with no transcript run from the last hook that resolved it; removing a connection or moving the
-// session rewrites the pin but does not renew it. Cursor's sessionStart prunes too.
-test('session pins pruneClock: remove and move do not renew a pin; Cursor prunes at sessionStart', async () => {
+// The 24 hours of a pin with no transcript run from the last hook that resolved it, or from the person's own move of
+// that session; removing a connection, or moving another session, rewrites the pin but does not renew it. Cursor's
+// sessionStart prunes too.
+test('session pins pruneClock: a move renews only its own pin, a remove none; Cursor prunes at sessionStart', async () => {
   const root = home();
   saveConnection(root, grant('a'));
   saveConnection(root, grant('b'));
   saveConnection(root, grant('c'));
   hookNode(root, 'idle', join(root, 'never-written.jsonl'));
+  hookNode(root, 'moved', join(root, 'never-written-2.jsonl'));
   const day = 24 * 3600e3;
-  setPinSeen(root, ['idle'], Date.now() - day - 60e3);
-  useConnection(root, H('b'), { sessionId: 'idle' });
+  setPinSeen(root, ['idle', 'moved'], Date.now() - day - 60e3);
+  useConnection(root, H('b'), { sessionId: 'moved' });
   removeConnection(root, H('c'));
   prunePins(root);
-  assert.equal(pinnedConnection(root, 'idle'), undefined, 'a move and a remove renewed the pin');
+  assert.equal(pinnedConnection(root, 'moved'), H('b'), 'the person\'s move of the session did not renew its pin');
+  assert.equal(pinnedConnection(root, 'idle'), undefined, 'a remove or another session\'s move renewed the pin');
   const cursorHome = join(root, 'cursor');
   saveConnection(cursorHome, grant('a'));
   sessionPaths(cursorHome, { sessionId: 'old', env: {} });
@@ -766,6 +769,9 @@ test('session pins writtenExpires: written pins idle past their month are pruned
   setPinSeen(root, ['S1', 'S2'], Date.now() - 25 * 3600e3);
   prunePins(root);
   assert.deepEqual({ kept: pinnedConnection(root, 'S1'), required: sessionIdRequired(root) }, { kept: null, required: true }, 'control: a day idle, the written pins hold');
+  setPinSeen(root, ['S1', 'S2'], Date.now() - 29 * 24 * 3600e3);
+  prunePins(root);
+  assert.deepEqual({ kept: pinnedConnection(root, 'S1'), required: sessionIdRequired(root) }, { kept: null, required: true }, 'control: 29 days idle, the written pins hold');
   setPinSeen(root, ['S1', 'S2'], Date.now() - 31 * 24 * 3600e3);
   prunePins(root);
   assert.deepEqual({ S1: pinnedConnection(root, 'S1'), S2: pinnedConnection(root, 'S2'), required: sessionIdRequired(root) }, { S1: undefined, S2: undefined, required: false });
@@ -826,6 +832,32 @@ test('session pins writtenSurvivesMove: a move after the conversation wrote keep
   prunePins(root);
   assert.equal(pinnedConnection(root, 'S'), H('b'));
 });
+// `connect use B --session S` is the person choosing B for S now: S stays on B for the time a pin has from then, however
+// long S was idle before the move.
+test('session pins moveRenews: a session idle 29 days and then moved is on B 1.5 days later', () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  saveConnection(root, grant('b'));
+  useConnection(root, H('a'));
+  sessionPaths(root, { sessionId: 'S', env: {} });
+  markWritten(root, 'S');
+  setPinSeen(root, ['S'], Date.now() - 29 * 24 * 3600e3);
+  useConnection(root, H('b'), { sessionId: 'S' });
+  prunePins(root, Date.now() + 1.5 * 24 * 3600e3);
+  assert.equal(pinnedConnection(root, 'S'), H('b'));
+});
+
+// Which Cursor hooks are the conversation writing: the four that record, never sessionStart or stop alone.
+test('session pins cursorWhichWrite: only the recording hooks mark a Cursor pin written', async () => {
+  const root = home();
+  const ch = join(root, 'cursor');
+  useConnection(ch, saveConnection(ch, grant('a')));
+  const events = ['beforeSubmitPrompt', 'afterFileEdit', 'afterAgentResponse', 'postToolUse', 'sessionStart', 'stop'];
+  for (const e of events) await runHook(HOOKS.cursor[0], { conversation_id: e, hook_event_name: e, workspace_roots: [], prompt: 'x', status: 'completed', loop_count: 0 }, root);
+  const written = Object.fromEntries(events.map((e) => [e, JSON.parse(readFileSync(join(ch, 'state', 'sessions', `${e}.json`), 'utf8')).written === true]));
+  assert.deepEqual(written, { beforeSubmitPrompt: true, afterFileEdit: true, afterAgentResponse: true, postToolUse: true, sessionStart: false, stop: false });
+});
+
 test('session pins pendingWritten: a transcript first given before it existed keeps its pin once written, a day later too', () => {
   const root = home();
   saveConnection(root, grant('a'));
