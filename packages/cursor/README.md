@@ -28,7 +28,7 @@ session is not reported and gets no tasks.
 Cursor passes `transcript_path` only when transcripts are enabled, and does not document the
 file's format. The hook payloads are documented, so the adapter builds the session from them
 (`lib/cursor-spool.js`): each hook appends one record to
-`~/.wybe-connect/cursor/spool/<conversation>.jsonl`, **redacted before it is written**, and `stop`
+`~/.wybe-connect/cursor/connections/<name>/spool/<conversation>.jsonl` (the connection in use when it was written), **redacted before it is written**, and `stop`
 turns the spool into one `report_session`.
 
 | Hook | Recorded | Scope |

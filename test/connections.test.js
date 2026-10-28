@@ -321,7 +321,7 @@ test('migrateLegacy: an old credentials.json that cannot be read right now stays
   assert.equal(loadCredentials(connectionPaths(root, 'node-a.example.invalid')).accessToken, TOKEN_A);
 });
 
-test('sessionPaths: credentials, queue and question caches per connection; cursors and spool shared; none when not connected', () => {
+test('sessionPaths: credentials, queue, question caches and spool per connection; cursors shared; none when not connected', () => {
   const root = home();
   const none = sessionPaths(root, { sessionId: 'p0', env: {} });
   assert.equal(none.connection, null);
@@ -335,5 +335,5 @@ test('sessionPaths: credentials, queue and question caches per connection; curso
   assert.notEqual(a.queue, b.queue);
   assert.notEqual(a.openQuestions, b.openQuestions);
   assert.equal(a.cursor('t'), b.cursor('t'));
-  assert.equal(a.spool, b.spool);
+  assert.notEqual(a.spool, b.spool);
 });

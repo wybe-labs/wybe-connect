@@ -190,7 +190,7 @@ test('import: a node answer carrying import_request is handed on, and pollImport
 });
 
 // ------------------------------------------------------------------ several connections (lib/connections.js)
-const { connectionNames, connectionPaths, defaultConnection, saveConnection, useConnection } = await import('../lib/connections.js');
+const { connectionNames, connectionPaths, defaultConnection, saveConnection, sessionPaths, useConnection } = await import('../lib/connections.js');
 const A = 'https://node-a.example.invalid';
 const B = 'https://node-b.example.invalid';
 const TOK_A = ['wat_', 'a'.repeat(40)].join('');
@@ -243,9 +243,11 @@ test('connections: a new session goes by WYBE_CONNECT_NODE, else the default, an
   const withId = (id, sid) => req(id, 'tools/call', { name: 'remember', arguments: { items: [{ content: 'x' }], session_id: sid } });
   await named.handle(withId(1, 's1'));
   await byDefault.handle(withId(2, 's2'));
+  sessionPaths(root, { sessionId: 's2', env: {} }); // its hook fixes it (the proxy never does)
   useConnection(root, 'node-a.example.invalid'); // the default moves; a session already fixed keeps its own
   await byDefault.handle(withId(3, 's2'));
-  assert.deepEqual(node.calls.filter((c) => c.rpc === 'tools/call').map((c) => c.auth), [`Bearer ${TOK_A}`, `Bearer ${TOK_B}`, `Bearer ${TOK_B}`]);
+  await byDefault.handle(withId(5, 's3')); // one no hook has fixed follows the default
+  assert.deepEqual(node.calls.filter((c) => c.rpc === 'tools/call').map((c) => c.auth), [`Bearer ${TOK_A}`, `Bearer ${TOK_B}`, `Bearer ${TOK_B}`, `Bearer ${TOK_A}`]);
   assert.equal((await byDefault.handle(remember(4))).result.content[0].text, NO_SESSION, 'two connections: a call names its session');
   const unknown = createProxy({ root, env: { WYBE_CONNECT_NODE: 'node-c.example.invalid' }, fetchImpl: node.fetchImpl });
   assert.deepEqual((await unknown.handle(req(4, 'tools/list'))).result.tools.map((t) => t.name), ['connect'], 'never another node');

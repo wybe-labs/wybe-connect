@@ -9,7 +9,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createProxy, NO_SESSION } from '../lib/mcp-proxy.js';
@@ -40,6 +41,8 @@ function recordingNode() {
 }
 const sent = (n) => n.calls.filter((c) => c.rpc === 'tools/call').map((c) => c.url);
 const home = () => mkdtempSync(join(tmpdir(), 'wybe-connect-pins-'));
+// Ages pins as if their last hook was at `at` (a pin's file time is when a hook last resolved it).
+const setPinSeen = (root, sids, at) => { for (const s of sids) utimesSync(join(root, 'state', 'sessions', `${s}.json`), at / 1000, at / 1000); };
 // What a SessionStart hook does: pin, and always the note, connected or not.
 const startSession = (root, sid) => {
   const p = sessionPaths(root, { sessionId: sid, env: {} });
@@ -272,8 +275,33 @@ const rows = {
     await proxy.handle(remember(2, 't1'));
     assert.deepEqual(sent(node), [`${N('a')}/mcp`, `${N('a')}/mcp`]);
   },
+  takeTaskS2: async () => {
+    // take_task follows S2 like every node tool: session_id is required with two connections, or with one while a pin
+    // points elsewhere; a call without it is refused before any task is looked up.
+    const take = (id, sid) => req(id, 'tools/call', { name: 'take_task', arguments: { task_id: 'task-1', ...(sid ? { session_id: sid } : {}) } });
+    const listedTake = async (proxy) => (await proxy.handle(req(0, 'tools/list'))).result.tools.find((t) => t.name === 'take_task');
+    const one = home();
+    saveConnection(one, grant('a'));
+    const p1 = createProxy({ root: one, env: {}, fetchImpl: recordingNode().fetchImpl });
+    assert.equal((await listedTake(p1)).inputSchema.required.includes('session_id'), false, 'control: one connection, optional');
+    assert.notEqual((await p1.handle(take(1, null))).result.content[0].text, NO_SESSION, 'control: one connection, not refused');
+    const two = home();
+    saveConnection(two, grant('a'));
+    saveConnection(two, grant('b'));
+    const p2 = createProxy({ root: two, env: {}, fetchImpl: recordingNode().fetchImpl });
+    const listed = await listedTake(p2);
+    assert.equal(listed.inputSchema.properties.session_id.type, 'string');
+    assert.ok(listed.inputSchema.required.includes('session_id'));
+    assert.equal((await p2.handle(take(2, null))).result.content[0].text, NO_SESSION);
+    assert.notEqual((await p2.handle(take(3, 'S'))).result.content[0].text, NO_SESSION);
+    const { root } = nullPinned();
+    const p3 = createProxy({ root, env: {}, fetchImpl: recordingNode().fetchImpl });
+    assert.equal((await p3.handle(take(4, null))).result.content[0].text, NO_SESSION, 'one connection, a pin elsewhere');
+    assert.match((await p3.handle(take(5, 'S'))).result.content[0].text, /sends to no connection/);
+  },
   unseenId: async () => {
-    // A named id this machine has never seen goes where a new session goes, and is fixed there.
+    // A named id this machine has never seen goes where a new session goes. The proxy never writes a pin: only the
+    // hooks (which know the transcript) and `connect use` do, so the id follows the default until a hook fixes it.
     const root = home();
     saveConnection(root, grant('a'));
     saveConnection(root, grant('b'));
@@ -282,9 +310,54 @@ const rows = {
     const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
     await proxy.handle(req(0, 'tools/list'));
     await proxy.handle(remember(1, 'never-seen'));
+    assert.equal(pinnedConnection(root, 'never-seen'), undefined, 'the proxy wrote a pin');
     useConnection(root, H('a'));
     await proxy.handle(remember(2, 'never-seen'));
-    assert.deepEqual(sent(node), [`${N('b')}/mcp`, `${N('b')}/mcp`]);
+    assert.deepEqual(sent(node), [`${N('b')}/mcp`, `${N('a')}/mcp`]);
+    assert.equal(hookNode(root, 'never-seen'), H('a'), 'control: a hook does fix it');
+  },
+  importToAnswering: async () => {
+    // An import in a reply goes to the connection that answered the call (the one its session_id resolved to), never
+    // to the proxy's default.
+    const root = home();
+    saveConnection(root, grant('a'));
+    saveConnection(root, grant('b'));
+    useConnection(root, H('a'));
+    startSession(root, 'S');
+    useConnection(root, H('b'), { sessionId: 'S' });
+    const node = recordingNode();
+    const asking = async (url, init = {}) => {
+      const msg = init.body ? JSON.parse(init.body) : null;
+      if (msg?.method !== 'tools/call') return node.fetchImpl(url, init);
+      await node.fetchImpl(url, init);
+      const result = { content: [{ type: 'text', text: '{"ok":true}' }], structuredContent: { import_request: { requested_at: new Date(0).toISOString() } } };
+      return new Response(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result }), { status: 200, headers: { 'content-type': 'application/json' } });
+    };
+    const seen = [];
+    const proxy = createProxy({ root, env: {}, fetchImpl: asking, onImportRequest: (at, p) => seen.push(p?.connection ?? null) });
+    await proxy.handle(req(0, 'tools/list'));
+    await proxy.handle(remember(1, 'S'));
+    assert.deepEqual(sent(node), [`${N('b')}/mcp`], 'control: B answered');
+    assert.deepEqual(seen, [H('b')]);
+  },
+  beforeAnyConnection: () => {
+    // The one stated exception to "each line goes to the node it was written on": lines written before any connection
+    // existed go to the first connection, from line 0. No node had them, so nothing crosses between nodes; this is the
+    // first-run import (the node gets the person's context from the start).
+    const root = home();
+    const dir = join(root, 'transcripts');
+    mkdirSync(dir, { recursive: true });
+    const tr = join(dir, 'S.jsonl');
+    writeFileSync(tr, 'before1\nbefore2\n');
+    assert.equal(hookNode(root, 'S', tr), null);
+    assert.equal(pinnedConnection(root, 'S'), undefined, 'not fixed while there is no connection');
+    saveConnection(root, grant('a'));
+    appendFileSync(tr, 'a1\n');
+    const p = sessionPaths(root, { sessionId: 'S', env: {}, transcriptPath: tr });
+    assert.equal(p.connection, H('a'));
+    noteSession(p, { transcriptPath: tr, sessionId: 'S', now: Date.now() });
+    assert.deepEqual(sessionLines(root, 'S', H('a')), [[0, null]]);
+    assert.deepEqual(rangesOf(distilRun(root, H('a'), Date.now() + 7 * 3600e3), 'S'), [[0, 3]]);
   },
   stayOnA: () => {
     // Turn 1 was written on A, turn 2 after the move to B: A keeps line 0, B starts at the boundary, never at 0.
@@ -489,11 +562,21 @@ const rows = {
     hookNode(root, 'gone', gone);
     hookNode(root, 'kept', kept);
     hookNode(root, 'unknown', join(dir, 'not-written-yet.jsonl'));
+    hookNode(root, 'idle', join(dir, 'idle-not-written.jsonl'));
     rmSync(gone);
-    prunePins(root);
+    const t0 = Date.now();
+    prunePins(root, t0);
     assert.equal(pinnedConnection(root, 'gone'), undefined);
     assert.equal(pinnedConnection(root, 'kept'), H('a'));
-    assert.equal(pinnedConnection(root, 'unknown'), H('a'), 'a transcript not written yet is never recorded, so never pruned');
+    assert.equal(pinnedConnection(root, 'unknown'), H('a'), 'a pin with no transcript has a grace');
+    // A pin with no transcript lives 24 hours from the last hook that resolved it; one with a transcript is not timed.
+    const day = 24 * 3600e3;
+    setPinSeen(root, ['unknown', 'idle', 'kept'], t0 - day - 60e3);
+    hookNode(root, 'unknown', join(dir, 'not-written-yet.jsonl'));
+    prunePins(root, t0);
+    assert.equal(pinnedConnection(root, 'idle'), undefined, 'no transcript, no hook for over 24 hours');
+    assert.equal(pinnedConnection(root, 'unknown'), H('a'), 'a hook resolved it just now');
+    assert.equal(pinnedConnection(root, 'kept'), H('a'), 'a pin with a transcript lives as long as it');
   },
 };
 
@@ -524,6 +607,47 @@ for (const [harness, [script, input, context]] of Object.entries(HOOKS)) {
     assert.equal(context(JSON.parse(out || '{}')), 'This session is not connected yet; its session_id is sess-first.');
   });
 }
+
+// Cursor through the real hook: each spool record is kept for the connection in use when it was written and is
+// delivered only there, so a record from before a move never reaches the node the conversation moved to.
+function httpNode() {
+  const seen = [];
+  const server = createServer((rq, rs) => {
+    let body = '';
+    rq.on('data', (d) => { body += d; });
+    rq.on('end', () => {
+      const msg = body ? JSON.parse(body) : null;
+      if (rq.method === 'DELETE') { rs.writeHead(200).end(); return; }
+      if (msg.method === 'initialize') { rs.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 's1' }).end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} })); return; }
+      if (msg.method === 'notifications/initialized') { rs.writeHead(202).end(); return; }
+      seen.push(JSON.stringify(msg.params ?? null));
+      rs.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ok' }] } }));
+    });
+  });
+  return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, seen, base: `http://127.0.0.1:${server.address().port}` })));
+}
+test('session pins cursorSpool: a record goes only to the connection in use when it was written', async () => {
+  const [a, b] = [await httpNode(), await httpNode()];
+  try {
+    const root = home();
+    const cursorHome = join(root, 'cursor');
+    const g = (n) => ({ ...grant('a'), nodeUrl: n.base, resource: `${n.base}/mcp`, mcpEndpoint: `${n.base}/mcp`, scopes: ['sessions:light'] });
+    const kA = saveConnection(cursorHome, g(a));
+    const kB = saveConnection(cursorHome, g(b));
+    useConnection(cursorHome, kA);
+    const ev = (hook_event_name, more = {}) => runHook(HOOKS.cursor[0], { conversation_id: 'S', hook_event_name, workspace_roots: [], ...more }, root);
+    await ev('sessionStart');
+    await ev('beforeSubmitPrompt', { prompt: 'WRITTEN-ON-A' });
+    useConnection(cursorHome, kB, { sessionId: 'S' });
+    await ev('beforeSubmitPrompt', { prompt: 'WRITTEN-ON-B' });
+    await ev('stop', { status: 'completed', loop_count: 0 });
+    const got = (n) => ({ a: n.seen.some((s) => s.includes('WRITTEN-ON-A')), b: n.seen.some((s) => s.includes('WRITTEN-ON-B')) });
+    assert.deepEqual({ a: got(a), b: got(b) }, { a: { a: true, b: false }, b: { a: false, b: true } });
+  } finally {
+    a.server.close();
+    b.server.close();
+  }
+});
 
 // /resume through the real hook, with SessionStart inputs copied from a real Claude Code run: the resumed session
 // keeps its session_id, so it keeps its pin (here, a move to B); a startup input with a new id goes to the default.

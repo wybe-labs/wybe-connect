@@ -133,13 +133,13 @@ test('two connections, a session moved to the default: a call without session_id
   assert.deepEqual(sentTo(node), [`${A}/mcp`]);
 });
 
-test('a session_id no session on this machine has goes where a new session goes, and is fixed there', async () => {
+test('a session_id no session on this machine has goes where a new session goes; the proxy does not fix it', async () => {
   const root = twoConnections();
   useConnection(root, 'node-b.example.invalid', { sessionId: 'sess-two' });
   const node = recordingNode();
   const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
   await proxy.handle(remember(1, 'sess-new'));
-  assert.equal(pinnedConnection(root, 'sess-new'), 'node-a.example.invalid');
+  assert.equal(pinnedConnection(root, 'sess-new'), undefined);
   assert.deepEqual(sentTo(node), [`${A}/mcp`]);
 });
 
