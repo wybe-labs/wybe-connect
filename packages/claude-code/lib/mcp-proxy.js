@@ -274,11 +274,12 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     return text(`A browser window is opening on the Wybe sign-in page. Ask the person to sign in with their passkey and tick what they want to share, then call connect again to confirm. If no browser opened, they can open this link: ${state.url}`);
   }
 
-  async function callTakeTask(args) {
-    if (!current() || !credentials()) return text('Not connected to a Wybe AI colleague, so there is no task to take.', true);
+  async function callTakeTask(args, caller = null) {
+    // the calling session decides the connection, as for every node tool
+    if (!current(caller) || !credentials(caller)) return text('Not connected to a Wybe AI colleague, so there is no task to take.', true);
     const id = typeof args?.task_id === 'string' ? args.task_id.trim() : '';
-    // the task is in the connection of the session it went to, which may not be this server's own
-    let p = current();
+    // the task is in the connection of the session it went to, which may not be the caller's own
+    let p = current(caller);
     let found = findTask(p, id);
     if (!found && root && !fixed) {
       for (const k of connectionNames(root)) {
@@ -407,7 +408,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
           return reply(text(`Not delivered: this session sends to no connection. Ask the person which connection to use, then run \`connect use <name> --session ${sessionId}\` (the SessionStart note gives the full command).`, true));
         }
         // take_task passes the same session checks as every node tool, then finds its task by id in every connection.
-        if (name === TAKE_TASK_TOOL.name) return reply(await callTakeTask(plain ? rest : raw));
+        if (name === TAKE_TASK_TOOL.name) return reply(await callTakeTask(plain ? rest : raw, sessionId));
         if (!credentials(sessionId)) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
         // Every argument passes through redactValue before it leaves the machine; one the walker
         // cannot read is refused rather than forwarded.
