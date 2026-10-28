@@ -400,13 +400,12 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         if (!credentials()) return reply({ tools: [CONNECT_TOOL] });
         const out = await upstream('tools/list', {});
         const tools = out.ok && Array.isArray(out.result?.tools) ? out.result.tools.filter((t) => t?.name !== CONNECT_TOOL.name && t?.name !== TAKE_TASK_TOOL.name) : [];
-        return reply({ tools: [...(root && !fixed ? tools.map((t) => withSessionId(t, idRequired())) : tools), TAKE_TASK_TOOL, CONNECT_TOOL] });
+        const own = [...tools, TAKE_TASK_TOOL];
+        return reply({ tools: [...(root && !fixed ? own.map((t) => withSessionId(t, idRequired())) : own), CONNECT_TOOL] });
       }
       case 'tools/call': {
         const name = params?.name;
         if (name === CONNECT_TOOL.name) return reply(await callConnect(params?.arguments));
-        // take_task finds its task by id in every connection, so it needs no session to route.
-        if (name === TAKE_TASK_TOOL.name) return reply(await callTakeTask(params?.arguments));
         const raw = params?.arguments ?? {};
         const plain = typeof raw === 'object' && raw !== null && !Array.isArray(raw);
         const { session_id: given, ...rest } = plain ? raw : {};
@@ -417,6 +416,8 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         if (sessionId && pinnedConnection(root, sessionId) === null) {
           return reply(text(`Not delivered: this session sends to no connection. Ask the person which connection to use, then run \`connect use <name> --session ${sessionId}\` (the SessionStart note gives the full command).`, true));
         }
+        // take_task passes the same session checks as every node tool, then finds its task by id in every connection.
+        if (name === TAKE_TASK_TOOL.name) return reply(await callTakeTask(plain ? rest : raw));
         if (!credentials(sessionId)) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
         // Every argument passes through redactValue before it leaves the machine; one the walker
         // cannot read is refused rather than forwarded.

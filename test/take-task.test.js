@@ -175,7 +175,7 @@ test('take_task finds a task in the connection of the session it went to, not on
     await pollOnce(b, SID);
     const proxy = createProxy({ root, env: {}, request: async () => ({ action: 'accept' }) });
     await initialized(proxy, true);
-    const r = await proxy.handle(req(2, 'tools/call', { name: 'take_task', arguments: { task_id: t.id } }));
+    const r = await proxy.handle(req(2, 'tools/call', { name: 'take_task', arguments: { task_id: t.id, session_id: SID } })); // two connections: the call names its session
     assert.ok(textOf(r).includes(t.text));
     assert.equal(findTask(b, t.id).task.status, 'running');
   } finally {
