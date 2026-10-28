@@ -8,7 +8,7 @@ import { mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createProxy } from '../lib/mcp-proxy.js';
-import { removeConnection, saveConnection, sessionPaths, useConnection } from '../lib/connections.js';
+import { removeConnection, saveConnection, sessionNote, sessionPaths, useConnection } from '../lib/connections.js';
 
 const A = 'https://node-a.example.invalid';
 const B = 'https://node-b.example.invalid';
@@ -76,8 +76,8 @@ test('once a session has been moved, a call without session_id is refused and re
   assert.deepEqual(sentTo(node), []);
 });
 
-// QA round 2 on #6: a move to a connection that was later removed left every new session refused for good, and
-// a one-connection session is never told its id. Only a moved session that could be sent elsewhere refuses.
+// A move to a connection that was later removed must not leave every new session refused for good, and a
+// session opened with one connection must still learn its id. Only a moved session that could be sent elsewhere refuses.
 test('a session moved to a connection that was then removed: a new session without session_id goes to the default', async () => {
   const root = twoConnections();
   useConnection(root, 'node-b.example.invalid', { sessionId: 'sess-old' });
@@ -86,6 +86,39 @@ test('a session moved to a connection that was then removed: a new session witho
   const node = recordingNode();
   const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
   const r = await proxy.handle(remember(1, null));
+  assert.notEqual(r.result.isError, true, r.result.content?.[0]?.text);
+  assert.deepEqual(sentTo(node), [`${A}/mcp`]);
+});
+
+test('a session moved to a connection that was removed and then added again: a session opened meanwhile is not locked out', async () => {
+  const root = twoConnections();
+  useConnection(root, 'node-b.example.invalid', { sessionId: 'sess-old' });
+  removeConnection(root, 'node-b.example.invalid');
+  sessionPaths(root, { sessionId: 'sess-new', env: {} });
+  saveConnection(root, grant(B, TOK_B));
+  useConnection(root, 'node-a.example.invalid');
+  const node = recordingNode();
+  const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+  const r = await proxy.handle(remember(1, null));
+  assert.notEqual(r.result.isError, true, r.result.content?.[0]?.text);
+  assert.deepEqual(sentTo(node), [`${A}/mcp`]);
+  // Positive control: a session moved to B after the re-add is again told apart.
+  useConnection(root, 'node-b.example.invalid', { sessionId: 'sess-later' });
+  assert.equal((await proxy.handle(remember(2, null))).result.isError, true);
+});
+
+test('a session opened with one connection is told its id, so it still works once another session is moved elsewhere', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wybe-connect-session-'));
+  saveConnection(root, grant(A, TOK_A));
+  const key = sessionPaths(root, { sessionId: 'sess-t', env: {} }).connection;
+  const note = sessionNote(root, key, { sessionId: 'sess-t', command: 'connect' });
+  assert.match(note ?? '', /sess-t/);
+  saveConnection(root, grant(B, TOK_B));
+  useConnection(root, 'node-a.example.invalid');
+  useConnection(root, 'node-b.example.invalid', { sessionId: 'sess-v' });
+  const node = recordingNode();
+  const proxy = createProxy({ root, env: {}, fetchImpl: node.fetchImpl });
+  const r = await proxy.handle(remember(1, 'sess-t'));
   assert.notEqual(r.result.isError, true, r.result.content?.[0]?.text);
   assert.deepEqual(sentTo(node), [`${A}/mcp`]);
 });
