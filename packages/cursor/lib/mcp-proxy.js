@@ -22,7 +22,7 @@ import { createInterface } from 'node:readline';
 import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
-import { NODE_ENV, connectionPaths, defaultConnection, findConnection, checkSave, saveConnection, resolveSession, anySessionMoved } from './connections.js';
+import { NODE_ENV, connectionPaths, defaultConnection, findConnection, checkSave, saveConnection, resolveSession, pinnedConnection, sessionMovedElsewhere } from './connections.js';
 import { spoolRemember, spoolDone } from './distil.js';
 import { redactValue } from './redact.js';
 
@@ -317,9 +317,16 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         const plain = typeof raw === 'object' && raw !== null && !Array.isArray(raw);
         const { session_id: given, ...rest } = plain ? raw : {};
         const sessionId = root && !fixed && typeof given === 'string' && given.trim() ? given.trim() : null;
-        // Once a session was moved, a call that names none could belong to it: refused, never sent to the default.
-        if (root && !fixed && !sessionId && anySessionMoved(root)) {
-          return reply(text('Not delivered: a session on this machine was moved to another connection, so this call must say which session it is. Call it again with session_id set to this session\'s id (the SessionStart note gives it).', true));
+        // Once a session was moved to another connection, a call that names no session, or one this machine
+        // has never seen, could be that session's: refused, never sent to the default.
+        const unseen = !!sessionId && pinnedConnection(root, sessionId) === undefined;
+        if (root && !fixed && (!sessionId || unseen)) {
+          current(); // fixes key: where a call naming no known session goes
+          if (sessionMovedElsewhere(root, key)) {
+            return reply(text(unseen
+              ? 'Not delivered: no session on this machine has that session_id. Call it again with session_id set to this session\'s id (the SessionStart note gives it).'
+              : 'Not delivered: a session on this machine was moved to another connection, so this call must say which session it is. Call it again with session_id set to this session\'s id (the SessionStart note gives it).', true));
+          }
         }
         if (!credentials(sessionId)) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
         // Every argument passes through redactValue before it leaves the machine; one the walker

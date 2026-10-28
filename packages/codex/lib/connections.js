@@ -223,11 +223,20 @@ function pin(root, sessionId, key, { moved = false } = {}) {
   writeJsonPrivate(pinPath(root, sessionId), { connection: key, nodeUrl, ...(moved ? { moved: true } : {}) });
 }
 
-/** Whether any session was sent to a connection by `use --session` (its pin says moved), not only by its first hook. */
-export function anySessionMoved(root) {
+/**
+ * Whether a session was sent by `use --session` (its pin says moved) to a connection that still exists and
+ * is not `key`: a call that names no session could then be that session's, bound for another node. A move
+ * to a removed connection, or to `key` itself, leaves nothing to tell apart.
+ */
+export function sessionMovedElsewhere(root, key) {
   const dir = join(root, 'state', 'sessions');
   if (!existsSync(dir)) return false;
-  return readdirSync(dir).some((f) => f.endsWith('.json') && readJson(join(dir, f))?.moved === true);
+  const known = knownKeys(root);
+  return readdirSync(dir).some((f) => {
+    if (!f.endsWith('.json')) return false;
+    const p = readJson(join(dir, f));
+    return p?.moved === true && typeof p.connection === 'string' && p.connection !== key && known.includes(p.connection);
+  });
 }
 
 function mustFind(root, ref) {
