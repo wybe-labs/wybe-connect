@@ -76,3 +76,21 @@ test('an OS, runtime or database version next to a capitalised name is not a dat
     '// the cache may fail, 2 may retry',
   ]) assert.ok(!flagged(s), s);
 });
+
+test('a thing that was added or changed near a date is not a person who said something on it', () => {
+  for (const s of [
+    '// Tests added for 2026-01-01 dates',
+    '// Tests added for 2026-01-01.',
+    '// Hooks added in 10.17 of the client',
+    '// Fields changed since 2026-03-01 are re-read',
+    '// Rows noted before 10.17 are kept',
+    '// Values reported at 2026-02-01 midnight count once',
+  ]) assert.ok(!flagged(s), s);
+  for (const s of [
+    '// Kari wrote this (2026-10-29)',
+    '// Ola said on 10.17: keep it',
+    '// Kari added it 2026-10-29',
+    '// Ola noted, 21 Oct.',
+    '// Kari changed it on 2026-09-29 - see the PR',
+  ]) assert.ok(flagged(s), s);
+});
