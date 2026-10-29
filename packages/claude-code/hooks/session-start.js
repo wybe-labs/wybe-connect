@@ -18,8 +18,9 @@ try {
   if (!process.env[DISTIL_ENV]) {
     const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
     const root = homePath();
-    prunePins(root);
+    // this session first, so pruning the others can never reset it
     const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null });
+    prunePins(root, { exceptSessionId: sessionId });
     const credentials = loadCredentials(p);
     let context = buildContext({ credentials, cached: readJson(p.openQuestions) });
     const note = sessionNote(root, p.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });

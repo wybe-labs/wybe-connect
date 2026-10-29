@@ -12,15 +12,17 @@ import { readHookInput, failOpen } from '../lib/hook-io.js';
 import { harnessHome, loadCredentials, readJson } from '../lib/home.js';
 import { prunePins, sessionPaths, sessionNote } from '../lib/connections.js';
 import { buildContext } from '../lib/session-context.js';
-import { DISTIL_ENV, distilNotice } from '../lib/distil.js';
+import { DISTIL_ENV, codexHomeOf, distilNotice } from '../lib/distil.js';
 
 try {
   const input = await readHookInput();
   if (!process.env[DISTIL_ENV]) {
     const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
     const root = harnessHome('codex');
-    prunePins(root);
+    // this session first, so pruning the others can never reset it; a rollout compressed or archived under
+    // CODEX_HOME keeps its session's pin
     const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null });
+    prunePins(root, { exceptSessionId: sessionId, codexHome: codexHomeOf(process.env) });
     const credentials = loadCredentials(p);
     let context = buildContext({ credentials, cached: readJson(p.openQuestions) });
     const note = sessionNote(root, p.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
