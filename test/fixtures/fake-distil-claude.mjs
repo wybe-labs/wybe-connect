@@ -5,9 +5,9 @@
 //               mode the last one carries import_of from the prompt
 //   FAKE_DONE   '0' skips distil_done at the end (a run that dies or forgets to finish)
 //   FAKE_EXIT   the exit code (default 0: claude -p exits 0 after a tool error too)
-//   FAKE_LOG    appends one JSON line: the tools it saw, every answer, the flags it got, its cwd
+//   FAKE_LOG    appends one JSON line: the tools it saw, every answer, the flags it got, its cwd, the --settings file's content
 import { spawn } from 'node:child_process';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 
 const argv = process.argv.slice(2);
@@ -37,7 +37,7 @@ if (tools.includes('remember')) {
 if (process.env.FAKE_DONE !== '0' && tools.includes('distil_done')) answers.push((await call('tools/call', { name: 'distil_done', arguments: {} })).result);
 if (process.env.FAKE_LOG) {
   const flag = (f) => (argv.includes(f) ? argv[argv.indexOf(f) + 1] : null);
-  appendFileSync(process.env.FAKE_LOG, `${JSON.stringify({ tools, answers, importOf, flags: { tools: flag('--tools'), allowedTools: flag('--allowedTools'), permissionMode: flag('--permission-mode'), maxTurns: flag('--max-turns'), strict: argv.includes('--strict-mcp-config'), settingSources: flag('--setting-sources'), settings: flag('--settings') }, cwd: process.cwd(), env: { distil: process.env.WYBE_CONNECT_DISTIL ?? null } })}\n`);
+  appendFileSync(process.env.FAKE_LOG, `${JSON.stringify({ tools, answers, importOf, flags: { tools: flag('--tools'), allowedTools: flag('--allowedTools'), permissionMode: flag('--permission-mode'), maxTurns: flag('--max-turns'), strict: argv.includes('--strict-mcp-config'), settingSources: flag('--setting-sources'), settings: flag('--settings') }, cwd: process.cwd(), settingsFile: flag('--settings') && existsSync(flag('--settings')) ? readFileSync(flag('--settings'), 'utf8') : null, env: { distil: process.env.WYBE_CONNECT_DISTIL ?? null } })}\n`);
 }
 server.kill();
 process.stdout.write(`Sent ${calls} call(s).\n`);

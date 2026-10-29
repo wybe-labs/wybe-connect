@@ -652,9 +652,11 @@ test('the headless run is confined: read-only tools, only the plugin\'s own serv
   assert.equal(ran.env.distil, r.plan.runId);
   assert.deepEqual([...ran.tools].sort(), ['distil_done', 'pending_questions', 'remember']);
   assert.equal(ran.flags.settingSources, '', 'none of the person\'s settings files: no hooks, plugins or permission rules of theirs');
-  const settings = JSON.parse(ran.flags.settings);
+  assert.equal(ran.flags.settings, join(D.distilPaths(p).runs, `${r.plan.runId}.settings.json`), 'the rules are a file of the run, so each path is on the command line once');
+  const settings = JSON.parse(ran.settingsFile);
   assert.equal(settings.disableAllHooks, true);
   assert.deepEqual([...settings.permissions.allow].sort(), files.map(readRule).sort(), 'it may read exactly the noted transcripts');
+  assert.equal(existsSync(ran.flags.settings), false, 'the file goes when the run ends');
   assert.equal(ran.cwd, join(p.state, 'distil'), 'it runs in the distil\'s own folder, never in a project of the person');
 });
 
@@ -670,10 +672,11 @@ test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s PO
       { path: '/home/ola/.claude/projects/-home-ola-demo/c.jsonl', fromLine: 0, toLine: 1 },
     ],
   };
-  const args = D.claudeArgs(plan, { root: '/h' });
+  const args = D.claudeArgs(plan, { root: '/h', settingsFile: '/h/run.settings.json' });
   assert.equal(args[args.indexOf('--tools') + 1], 'Read,Glob,Grep');
   assert.equal(args[args.indexOf('--setting-sources') + 1], '');
-  const settings = JSON.parse(args[args.indexOf('--settings') + 1]);
+  assert.equal(args[args.indexOf('--settings') + 1], '/h/run.settings.json');
+  const settings = D.claudeSettings(plan);
   assert.equal(settings.disableAllHooks, true);
   assert.deepEqual(settings.permissions.allow, [
     'Read(//c/Users/Ola Nordmann/.claude/projects/C--work-demo/a.jsonl)',
@@ -699,8 +702,8 @@ test('an import may also read the Claude home\'s CLAUDE.md and, of the projects 
   const t = join(folder, '00000000-0000-4000-8000-0000000000aa.jsonl');
   writeFileSync(t, `${JSON.stringify({ type: 'user', cwd: project, message: { role: 'user', content: 'hi' } })}\n`);
   const plan = { runId: 'r-i', mode: 'import', importOf: '2026-10-21T10:00:00.000Z', connection: null, claudeHome: home, transcripts: [{ path: t, sessionId: 's', cwd: null, fromLine: 0, toLine: 1 }] };
-  const args = D.claudeArgs(plan, { root: '/h' });
-  const allow = JSON.parse(args[args.indexOf('--settings') + 1]).permissions.allow;
+  const args = D.claudeArgs(plan, { root: '/h', settingsFile: '/h/run.settings.json' });
+  const allow = D.claudeSettings(plan).permissions.allow;
   const mem = readRule(join(folder, 'memory'));
   assert.deepEqual([...allow].sort(), [
     readRule(t),
@@ -725,7 +728,7 @@ test('the run\'s whole command line stays within the Windows limit at the run\'s
     chars += long(i).length;
   }
   const plan = { runId: 'r-max', mode: 'import', importOf: '2026-10-21T10:00:00.000Z', connection: 'node', claudeHome: `C:\\Users\\${'p'.repeat(30)}\\.claude`, transcripts };
-  const args = D.claudeArgs(plan, { root: `C:\\Users\\${'p'.repeat(30)}\\.wybe-connect`, pluginRoot: `C:\\Users\\${'p'.repeat(30)}\\.claude\\plugins\\cache\\wybe-connect\\wybe-connect\\0.3.0` });
+  const args = D.claudeArgs(plan, { root: `C:\\Users\\${'p'.repeat(30)}\\.wybe-connect`, settingsFile: `C:\\Users\\${'p'.repeat(30)}\\.wybe-connect\\connections\\node\\distil\\runs\\${'r'.repeat(80)}.settings.json`, pluginRoot: `C:\\Users\\${'p'.repeat(30)}\\.claude\\plugins\\cache\\wybe-connect\\wybe-connect\\0.3.0` });
   const line = [process.execPath, ...args].map((a) => `"${a.replace(/(\\*)"/g, '$1$1\\"')}"`).join(' ');
   assert.ok(line.length < 32767, `${line.length} chars`);
 });
