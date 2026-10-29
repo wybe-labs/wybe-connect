@@ -260,14 +260,18 @@ function pin(root, sessionId, key, { moved = false, transcriptPath = null, pendi
     // A first stay starts at line 0, so lines written before any connection existed go to the first one: the one
     // exception to "each line goes to the node it was written on", since no node had them (the first-run import).
     const counted = last && path ? linesIn(path) : null;
-    if (last && path && counted === null && existsSync(`${path}.zst`)) {
-      // Only the compressed rollout is there: its lines cannot be counted, and guessing would hand one node the
-      // other's lines. Nothing is written; resuming the session writes the rollout out again.
-      const e = new Error(`session ${sessionId} cannot move while its rollout is only compressed (${path}.zst): its lines cannot be counted. Resume the session once, then run this again.`);
-      e.code = 'ETRANSCRIPTCOMPRESSED';
+    if (last && path && counted === null) {
+      // The transcript is not readable where the pin says: only compressed, moved into archived_sessions (plain or
+      // compressed), gone, or unreadable. Its lines cannot be counted, and any guess (the previous segment's start)
+      // would hand one node the other's lines. Nothing is written; resuming the session writes it out again.
+      const compressed = existsSync(`${path}.zst`);
+      const e = new Error(compressed
+        ? `session ${sessionId} cannot move while its rollout is only compressed (${path}.zst): its lines cannot be counted. Resume the session once, then run this again.`
+        : `session ${sessionId} cannot move while its transcript is not at ${path} (archived, moved or unreadable): its lines cannot be counted. Resume the session once (unarchive it first if it was archived), then run this again.`);
+      e.code = compressed ? 'ETRANSCRIPTCOMPRESSED' : 'ETRANSCRIPTUNCOUNTED';
       throw e;
     }
-    const fromLine = last && path ? counted ?? last.fromLine : 0;
+    const fromLine = last && path ? counted : 0;
     if (last && last.fromLine >= fromLine) segments = segments.filter((s) => s.fromLine < fromLine);
     segments = [...segments, { connection: key, nodeUrl, fromLine }];
   }
