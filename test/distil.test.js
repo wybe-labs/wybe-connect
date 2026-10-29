@@ -46,11 +46,27 @@ function sandbox(n = 3) {
 
 /**
  * An MCP node over real HTTP. `answers[i]` is the reply to the i-th remember: 'ok', a status code
- * (NOT stored), 'toolError' (refused, NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is the node's idempotency store:
+ * (NOT stored), 'toolError' (refused, NOT stored), 'busy' / 'busyRetry' (a transient refusal by text / by retry: true, NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is the node's idempotency store:
  * a repeat of an idempotency_key on the connection stores nothing and replays the WHOLE first
- * answer (import_done included). `sends` lists every remember it saw.
+ * answer (import_done included). `sends` lists every remember it saw. With `strict` it checks the
+ * arguments as the node's remember schema does and refuses the whole call (a tool error) on any mismatch.
  */
-async function httpNode({ answers = [], dedupe = false, importDone = true } = {}) {
+const NODE_CATEGORIES = ['fact', 'preference', 'pattern', 'entity', 'insight', 'relation'];
+// The node's z.uuid() (zod 4): a version digit 1-8 and a variant digit 8, 9, a or b, or the nil or max id.
+const UUID = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
+const nodeSchemaError = (args) => {
+  const items = args.items;
+  if (!Array.isArray(items) || items.length < 1 || items.length > 50) return 'items';
+  for (const it of items) {
+    if (typeof it.content !== 'string' || it.content.length < 1 || it.content.length > 4000) return 'content';
+    if (it.category !== undefined && !NODE_CATEGORIES.includes(it.category)) return `category: ${it.category}`;
+    if (it.subject !== undefined && (typeof it.subject !== 'string' || it.subject.length < 1 || it.subject.length > 200)) return 'subject';
+  }
+  if (args.answers !== undefined && (!Array.isArray(args.answers) || args.answers.length > 10 || !args.answers.every((a) => UUID.test(a)))) return 'answers';
+  if (args.import_of !== undefined && (typeof args.import_of !== 'string' || args.import_of.length < 1 || args.import_of.length > 64)) return 'import_of';
+  return null;
+};
+async function httpNode({ answers = [], dedupe = false, importDone = true, strict = false } = {}) {
   let n = 0;
   const stored = [];
   const sends = [];
@@ -71,6 +87,10 @@ async function httpNode({ answers = [], dedupe = false, importDone = true } = {}
       const a = answers[n++] ?? 'ok';
       if (typeof a === 'number') { res.writeHead(a); return res.end('upstream error'); }
       if (a === 'toolError') return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text: 'Invalid arguments: items[0].content: too long' }] } });
+      if (a === 'busy') return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text: 'The Wybe AI colleague could not store this right now. Try again later.' }] } });
+      if (a === 'busyRetry') return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, structuredContent: { retry: true }, content: [{ type: 'text', text: 'Daily limit reached.' }] } });
+      const invalid = strict ? nodeSchemaError(args) : null;
+      if (invalid) return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text: `MCP error -32602: Input validation error: ${invalid}` }] } });
       const key = dedupe ? args.idempotency_key : undefined;
       let answer = key !== undefined ? first.get(key) : undefined;
       if (!answer) {
@@ -472,6 +492,79 @@ test('a record the node refuses for good (a tool error) is set aside and counted
   assert.equal(s.setAside.refused, 1);
 });
 
+// ------------------------------------------------------------------ a busy node: sent again later, never dropped
+const busyRun = async (answers) => {
+  const { p, files } = sandbox(1);
+  const node = await httpNode({ answers, dedupe: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files, T - 7 * H);
+  return { p, node, T };
+};
+
+test('the node\'s "try again later" refusal is not a refusal: delivery stops as node-busy and, after the backoff, sends the same record with the same key', async () => {
+  const { p, node, T } = await busyRun(['busy', 'ok']);
+  try {
+    const r1 = await cycle(p, { now: T });
+    assert.equal(r1.outcome.ok, false);
+    assert.equal(r1.outcome.class, 'node-busy');
+    let s = D.loadState(p);
+    assert.ok(s.outbox, 'the facts wait on this machine');
+    assert.equal(s.lastError?.class, 'node-busy');
+    const acks = readRecords(D.distilPaths(p).acks(s.outbox.runId)).records;
+    assert.equal(acks.filter((a) => a.refused === true).length, 0, 'never set aside as refused');
+    assert.equal((await cycle(p, { now: T + 10 * MIN })).plan, null, 'nothing is sent again inside the backoff');
+    const r2 = await cycle(p, { now: T + D.BACKOFF_MS + MIN });
+    assert.equal(r2.plan.mode, 'deliver');
+    assert.equal(r2.outcome.ok, true);
+    assert.equal(r2.outcome.refused, 0);
+    assert.deepEqual(node.stored, ['Fact 1 of 1.']);
+    assert.equal(node.sends.length, 2);
+    assert.equal(node.sends[1].idempotency_key, node.sends[0].idempotency_key, 'the same key, so the node stores it once');
+    s = D.loadState(p);
+    assert.equal(s.setAside.refused, 0);
+    assert.ok(s.lastSuccessAt);
+  } finally {
+    node.close();
+  }
+});
+
+test('retry: true in the refusal is honoured without the text', async () => {
+  const { p, node, T } = await busyRun(['busyRetry', 'ok']);
+  try {
+    const r1 = await cycle(p, { now: T });
+    assert.equal(r1.outcome.class, 'node-busy');
+    const r2 = await cycle(p, { now: T + D.BACKOFF_MS + MIN });
+    assert.equal(r2.outcome.ok, true);
+    assert.deepEqual(node.stored, ['Fact 1 of 1.']);
+    assert.equal(node.sends[1].idempotency_key, node.sends[0].idempotency_key);
+  } finally {
+    node.close();
+  }
+});
+
+test('after 5 busy answers the record is set aside and counted, and the pipeline goes on', async () => {
+  const { p, node, T } = await busyRun(['busy', 'busy', 'busy', 'busy', 'busy']);
+  try {
+    let r;
+    for (let i = 0; i < 4; i++) {
+      r = await cycle(p, { now: T + i * (D.BACKOFF_MS + MIN) });
+      assert.equal(r.outcome.class, 'node-busy', `answer ${i + 1} holds the record`);
+    }
+    r = await cycle(p, { now: T + 4 * (D.BACKOFF_MS + MIN) });
+    assert.equal(r.outcome.ok, true, 'the fifth busy answer sets it aside');
+    assert.equal(r.outcome.refused, 1);
+    assert.equal(node.sends.length, 5);
+    assert.equal(new Set(node.sends.map((x) => x.idempotency_key)).size, 1, 'one key for every attempt');
+    const s = D.loadState(p);
+    assert.equal(s.outbox, null);
+    assert.equal(s.setAside.refused, 1);
+    assert.deepEqual(node.stored, []);
+  } finally {
+    node.close();
+  }
+});
+
 test('an outbox line damaged after distil_done is set aside; the intact records are still delivered and the pipeline goes on', async () => {
   const { p, files } = sandbox(2);
   saveCredentials(creds(DOWN), p);
@@ -655,13 +748,19 @@ test('the headless run is confined: read-only tools, only the plugin\'s own serv
   assert.equal(ran.flags.settings, join(D.distilPaths(p).runs, `${r.plan.runId}.settings.json`), 'the rules are a file of the run, so each path is on the command line once');
   const settings = JSON.parse(ran.settingsFile);
   assert.equal(settings.disableAllHooks, true);
-  assert.deepEqual([...settings.permissions.allow].sort(), files.map(readRule).sort(), 'it may read exactly the noted transcripts');
+  assert.deepEqual([...settings.permissions.allow].sort(), files.map(fileRules).sort(), 'it may read (and so glob and grep) exactly the noted transcripts');
   assert.equal(existsSync(ran.flags.settings), false, 'the file goes when the run ends');
   assert.equal(ran.cwd, join(p.state, 'distil'), 'it runs in the distil\'s own folder, never in a project of the person');
 });
 
 // The absolute form of a path in a permission rule: POSIX, `//` from the root, a drive as /c/.
-const readRule = (path) => `Read(/${path.replace(/^([A-Za-z]):\\/, (_, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/')})`;
+const ruleAbs = (path) => `/${path.replace(/^([A-Za-z]):\\/, (_, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/')}`;
+// Claude Code checks the path of every file-reading tool (Read, Glob, Grep) against Read(path) rules
+// only; a Glob(path) or Grep(path) rule is never matched. So each path gets one Read rule: a file, or
+// a folder and what lies in it.
+const fileRules = (path) => `Read(${ruleAbs(path)})`;
+const folderRules = (path) => [fileRules(path), `Read(${ruleAbs(path)}/**)`];
+const noToolPathRules = (allow) => assert.ok(!allow.some((r) => /^(Glob|Grep)\(/.test(r)), 'no Glob(path) or Grep(path) rule: Claude Code never matches one');
 
 test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s POSIX form on Windows and elsewhere', () => {
   const plan = {
@@ -683,6 +782,9 @@ test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s PO
     'Read(//d/claude \\[work\\]/projects/x/b\\*\\?.jsonl)',
     'Read(//home/ola/.claude/projects/-home-ola-demo/c.jsonl)',
   ]);
+  noToolPathRules(settings.permissions.allow);
+  const prompt = args[args.indexOf('-p') + 1];
+  assert.match(prompt, /Grep a listed transcript by its own path/, 'the run is told how it may search a long range');
   assert.ok(!settings.permissions.allow.some((r) => /^(Read|Glob|Grep)$/.test(r)), 'never a rule for every path');
   assert.deepEqual(args[args.indexOf('--allowedTools') + 1].split(',').sort(), ['mcp__wybe__distil_done', 'mcp__wybe__pending_questions', 'mcp__wybe__remember']);
 });
@@ -704,15 +806,15 @@ test('an import may also read the Claude home\'s CLAUDE.md and, of the projects 
   const plan = { runId: 'r-i', mode: 'import', importOf: '2026-10-21T10:00:00.000Z', connection: null, claudeHome: home, transcripts: [{ path: t, sessionId: 's', cwd: null, fromLine: 0, toLine: 1 }] };
   const args = D.claudeArgs(plan, { root: '/h', settingsFile: '/h/run.settings.json' });
   const allow = D.claudeSettings(plan).permissions.allow;
-  const mem = readRule(join(folder, 'memory'));
   assert.deepEqual([...allow].sort(), [
-    readRule(t),
-    readRule(join(home, 'CLAUDE.md')),
-    readRule(join(project, 'CLAUDE.md')),
-    readRule(join(project, '.claude', 'CLAUDE.md')),
-    mem,
-    `${mem.slice(0, -1)}/**)`,
+    fileRules(t),
+    fileRules(join(home, 'CLAUDE.md')),
+    fileRules(join(project, 'CLAUDE.md')),
+    fileRules(join(project, '.claude', 'CLAUDE.md')),
+    ...folderRules(join(folder, 'memory')),
   ].sort());
+  noToolPathRules(allow);
+  assert.ok(!allow.some((r) => /\/projects(\/\*\*)?\)$/.test(r)), 'never the projects folder itself');
   assert.ok(!allow.some((r) => r.includes('C--other')), 'another project\'s memory is not in this import');
   const prompt = args[args.indexOf('-p') + 1];
   assert.ok(prompt.includes(join(folder, 'memory')), 'the prompt names the memory folder it may read');
@@ -770,6 +872,118 @@ test('Import: a request runs once, sends import_of on its last call, and counts 
   assert.equal(D.requestImport(p, at), false, 'the same request is not run twice');
   assert.equal(D.maybeRun({ paths: p, env: {}, now: T + MIN, spawnImpl: recorder().spawnImpl }), null);
   node.close();
+});
+
+test('Import: facts in the words a model picks (category, empty subject, a non-id answer) reach a node that checks its schema, and the import is confirmed', async () => {
+  const { root, p, files } = sandbox();
+  const node = await httpNode({ strict: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  const log = join(root, 'fake.log');
+  const r = await cycle(p, { now: T, env: { FAKE_CALLS: '1', FAKE_LOG: log, FAKE_ITEM: JSON.stringify({ category: 'ways of working', subject: '' }), FAKE_ANSWERS: JSON.stringify(['q-1']) } });
+  node.close();
+  assert.equal(r.outcome.ok, true);
+  assert.equal(r.outcome.refused, 0, 'the node refused nothing');
+  assert.equal(r.outcome.importDone, true, 'the node confirmed the import');
+  assert.deepEqual(node.stored, ['Fact 1 of 1.']);
+  assert.equal(node.sends[0].import_of, at);
+  assert.equal(D.loadState(p).lastError, null);
+});
+
+test('Import: an answer shaped like an id but with a version or variant digit the node does not take is left out, and the import is confirmed', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ strict: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  const r = await cycle(p, { now: T, env: { FAKE_CALLS: '1', FAKE_ANSWERS: JSON.stringify(['12345678-1234-1234-1234-123456789abc', '12345678-1234-4234-7234-123456789abc']) } });
+  node.close();
+  assert.equal(r.outcome.refused, 0, 'the node refused nothing');
+  assert.equal(r.outcome.importDone, true, 'the node confirmed the import');
+  assert.equal(node.sends[0].answers, undefined, 'neither is a question id the node takes');
+  assert.equal(D.loadState(p).lastError, null);
+});
+
+test('remember keeps exactly the answers the node takes as question ids', async () => {
+  const { cleanRememberArgs } = await lib('mcp-proxy.js');
+  const ok = ['0b6f3c6e-6a3e-4f1a-9c3e-2b1d4e5f6a7b', '0B6F3C6E-6A3E-1F1A-AC3E-2B1D4E5F6A7B', '00000000-0000-0000-0000-000000000000', 'ffffffff-ffff-ffff-ffff-ffffffffffff'];
+  const not = ['12345678-1234-1234-1234-123456789abc', '12345678-1234-0234-8234-123456789abc', '12345678-1234-9234-8234-123456789abc', '12345678-1234-4234-c234-123456789abc', 'q-1'];
+  for (const a of [...ok, ...not]) assert.equal(UUID.test(a), ok.includes(a), `the fake node agrees on ${a}`);
+  const { args } = cleanRememberArgs({ items: [{ content: 'A fact.' }], answers: [...not, ...ok] });
+  assert.deepEqual(args.answers, ok);
+});
+
+test('the distil run\'s remember offers exactly the node\'s categories', async () => {
+  const { DISTIL_TOOLS } = await lib('mcp-proxy.js');
+  const remember = DISTIL_TOOLS.find((t) => t.name === 'remember');
+  assert.deepEqual(remember.inputSchema.properties.items.items.properties.category.enum, NODE_CATEGORIES);
+});
+
+test('Import: a "try again later" on the batch carrying import_of keeps the import open here; after the backoff the same batch goes again and the import is confirmed', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ answers: ['busy', 'ok'], dedupe: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  try {
+    const r1 = await cycle(p, { now: T });
+    assert.equal(r1.outcome.class, 'node-busy', 'not refused for good');
+    let s = D.loadState(p);
+    assert.notEqual(s.importHandled, at, 'the import is not handled while the node holds it open');
+    assert.equal(s.outbox?.importOf, at, 'its facts wait on this machine');
+    const r2 = await cycle(p, { now: T + D.BACKOFF_MS + MIN });
+    assert.equal(r2.outcome.ok, true);
+    assert.equal(r2.outcome.importDone, true, 'the node confirmed the import');
+    assert.deepEqual(node.sends.map((x) => x.import_of), [at, at]);
+    assert.equal(node.sends[1].idempotency_key, node.sends[0].idempotency_key);
+    s = D.loadState(p);
+    assert.equal(s.importHandled, at);
+    assert.equal(s.lastError, null);
+  } finally {
+    node.close();
+  }
+});
+
+test('Import: a batch carrying import_of that the node refuses for good leaves the import unconfirmed, with the node\'s own refusal in lastError and in the notice', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ answers: ['toolError'] });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  const r = await cycle(p, { now: T });
+  node.close();
+  assert.equal(r.outcome.ok, true);
+  assert.equal(r.outcome.refused, 1);
+  assert.equal(r.outcome.importDone, false);
+  const s = D.loadState(p);
+  assert.equal(s.lastError?.class, 'import-unconfirmed');
+  assert.match(s.lastError.message, /items\[0\]\.content: too long/, 'the node\'s refusal, not a generic line');
+  assert.match(D.distilNotice(p, { now: T + MIN }), /items\[0\]\.content: too long/);
+});
+
+test('Import: a run whose import batch was stored without import_done still says only that', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ importDone: false });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  D.requestImport(p, '2026-10-21T10:00:00.000Z');
+  const r = await cycle(p, { now: T });
+  node.close();
+  assert.equal(r.outcome.ok, true);
+  assert.equal(r.outcome.refused, 0);
+  const s = D.loadState(p);
+  assert.equal(s.lastError?.class, 'import-unconfirmed');
+  assert.equal(s.lastError.message, 'no import_done in the answer');
 });
 
 test('Import: a run that sent no import_of is a failed distil, retried after the back-off', async () => {
