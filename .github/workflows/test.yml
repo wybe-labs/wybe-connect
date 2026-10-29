@@ -41,7 +41,7 @@ jobs:
     timeout-minutes: 10
     steps:
       # Full history: the scans read the lines added since the merge base with the target branch
-      # (a pull request) or since the commit before (a push to main).
+      # (a pull request) or since the commit main pointed at before the push.
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -64,7 +64,11 @@ jobs:
           "
       - name: No personal data in added lines
         if: ${{ !cancelled() }}
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
         run: node scripts/leak-scan.mjs
       - name: No ruling ids or dated attributions in added lines
         if: ${{ !cancelled() }}
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
         run: node scripts/check-no-rulings.mjs

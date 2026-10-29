@@ -9,8 +9,9 @@
  * What it looks for, in added lines (default) or in the whole tree (--all):
  *   email  an address outside the reserved and own domains in ALLOWED_DOMAINS (example.*, *.test,
  *          *.invalid, localhost, wybe.me); `git@host` is an SSH remote, not a person
- *   phone  Norwegian numbers (+47, or 8 digits starting with 4 or 9) and international +<10-15 digits>,
- *          except obviously made-up ones (one digit repeated, 12345678 runs)
+ *   phone  Norwegian mobile numbers (8 digits starting with 4 or 9: bare, in groups, or after +47)
+ *          and international +<10-15 digits>, except obviously made-up ones (one digit repeated,
+ *          12345678 runs)
  *
  * It prints file:line and the kind of hit, never the value. The last line is LEAK_SCAN_OK or
  * LEAK_SCAN_FAIL. A line that carries a made-up value on purpose can opt out with the comment
@@ -29,6 +30,7 @@ const PHONE = [
   /(?<![\w+])\+47[\s.-]?(?:\d{2}[\s.-]?\d{2}[\s.-]?\d{2}[\s.-]?\d{2}|\d{3}[\s.-]?\d{2}[\s.-]?\d{3})(?!\d)/g,
   /(?<![\w+\d.-])[49]\d{2}[\s.]\d{2}[\s.]\d{3}(?![\d.])/g,
   /(?<![\w+\d])[49]\d[\s.]\d{2}[\s.]\d{2}[\s.]\d{2}(?![\d.])/g,
+  /(?<![\w+.,-])[49]\d{7}(?![\w.,-])/g,
   /(?<![\w\d])\+(?!47)[1-9]\d{9,14}(?!\d)/g,
 ];
 const SKIP_FILES = [/(^|\/)node_modules\//, /package-lock\.json$/,
@@ -80,17 +82,22 @@ export function scanLine(line) {
   return hits;
 }
 
-/** The lines added since `base`: [{ file, nr, text }]. */
+/**
+ * The lines added since `base`: [{ file, nr, text }]. A file's name is read only from its header
+ * (between `diff --git` and the first @@), never from a hunk: an added line that itself starts
+ * with "++" shows as "+++ ..." in the diff and is content.
+ */
 export function addedLines(base, cwd = process.cwd()) {
   const diff = execFileSync('git', ['-c', 'core.quotepath=off', 'diff', '-U0', '--no-color', '--no-ext-diff', '--diff-filter=AMR', base, '--'],
     { cwd, encoding: 'utf8', maxBuffer: 256 * 1024 * 1024 });
   const out = [];
-  let file = null; let nr = 0;
+  let file = null; let nr = 0; let inHunk = false;
   for (const l of diff.split('\n')) {
-    if (l.startsWith('+++ ')) { file = l.slice(4).replace(/^b\//, ''); continue; }
+    if (l.startsWith('diff --git ')) { file = null; inHunk = false; continue; }
     const h = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(l);
-    if (h) { nr = Number(h[1]); continue; }
-    if (file && l.startsWith('+') && !l.startsWith('+++')) { out.push({ file, nr, text: l.slice(1).replace(/\r$/, '') }); nr++; }
+    if (h) { nr = Number(h[1]); inHunk = true; continue; }
+    if (!inHunk) { if (l.startsWith('+++ ')) file = l.slice(4).replace(/^b\//, ''); continue; }
+    if (file && l.startsWith('+')) { out.push({ file, nr, text: l.slice(1).replace(/\r$/, '') }); nr++; }
   }
   return out;
 }
@@ -111,7 +118,9 @@ const gitMergeBase = (ref) => execFileSync('git', ['merge-base', 'HEAD', ref], {
  * What "added" is measured against. One answer per event, and never a quiet fallback that reads less:
  *   pull_request  the merge base with origin/<target branch> (the checkout fetches full history).
  *                 When it is missing that is an error: HEAD~1 would see only the last commit.
- *   push          HEAD^1, the branch as it was before this commit or merge.
+ *   push          PUSH_BEFORE (the workflow passes github.event.before), the branch as it was
+ *                 before the push, so a push of several commits is read whole. For a new branch
+ *                 (all zeros) or a commit no longer in the checkout: HEAD^1.
  *   local         origin/main, else HEAD~1.
  * `{ base: null, reason }` means "unknown"; main() says so and fails instead of reading everything.
  */
@@ -124,7 +133,8 @@ export function findBase(arg, env = process.env, mergeBase = gitMergeBase) {
     return base ? { base } : { base: null, reason: `the target branch origin/${target ?? '?'} is not in the checkout (fetch-depth: 0?)` };
   }
   if (env.GITHUB_EVENT_NAME === 'push') {
-    const base = tryRef('HEAD^1');
+    const before = env.PUSH_BEFORE && !/^0+$/.test(env.PUSH_BEFORE) ? tryRef(env.PUSH_BEFORE) : null;
+    const base = before ?? tryRef('HEAD^1');
     return base ? { base } : { base: null, reason: 'a push without a parent (HEAD^1 is not in the checkout)' };
   }
   const base = tryRef('origin/main') ?? tryRef('HEAD~1');
