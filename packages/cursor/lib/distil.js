@@ -1056,21 +1056,19 @@ export function ruleAbsPath(path) {
   return `/${s.replace(/[\\[\]*?]/g, (c) => `\\${c}`)}`;
 }
 
-/** The run's file tools: each gets the same path-scoped rules. */
-const READ_TOOLS = ['Read', 'Glob', 'Grep'];
-const toolRules = (rulePath) => READ_TOOLS.map((tool) => `${tool}(${rulePath})`);
-
 /**
- * The run's read permission: for each path the plan reads, one Read, one Glob and one Grep rule,
- * never a broader one (a run that greps a parent folder is refused). A folder gets rules for
- * itself (so it can be listed) and for what lies in it.
+ * The run's read permission: for each path the plan reads, one Read rule, never a broader one (a
+ * run that greps a parent folder is refused). Claude Code checks the path of every file-reading
+ * tool (Read, Glob, Grep) against Read(path) rules only, so a Read rule for a transcript is what
+ * lets the run Grep that file; a Glob(path) or Grep(path) rule would never be matched. A folder gets
+ * a rule for itself (so it can be listed) and for what lies in it.
  */
 export function claudeReadRules(plan) {
-  const rules = (plan.transcripts ?? []).flatMap((t) => toolRules(ruleAbsPath(t.path)));
+  const rules = (plan.transcripts ?? []).map((t) => `Read(${ruleAbsPath(t.path)})`);
   if (plan.mode === 'import') {
     const extra = importReads(plan);
-    for (const f of [extra.home, ...extra.files]) rules.push(...toolRules(ruleAbsPath(f)));
-    for (const d of extra.dirs) rules.push(...toolRules(ruleAbsPath(d)), ...toolRules(`${ruleAbsPath(d)}/**`));
+    for (const f of [extra.home, ...extra.files]) rules.push(`Read(${ruleAbsPath(f)})`);
+    for (const d of extra.dirs) rules.push(`Read(${ruleAbsPath(d)})`, `Read(${ruleAbsPath(d)}/**)`);
   }
   return [...new Set(rules)];
 }
