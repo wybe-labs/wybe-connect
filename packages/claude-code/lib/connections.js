@@ -16,12 +16,14 @@
 // A grant keeps the harness account it was made under (harnessAccount, lib/session-info.js accountOf).
 // A second harness account on a node that already has a connection gets <host>~<short account hash>
 // (accountKey), so the first account's grant is never replaced; the name never carries the account.
+// A grant made before accounts were recorded carries none, and only a sign-in under an account marks one.
 //
 // Which connection a session uses, first match wins:
 //   1. the one the session already uses (its first hook fixed it; `connect use --session` changes it)
 //   2. WYBE_CONNECT_NODE (a name, host or URL) in the harness's environment; unknown means none,
 //      never another node
-//   3. the most recently used connection made under the harness account the session runs under
+//   3. the most recently used connection made under the harness account the session runs under; when it has
+//      none and the default is another account's, the default node's connection made before accounts were recorded
 //   4. the default: the most recently connected or `use`d one, or the only one
 // A session is fixed to a connection and its node: when that connection is removed, or its name
 // is reused for another node, the session stays unconnected rather than move. A name another node
@@ -227,11 +229,17 @@ function heldFor(root, key, origin) {
   return { account: accountId(held.harnessAccount) };
 }
 
+/** `<host>~<short account hash>`: the name of a second harness account's connection to `nodeUrl`. */
+export function accountName(nodeUrl, account) {
+  const hash = createHash('sha256').update(accountId(account) ?? '').digest('hex').slice(0, ACCOUNT_HASH);
+  return `${connectionKey(nodeUrl).slice(0, MAX_NAME - ACCOUNT_HASH - 1)}~${hash}`;
+}
+
 /**
  * The name a grant for `nodeUrl` made under harness `account` belongs under: the connection this node already has
  * for that account (the most recently used first, the host's own name before others), else the host, else, when the
- * host's connection is another account's, `<host>~<short account hash>`. A connection made before accounts were
- * recorded counts as this account's. Without an account: the host, as before.
+ * host's connection is another account's, accountName. The host's connection made before accounts were recorded is
+ * renewed under its own name, since nothing tells whose it is. Without an account: the host, as before.
  */
 export function accountKey(root, nodeUrl, account) {
   migrateLegacy(root);
@@ -245,8 +253,7 @@ export function accountKey(root, nodeUrl, account) {
   if (same.length) return same[0];
   const atBase = heldFor(root, base, origin);
   if (!atBase || atBase.account === null) return base;
-  const hash = createHash('sha256').update(a).digest('hex').slice(0, ACCOUNT_HASH);
-  return `${base.slice(0, MAX_NAME - ACCOUNT_HASH - 1)}~${hash}`;
+  return accountName(nodeUrl, a);
 }
 
 /**
@@ -533,7 +540,8 @@ export function connectionNames(root) {
 
 /**
  * The most recently used connection made under harness account `account` (a value, or a function read only when
- * there is a choice to make), or null.
+ * there is a choice to make). Without one, when the default is another account's: the most recently used connection
+ * of the default's node made before accounts were recorded, rather than the other account's. Else null.
  */
 function accountConnection(root, account) {
   const known = knownKeys(root);
@@ -544,7 +552,13 @@ function accountConnection(root, account) {
   if (!a) return null;
   const order = recent(root);
   const rank = (k) => (order.includes(k) ? order.indexOf(k) : order.length);
-  return known.filter((k) => by.get(k) === a).sort((x, y) => rank(x) - rank(y) || x.localeCompare(y))[0] ?? null;
+  const newest = (keys) => keys.sort((x, y) => rank(x) - rank(y) || x.localeCompare(y))[0] ?? null;
+  const own = newest(known.filter((k) => by.get(k) === a));
+  if (own) return own;
+  const def = defaultConnection(root);
+  if (!def || !by.get(def)) return null;
+  const origin = originOf(readGrant(connectionPaths(root, def)).nodeUrl);
+  return newest(known.filter((k) => by.get(k) === null && heldFor(root, k, origin)));
 }
 
 /**

@@ -15,7 +15,7 @@
 
 import { connect, renewGrant, ALL_SCOPES, STATIC_CLIENTS } from './oauth.js';
 import { harnessHome } from './home.js';
-import { connectionPaths, connectionGrant, renewConnection, listConnections, saveConnection, useConnection, removeConnection, checkedName, checkSave, sessionTranscript, accountKey, NODE_ENV } from './connections.js';
+import { connectionPaths, connectionGrant, renewConnection, listConnections, saveConnection, useConnection, removeConnection, checkedName, checkSave, sessionTranscript, accountKey, accountName, NODE_ENV } from './connections.js';
 import { noteSession } from './distil.js';
 import { accountOf } from './session-info.js';
 
@@ -93,8 +93,9 @@ function printList(root, out) {
 /**
  * A connect to a node this home already holds a grant for (same fixed client, same scopes or
  * fewer, the same harness account) renews that grant instead of signing in again, so a re-run
- * never makes a new grant. A grant made before accounts were recorded gets `account` now.
- * Returns { key, credentials } when renewed, or null when a sign-in is needed.
+ * never makes a new grant. A grant made before accounts were recorded is renewed as it is: it may
+ * be another account's, so it is never marked as `account`'s, and `unmarked` says so.
+ * Returns { key, credentials, unmarked } when renewed, or null when a sign-in is needed.
  */
 export async function renewStored(root, nodeUrl, { name = null, scopes = null, clientId = null, account = null, fetchImpl = globalThis.fetch } = {}) {
   if (!clientId) return null;
@@ -107,13 +108,13 @@ export async function renewStored(root, nodeUrl, { name = null, scopes = null, c
   const held = connectionGrant(root, key);
   const renewed = await renewGrant(held, { clientId, nodeUrl, scopes, fetchImpl });
   if (!renewed) return null;
-  const next = account && !held.harnessAccount ? { ...renewed, harnessAccount: account } : renewed;
   try {
-    renewConnection(root, key, next);
+    renewConnection(root, key, renewed);
   } catch {
     return null;
   }
-  return { key, credentials: next };
+  const unmarked = typeof account === 'string' && Boolean(account.trim()) && !held.harnessAccount;
+  return { key, credentials: renewed, unmarked };
 }
 
 export async function runConnect({ harness, clientName, clientId = STATIC_CLIENTS[harness] ?? null, nextSteps, argv = process.argv.slice(2), out = process.stdout, err = process.stderr, connectImpl = connect, fetchImpl = globalThis.fetch, env = process.env, account = undefined }) {
@@ -154,6 +155,10 @@ export async function runConnect({ harness, clientName, clientId = STATIC_CLIENT
     if (renewed) {
       ({ key, credentials } = renewed);
       out.write(`Already connected to ${credentials.nodeUrl}: the stored grant was renewed, no new sign-in.\n`);
+      if (renewed.unmarked) {
+        out.write(`${key} was connected before wybe-connect recorded which account a connection is for, so it is not marked as this account's.\n`);
+        out.write(`If it was made under another account, give this one a connection of its own: connect.js ${credentials.nodeUrl} --name ${accountName(parsed.nodeUrl, harnessAccount)}\n`);
+      }
     } else {
       const name = parsed.name ?? accountKey(root, parsed.nodeUrl, harnessAccount);
       checkSave(root, parsed.nodeUrl, name); // a name another node holds is refused before the browser opens
