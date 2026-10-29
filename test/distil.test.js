@@ -52,7 +52,8 @@ function sandbox(n = 3) {
  * arguments as the node's remember schema does and refuses the whole call (a tool error) on any mismatch.
  */
 const NODE_CATEGORIES = ['fact', 'preference', 'pattern', 'entity', 'insight', 'relation'];
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The node's z.uuid() (zod 4): a version digit 1-8 and a variant digit 8, 9, a or b, or the nil or max id.
+const UUID = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 const nodeSchemaError = (args) => {
   const items = args.items;
   if (!Array.isArray(items) || items.length < 1 || items.length > 50) return 'items';
@@ -816,6 +817,31 @@ test('Import: facts in the words a model picks (category, empty subject, a non-i
   assert.deepEqual(node.stored, ['Fact 1 of 1.']);
   assert.equal(node.sends[0].import_of, at);
   assert.equal(D.loadState(p).lastError, null);
+});
+
+test('Import: an answer shaped like an id but with a version or variant digit the node does not take is left out, and the import is confirmed', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ strict: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  const r = await cycle(p, { now: T, env: { FAKE_CALLS: '1', FAKE_ANSWERS: JSON.stringify(['12345678-1234-1234-1234-123456789abc', '12345678-1234-4234-7234-123456789abc']) } });
+  node.close();
+  assert.equal(r.outcome.refused, 0, 'the node refused nothing');
+  assert.equal(r.outcome.importDone, true, 'the node confirmed the import');
+  assert.equal(node.sends[0].answers, undefined, 'neither is a question id the node takes');
+  assert.equal(D.loadState(p).lastError, null);
+});
+
+test('remember keeps exactly the answers the node takes as question ids', async () => {
+  const { cleanRememberArgs } = await lib('mcp-proxy.js');
+  const ok = ['0b6f3c6e-6a3e-4f1a-9c3e-2b1d4e5f6a7b', '0B6F3C6E-6A3E-1F1A-AC3E-2B1D4E5F6A7B', '00000000-0000-0000-0000-000000000000', 'ffffffff-ffff-ffff-ffff-ffffffffffff'];
+  const not = ['12345678-1234-1234-1234-123456789abc', '12345678-1234-0234-8234-123456789abc', '12345678-1234-9234-8234-123456789abc', '12345678-1234-4234-c234-123456789abc', 'q-1'];
+  for (const a of [...ok, ...not]) assert.equal(UUID.test(a), ok.includes(a), `the fake node agrees on ${a}`);
+  const { args } = cleanRememberArgs({ items: [{ content: 'A fact.' }], answers: [...not, ...ok] });
+  assert.deepEqual(args.answers, ok);
 });
 
 test('the distil run\'s remember offers exactly the node\'s categories', async () => {
