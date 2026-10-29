@@ -10,7 +10,7 @@ import { runStdio } from '../lib/mcp-proxy.js';
 import { STATIC_CLIENTS } from '../lib/oauth.js';
 import { harnessHome } from '../lib/home.js';
 import { NODE_ENV } from '../lib/connections.js';
-import { DISTIL_ENV, requestImport, maybeRun, planPaths } from '../lib/distil.js';
+import { DISTIL_ENV, requestImport, maybeRunUntilPlanned, planPaths } from '../lib/distil.js';
 
 const root = harnessHome('claude-code');
 const run = process.env[DISTIL_ENV];
@@ -22,6 +22,6 @@ runStdio({
   clientName: 'wybe-connect (Claude Code)',
   distilRun,
   onImportRequest: (requestedAt, p) => {
-    if (p && requestImport(p, requestedAt)) maybeRun({ paths: p });
+    if (p && requestImport(p, requestedAt)) maybeRunUntilPlanned({ paths: p }).catch(() => {}); // a chunk of the disk per turn, so the server keeps answering
   },
 });

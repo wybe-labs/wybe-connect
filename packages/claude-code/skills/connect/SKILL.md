@@ -46,10 +46,11 @@ start; the person is granting access to their work context and should hear what 
 
 4. **Confirm** in one paragraph: connected to which node, and which scopes. Say that the first
    sync now runs by itself in the background: the node asked for an import, and the plugin
-   distils this machine's recent Claude Code sessions and memory into short work facts. There is
-   no step for the person. From then on, the same distil runs at most every 6 hours. Pairing
-   can be revoked under "Mine koblinger" on the node (revoking stops the flow; erasing what was
-   learned is a separate action there). Do not interview the person or send facts yourself now:
+   distils every Claude Code session still on this machine, and its memory, into short work facts
+   and one summary per project. There is no step for the person.
+   From then on, the same distil runs at most every 6 hours. Pairing can be revoked under
+   "Mine koblinger" on the node (revoking stops the flow; erasing what was learned is a separate
+   action there). Do not interview the person or send facts yourself now:
    the import already covers it, and a second first sync would store everything twice.
 
 ## Never

@@ -94,7 +94,7 @@ const QUESTION_ID = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB
 export const DISTIL_TOOLS = Object.freeze([
   Object.freeze({
     name: 'remember',
-    description: 'Queue durable facts about the person\'s WORK for their Wybe AI colleague: projects, decisions, preferences, ways of working, tools, ideas. One short, self-contained statement per item. Work only: nothing personal, nothing about other people, no secrets. The facts are sent after distil_done.',
+    description: 'Queue durable facts about the person\'s WORK for their Wybe AI colleague: projects, decisions, preferences, ways of working, tools, ideas. One short, self-contained statement per item. Work only: nothing personal, nothing about other people, no secrets. Also one summary item per project: subject = the project\'s name, category insight, content starting "Project summary:", at most 3000 characters. The items are sent after distil_done.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -455,8 +455,8 @@ export const POLL_FIRST_MS = 2000;
 export const POLL_EVERY_MS = 5 * 60 * 1000;
 
 /**
- * Newline-delimited JSON-RPC on stdin/stdout (the MCP stdio transport). With onImportRequest, an
- * «Importer» press is picked up while Claude Code is open: pending_questions 2 s after start, then
+ * Newline-delimited JSON-RPC on stdin/stdout (the MCP stdio transport). With onImportRequest, the
+ * node's import request is picked up while Claude Code is open: pending_questions 2 s after start, then
  * every 5 minutes (timers unref'd, so they never keep the process alive).
  */
 export function runStdio({ paths, root = null, env = process.env, clientId = null, clientName, input = process.stdin, output = process.stdout, distilRun = null, onImportRequest = null }) {

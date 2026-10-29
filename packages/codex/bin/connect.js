@@ -12,7 +12,7 @@ process.exitCode = await runConnect({
   clientName: 'wybe-connect (Codex)',
   nextSteps: () => [
     'The plugin\'s `wybe` MCP server uses this same grant for the interactive tools; restart Codex to load them.',
-    'The first sync starts by itself: the colleague asks for an import, and the plugin distils your Codex sessions of the last 30 days in the background.',
+    'The first sync starts by itself: the colleague asks for an import, and the plugin distils every Codex session still on this machine in the background.',
     'Codex runs a plugin\'s hooks only after you have reviewed and trusted them once; do that when Codex asks.',
     '',
   ].join('\n'),
