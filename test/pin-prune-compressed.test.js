@@ -117,23 +117,54 @@ test('compressed rollout: a move while only the .zst exists is refused, pins and
   const before = readFileSync(pinFile(s), 'utf8');
   assert.throws(() => useConnection(s.root, H('b'), { sessionId: SID }), (e) => e.code === 'ETRANSCRIPTCOMPRESSED');
   assert.equal(readFileSync(pinFile(s), 'utf8'), before);
+  const cli = await useViaCli(s, H('b'));
+  assert.equal(cli.code, 1);
+  assert.match(cli.err, /compressed/);
+  assert.match(cli.err, /resume/i);
+  assert.equal(cli.out, '');
+  assert.equal(readFileSync(pinFile(s), 'utf8'), before);
+  assert.equal(pinnedConnection(s.root, SID), H('a'));
+});
+
+// `connect use <ref> --session <SID>` as the person runs it.
+async function useViaCli(s, ref) {
   const prev = process.env.WYBE_CONNECT_HOME;
   process.env.WYBE_CONNECT_HOME = s.home;
   const out = { text: '', write(x) { this.text += x; } };
   const err = { text: '', write(x) { this.text += x; } };
   try {
-    const code = await runConnect({ harness: 'codex', clientName: 'x', argv: ['use', H('b'), '--session', SID], out, err, nextSteps: () => '' });
-    assert.equal(code, 1);
+    const code = await runConnect({ harness: 'codex', clientName: 'x', argv: ['use', ref, '--session', SID], out, err, nextSteps: () => '' });
+    return { code, out: out.text, err: err.text };
   } finally {
     if (prev === undefined) delete process.env.WYBE_CONNECT_HOME;
     else process.env.WYBE_CONNECT_HOME = prev;
   }
-  assert.match(err.text, /compressed/);
-  assert.match(err.text, /resume/i);
-  assert.equal(out.text, '');
-  assert.equal(readFileSync(pinFile(s), 'utf8'), before);
-  assert.equal(pinnedConnection(s.root, SID), H('a'));
-});
+}
+
+// A rollout moved into archived_sessions (plain or compressed) is no longer where the pin says, so its lines cannot be
+// counted there either. The move is refused the same way: guessing the boundary from the previous segment would hand
+// the lines written on B to A.
+for (const zst of ['', '.zst']) {
+  test(`compressed rollout: a move while the rollout sits only in archived_sessions${zst ? ' as .zst' : ''} is refused, pins and segments unchanged`, async () => {
+    const s = await setup();
+    const archived = join(s.codexHome, 'archived_sessions');
+    mkdirSync(archived, { recursive: true });
+    renameSync(s.rollout, join(archived, `${rolloutName(SID)}${zst}`));
+    const before = readFileSync(pinFile(s), 'utf8');
+    const lines = () => ({ a: sessionLines(s.root, SID, H('a')), b: sessionLines(s.root, SID, H('b')) });
+    const was = lines();
+    assert.deepEqual(was, { a: [[0, s.boundary]], b: [[s.boundary, null]] });
+    assert.throws(() => useConnection(s.root, H('a'), { sessionId: SID }), (e) => e.code === 'ETRANSCRIPTUNCOUNTED');
+    assert.equal(readFileSync(pinFile(s), 'utf8'), before);
+    const cli = await useViaCli(s, H('a'));
+    assert.equal(cli.code, 1);
+    assert.match(cli.err, /cannot be counted/);
+    assert.match(cli.err, /resume/i);
+    assert.equal(cli.out, '');
+    assert.equal(readFileSync(pinFile(s), 'utf8'), before);
+    assert.deepEqual(lines(), was);
+  });
+}
 
 test('compressed rollout: recordTranscript stores the .jsonl spelling, so a later move counts the uncompressed lines', () => {
   const dir = mkdtempSync(join(tmpdir(), 'wybe-connect-zst-'));
