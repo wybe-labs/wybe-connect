@@ -1293,6 +1293,7 @@ export function buildPrompt(plan) {
   }
   if (!plan.transcripts.length) lines.push('- (none)');
   lines.push('Read only those ranges: never another transcript, nor other lines of these. What lies outside them was distilled already, and reading it again would store the same facts twice.');
+  if (!codex) lines.push('A range too long to read whole: Grep a listed transcript by its own path (one file per call, never a folder) and use only the matches inside its range.');
   if (codex) {
     lines.push('In a rollout the person\'s own words are the event_msg user_message (or item_completed UserMessage) events and the answers are response_item messages with role assistant. Developer messages, AGENTS.md and <environment_context> blocks are the harness talking, not the person. Run nothing that writes or changes anything.');
   }
@@ -1332,14 +1333,18 @@ export function ruleAbsPath(path) {
   return `/${s.replace(/[\\[\]*?]/g, (c) => `\\${c}`)}`;
 }
 
+/** The run's file tools: each gets the same path-scoped rules. */
+const READ_TOOLS = ['Read', 'Glob', 'Grep'];
+const toolRules = (rulePath) => READ_TOOLS.map((tool) => `${tool}(${rulePath})`);
+
 /**
- * The run's read permission: one Read rule per file the plan reads (its transcripts and its
- * memory files, planMemory), never a broader one. Read rules are what Claude Code applies to Glob
- * and Grep too.
+ * The run's read permission: for each file the plan reads (its transcripts and its memory files,
+ * planMemory), one Read, one Glob and one Grep rule, never a broader one (a run that greps a parent
+ * folder is refused).
  */
 export function claudeReadRules(plan) {
   const memory = Array.isArray(plan.memory) ? plan.memory.filter((f) => typeof f?.path === 'string') : [];
-  return [...new Set([...(plan.transcripts ?? []), ...memory].map((x) => `Read(${ruleAbsPath(x.path)})`))];
+  return [...new Set([...(plan.transcripts ?? []), ...memory].flatMap((x) => toolRules(ruleAbsPath(x.path))))];
 }
 
 /** The run's own settings (claudeArgs): no hooks, and reads of the plan's paths only. */

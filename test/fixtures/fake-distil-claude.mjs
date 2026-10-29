@@ -3,6 +3,8 @@
 // tools/list. A model can call only what is listed, so this does too. It acts per environment:
 //   FAKE_CALLS  remember calls to make (default 1), each one item "Fact <i> of <n>."; in import
 //               mode the last one carries import_of from the prompt
+//   FAKE_ITEM   JSON merged into every item (e.g. a category or subject a model might pick)
+//   FAKE_ANSWERS JSON list passed as answers on the first remember call
 //   FAKE_DONE   '0' skips distil_done at the end (a run that dies or forgets to finish)
 //   FAKE_EXIT   the exit code (default 0: claude -p exits 0 after a tool error too)
 //   FAKE_LOG    appends one JSON line: the tools it saw, every answer, the flags it got, its cwd, the --settings file's content
@@ -30,7 +32,8 @@ const calls = Number(process.env.FAKE_CALLS ?? 1);
 if (tools.includes('remember')) {
   for (let i = 0; i < calls; i++) {
     const last = i === calls - 1;
-    const args = { items: [{ content: `Fact ${i + 1} of ${calls}.`, subject: 'project' }], ...(last && importOf ? { import_of: importOf } : {}) };
+    const item = { content: `Fact ${i + 1} of ${calls}.`, subject: 'project', ...JSON.parse(process.env.FAKE_ITEM ?? '{}') };
+    const args = { items: [item], ...(i === 0 && process.env.FAKE_ANSWERS ? { answers: JSON.parse(process.env.FAKE_ANSWERS) } : {}), ...(last && importOf ? { import_of: importOf } : {}) };
     answers.push((await call('tools/call', { name: 'remember', arguments: args })).result);
   }
 }

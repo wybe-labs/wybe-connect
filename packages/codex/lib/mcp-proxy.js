@@ -84,6 +84,12 @@ const quoted = (t) => `«${t}»`;
 const accepted = (t) => text(`The person accepted the task. Do it now in this session: ${quoted(t)}. When you finish, end with a short summary of what you did; it is sent back to the colleague.`);
 const declined = () => text('The person declined the task. Do not do it; the colleague has been told.');
 
+// The node's remember schema refuses the WHOLE call on one argument it does not take (a category
+// outside its list, an empty subject, an answer that is not a question id), and a refused record is
+// never sent again: so the run is offered exactly that schema, and what it sends is made to fit it.
+export const NODE_CATEGORIES = Object.freeze(['fact', 'preference', 'pattern', 'entity', 'insight', 'relation']);
+const QUESTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 export const DISTIL_TOOLS = Object.freeze([
   Object.freeze({
     name: 'remember',
@@ -91,9 +97,9 @@ export const DISTIL_TOOLS = Object.freeze([
     inputSchema: {
       type: 'object',
       properties: {
-        items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'object', properties: { content: { type: 'string', minLength: 1, maxLength: 4000 }, category: { type: 'string' }, subject: { type: 'string', maxLength: 200 } }, required: ['content'] } },
-        answers: { type: 'array', maxItems: 10, items: { type: 'string' }, description: 'ids of open_questions this send answers' },
-        import_of: { type: 'string', maxLength: 64, description: 'the import_of value from the instructions, on the last call of an import' },
+        items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'object', properties: { content: { type: 'string', minLength: 1, maxLength: 4000 }, category: { type: 'string', enum: [...NODE_CATEGORIES] }, subject: { type: 'string', minLength: 1, maxLength: 200 } }, required: ['content'] } },
+        answers: { type: 'array', maxItems: 10, items: { type: 'string', format: 'uuid' }, description: 'ids of open_questions this send answers' },
+        import_of: { type: 'string', minLength: 1, maxLength: 64, description: 'the import_of value from the instructions, on the last call of an import' },
       },
       required: ['items'],
     },
@@ -110,18 +116,25 @@ export const DISTIL_TOOLS = Object.freeze([
   }),
 ]);
 
-/** The node's remember shape, unknown keys dropped. Returns { args } or { error }. */
+/**
+ * The node's remember shape, unknown keys dropped. An optional field the node would refuse (a
+ * category outside its list, an empty or too long subject, an answer that is not a question id, an
+ * empty import_of) is left out, so the facts still go. Returns { args } or { error }.
+ */
 export function cleanRememberArgs(raw) {
   const items = Array.isArray(raw?.items) ? raw.items : null;
   if (!items || items.length < 1 || items.length > 50) return { error: 'items must be a list of 1 to 50 facts' };
   const clean = [];
   for (const it of items) {
     if (typeof it?.content !== 'string' || it.content.trim() === '' || it.content.length > 4000) return { error: 'each item needs a content string of 1 to 4000 characters' };
-    clean.push({ content: it.content, ...(typeof it.category === 'string' ? { category: it.category } : {}), ...(typeof it.subject === 'string' && it.subject.length <= 200 ? { subject: it.subject } : {}) });
+    clean.push({ content: it.content, ...(NODE_CATEGORIES.includes(it.category) ? { category: it.category } : {}), ...(typeof it.subject === 'string' && it.subject.length >= 1 && it.subject.length <= 200 ? { subject: it.subject } : {}) });
   }
   const args = { items: clean };
-  if (Array.isArray(raw.answers)) args.answers = raw.answers.filter((a) => typeof a === 'string').slice(0, 10);
-  if (typeof raw.import_of === 'string' && raw.import_of.length <= 64) args.import_of = raw.import_of;
+  if (Array.isArray(raw.answers)) {
+    const answers = raw.answers.filter((a) => typeof a === 'string' && QUESTION_ID.test(a)).slice(0, 10);
+    if (answers.length) args.answers = answers;
+  }
+  if (typeof raw.import_of === 'string' && raw.import_of.length >= 1 && raw.import_of.length <= 64) args.import_of = raw.import_of;
   return { args };
 }
 
