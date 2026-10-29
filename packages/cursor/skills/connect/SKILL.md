@@ -14,8 +14,8 @@ The person pasted (or said) one of these, with their own address:
 Your job: pair this machine with that address once. The first sync is not a step here: the
 colleague asks for it by itself when the connection is made (an import request in its tool
 answers), and its own instructions say how to answer it. Everything the
-plugin sends afterwards is **write-only** (nothing is ever read back into Cursor) and is
-**redacted on this machine first**. Say that in one sentence before you start.
+plugin sends afterwards is **redacted on this machine first**, and the plugin **only sends**
+(nothing comes back into Cursor). Say that in one sentence before you start.
 
 The plugin root is the directory two levels above this `SKILL.md` (it holds `bin/` and `hooks/`).
 

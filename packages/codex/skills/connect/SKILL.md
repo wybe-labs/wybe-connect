@@ -14,8 +14,9 @@ The person pasted (or said) one of these, with their own address:
 Your job: pair this machine with that address once. The first sync is not a step here: the
 colleague asks for it by itself when the connection is made (an import request in its tool
 answers), and its own instructions say how to answer it. Everything the
-plugin sends afterwards is **write-only** (nothing is ever read back into Codex) and is
-**redacted on this machine first**. Say that in one sentence before you start.
+plugin sends afterwards is **redacted on this machine first**, and the plugin **only sends**: the
+one thing that comes back is a task the person gave their colleague for an open session, and one
+that needs their yes is shown to them first. Say that in one sentence before you start.
 
 The plugin root is the directory two levels above this `SKILL.md` (it holds `bin/` and `hooks/`).
 
@@ -56,4 +57,5 @@ The plugin root is the directory two levels above this `SKILL.md` (it holds `bin
 - Never read or print a credential file, a `wat_`/`wrt_` token, or an `Authorization` header.
 - Never send anything personal, about other people, or any credential through `remember`.
   Work only ("kun jobb").
-- Never claim anything can be read back from Wybe: the flow is one way.
+- Never claim anything can be read back from Wybe: the only thing that comes from it is a task
+  the person gave their colleague.

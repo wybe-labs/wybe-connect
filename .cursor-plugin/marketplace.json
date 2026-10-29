@@ -10,7 +10,7 @@
     {
       "name": "wybe-connect",
       "source": "packages/cursor",
-      "description": "Feeds your Wybe AI colleague from Cursor: prompts and edited files (sessions:light), plus replies and tool I/O (sessions:full), redacted on your laptop. Write-only."
+      "description": "Feeds your Wybe AI colleague from Cursor: prompts and edited files (sessions:light), plus replies and tool I/O (sessions:full), redacted on your laptop. Sends only: nothing comes back into Cursor."
     }
   ]
 }
