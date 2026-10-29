@@ -50,15 +50,16 @@ function readHolder(file) {
     } catch {
       // empty or half-written: no pid to judge by
     }
-    return { holder, mtimeMs: Number(st.mtimeMs), ino: st.ino };
+    return { holder, mtimeMs: Number(st.mtimeMs), ino: st.ino, mtimeNs: st.mtimeNs };
   } finally {
     closeSync(fd);
   }
 }
 
-const inoOf = (file) => {
+const identityOf = (file) => {
   try {
-    return statSync(file, { bigint: true }).ino;
+    const st = statSync(file, { bigint: true });
+    return { ino: st.ino, mtimeNs: st.mtimeNs };
   } catch {
     return null;
   }
@@ -82,8 +83,10 @@ function reap(file, seen) {
     throw err;
   }
   // Same file only by identity: a new holder's lock that is still empty has the same (null) token
-  // as an old empty one, but never the same inode.
-  const same = seen.ino !== undefined && inoOf(aside) === seen.ino;
+  // as an old empty one. The inode alone is not enough: Linux hands a freed inode to the next file
+  // created, so the new lock can carry the old number. Its modification time is its own.
+  const now = identityOf(aside);
+  const same = seen.ino !== undefined && now !== null && now.ino === seen.ino && now.mtimeNs === seen.mtimeNs;
   if (!same) {
     try {
       linkSync(aside, file); // put the live lock back, unless a third process already took the name
