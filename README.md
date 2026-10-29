@@ -257,7 +257,8 @@ Stop / SessionEnd / PreCompact ─▶ hooks/flush.js ─ one note file per trans
 
 The run reads only what its plan names: each noted transcript, and for an import also
 `~/.claude/CLAUDE.md` and, of the projects in those transcripts, their `CLAUDE.md` and auto
-memory folder. Each is one path-scoped `Read(//…)` rule in the run's `--settings` (on Windows in
+memory folder. Each is one path-scoped `Read(//…)` rule in the run's own settings file
+(`runs/<run>.settings.json`, passed with `--settings` and removed when the run ends; on Windows in
 Claude Code's POSIX form, `//c/Users/…`); everything else is refused. It runs in the distil's
 own folder, with none of your settings files, so your hooks and plugins do not run in it.
 
