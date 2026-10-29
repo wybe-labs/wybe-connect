@@ -36,8 +36,8 @@ try {
   // every event resolves the conversation's own connection (lib/connections.js)
   const root = harnessHome('cursor');
   const sessionId = conversationIdOf(input);
-  if (event === 'sessionStart') prunePins(root);
   const paths = sessionPaths(root, { sessionId });
+  if (event === 'sessionStart') prunePins(root, { exceptSessionId: sessionId });
   switch (event) {
     case 'sessionStart': {
       let context = buildContext({ credentials: loadCredentials(paths), cached: readJson(paths.openQuestions) });
