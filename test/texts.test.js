@@ -137,3 +137,8 @@ test('install lines are the two-step marketplace form, never the one-line --mark
   }
   assert.match(readme, /codex plugin marketplace add wybe-labs\/wybe-connect\ncodex plugin add wybe-connect@wybe-connect/);
 });
+
+test('the README, the manifests and the Claude Code plugin README give the import no age window', () => {
+  const windowed = /\b(?:last|past) \d+ days\b|\b\d+ days of (?:Codex |Claude Code )?sessions\b|\bsiste \d+ dagene?\b/i;
+  for (const f of [...PUBLIC_TEXTS, 'packages/claude-code/README.md']) assert.equal(flat(read(f)).match(windowed)?.[0] ?? null, null, f);
+});
