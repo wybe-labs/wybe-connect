@@ -9,11 +9,14 @@
 //                threads only (session_meta.source), never a distil run's.
 //
 // Each entry is what lib/session-info.js sends for a hooked session, plus:
-//   state           open while the harness runs it (Claude Code's own <claude home>/sessions/<pid>.json
-//                   with a live pid, a hooked session not ended and active within the idle limit, or a
-//                   transcript written in the last OPEN_RECENT_MS), else closed. Archived rollouts are closed.
-//   can_take_tasks  true only for an open session whose plugin hooks run in it (it has a poller for
-//                   this connection): only those can be handed a task.
+//   state           open while the harness runs it: Claude Code's own <claude home>/sessions/<pid>.json
+//                   with a live pid, a transcript written in the last OPEN_RECENT_MS, or a hooked session
+//                   not ended, active within the idle limit, whose poller process is alive. Else closed:
+//                   a session whose only marks have a dead pid is closed even when its record says open
+//                   (a killed terminal sends no SessionEnd). Archived rollouts are closed.
+//   can_take_tasks  true only for an open hooked session whose poller can pick a task up: its process
+//                   is alive, or it is paused for the person's own turn while that turn still runs
+//                   (the next Stop re-arms it). A poller record without its process cannot.
 //   summary         with the sessions:full grant only: the short summary the background distil wrote
 //                   for the session (redacted when stored). Never transcript text.
 //
@@ -187,9 +190,13 @@ async function codexFiles(codexHome) {
   return out;
 }
 
-/** Claude Code's own marks of its running sessions: the session ids whose <claude home>/sessions/<pid>.json has a live pid. */
-async function liveClaudeSessions(claudeHome, alive) {
+/**
+ * Claude Code's own marks of its sessions, <claude home>/sessions/<pid>.json: { live, dead }, the session
+ * ids with a mark whose pid is alive, and those whose only marks have a dead pid.
+ */
+async function claudeMarks(claudeHome, alive) {
   const ids = new Set();
+  const dead = new Set();
   const dir = join(claudeHome, 'sessions');
   for (const e of await dirents(dir)) {
     if (!e.isFile() || !/^\d+\.json$/.test(e.name)) continue;
@@ -200,9 +207,11 @@ async function liveClaudeSessions(claudeHome, alive) {
     } catch {
       continue;
     }
-    if (typeof o?.sessionId === 'string' && Number.isInteger(o?.pid) && alive(o.pid)) ids.add(o.sessionId);
+    if (typeof o?.sessionId !== 'string' || !Number.isInteger(o?.pid)) continue;
+    (alive(o.pid) ? ids : dead).add(o.sessionId);
   }
-  return ids;
+  for (const id of ids) dead.delete(id);
+  return { live: ids, dead };
 }
 
 // ------------------------------------------------------------------ one session's head
@@ -304,7 +313,7 @@ const hasScope = (c, s) => Array.isArray(c?.scopes) && c.scopes.includes(s);
  */
 export async function scanTick({
   paths: p, harness, credentials, report, env = process.env, home = homedir(), now = Date.now, alive = defaultAlive, batch = SCAN_BATCH,
-  claudeHome = claudeHomeOf(env), codexHome = codexHomeOf(env), bridgeRecord = () => null, hasPoller = () => false,
+  claudeHome = claudeHomeOf(env), codexHome = codexHomeOf(env), bridgeRecord = () => null, pollerOf = () => null,
 } = {}) {
   const f = scanFiles(p);
   if (!f.dir || !p.connection || (harness !== 'claude-code' && harness !== 'codex')) return { ran: false, reported: 0, backlog: 0 };
@@ -328,7 +337,7 @@ export async function scanTick({
     const envNoPin = { ...env };
     delete envNoPin[NODE_ENV];
     const files = harness === 'codex' ? await codexFiles(codexHome) : await claudeFiles(claudeHome);
-    const live = harness === 'claude-code' ? await liveClaudeSessions(claudeHome, alive) : new Set();
+    const { live, dead } = harness === 'claude-code' ? await claudeMarks(claudeHome, alive) : { live: new Set(), dead: new Set() };
     const summaries = full ? quietJson(f.summaries) ?? {} : {};
 
     const candidates = [];
@@ -346,7 +355,11 @@ export async function scanTick({
       if (h.skip) continue;
       const rec = bridgeRecord(file.id);
       const hooked = rec && rec.state === 'open' && t - Date.parse(rec.lastActiveAt) <= IDLE_LIMIT_MS;
-      const open = !file.archived && (live.has(file.id) || hooked || t - file.mtimeMs <= OPEN_RECENT_MS);
+      // the poller record: { pid } of the process waiting for a task, pid null while paused for the person's turn
+      const poller = pollerOf(file.id);
+      const pollerRuns = Number.isInteger(poller?.pid) && alive(poller.pid);
+      const running = live.has(file.id) || (!dead.has(file.id) && t - file.mtimeMs <= OPEN_RECENT_MS);
+      const open = !file.archived && (running || (hooked && pollerRuns && !dead.has(file.id)));
       const entry = { id: file.id, harness };
       const title = h.title ?? (typeof rec?.title === 'string' ? rec.title : null);
       if (title) entry.title = title;
@@ -357,7 +370,7 @@ export async function scanTick({
       entry.started_at = iso(Number.isFinite(started) ? Math.min(started, file.mtimeMs) : Math.min(file.birthMs, file.mtimeMs));
       entry.last_active_at = iso(Math.max(file.mtimeMs, Date.parse(rec?.lastActiveAt ?? '') || 0));
       entry.state = open ? 'open' : 'closed';
-      entry.can_take_tasks = Boolean(open && hooked && hasPoller(file.id));
+      entry.can_take_tasks = Boolean(open && hooked && (pollerRuns || (poller && poller.pid === null && running)));
       const summary = summaries[file.id]?.text;
       if (typeof summary === 'string' && summary) entry.summary = summary;
       const fp = fingerprint(entry);

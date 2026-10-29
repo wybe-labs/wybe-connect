@@ -21,7 +21,7 @@
 
 import { join, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { existsSync, readdirSync, writeFileSync, readFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readdirSync, writeFileSync, readFileSync, mkdirSync, statSync } from 'node:fs';
 import { readJson, writeJsonPrivate, loadCredentials, saveCredentials } from './home.js';
 import { callTool } from './post.js';
 import { refreshTokens } from './oauth.js';
@@ -188,14 +188,26 @@ export async function nodeCall(p, name, args, { fetchImpl = globalThis.fetch, no
 
 export const hasSessionScope = (c) => Array.isArray(c?.scopes) && (c.scopes.includes('sessions:light') || c.scopes.includes('sessions:full'));
 
+function writtenAt(path) {
+  if (typeof path !== 'string' || !path) return 0;
+  try {
+    return statSync(path).mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+
 /** sessions_report for this one session, from its record. The account is display only, so e-mail addresses stay; secrets do not. */
 export async function reportSession(p, sessionId, { env = process.env, home, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   const rec = readSession(p, sessionId);
   if (!rec || !hasSessionScope(credentialsOf(p))) return { ok: false, kind: 'skipped' };
   const f = sessionFiles(p, sessionId);
+  // the later of the last hook and the last transcript write, as the scan (lib/session-scan.js) sends it
+  const written = writtenAt(rec.transcriptPath);
+  const lastActiveAt = written > (Date.parse(rec.lastActiveAt) || 0) ? iso(written) : rec.lastActiveAt;
   const info = sessionInfo({
     harness: rec.harness, sessionId, cwd: rec.cwd, transcriptPath: rec.transcriptPath, env, ...(home ? { home } : {}),
-    startedAt: rec.startedAt, lastActiveAt: rec.lastActiveAt, state: rec.state, ...(rec.title ? { title: rec.title } : {}),
+    startedAt: rec.startedAt, lastActiveAt, state: rec.state, ...(rec.title ? { title: rec.title } : {}),
   });
   // a hooked session not ended can take a task: its poller runs at each turn's end
   info.can_take_tasks = rec.state === 'open';
@@ -220,7 +232,7 @@ export async function scanSessions(p, { harness, env = process.env, home, fetchI
       paths: p, harness, credentials: credentialsOf(p), env, ...(home ? { home } : {}), now, ...rest,
       report: (sessions) => nodeCall(p, 'sessions_report', { sessions }, { fetchImpl, now, redactOptions: { emails: false } }),
       bridgeRecord: (id) => readSession(p, id),
-      hasPoller: (id) => existsSync(sessionFiles(p, id).poller),
+      pollerOf: (id) => quietJson(sessionFiles(p, id).poller),
     });
   } catch {
     return { ran: false, reported: 0, backlog: 0 };
