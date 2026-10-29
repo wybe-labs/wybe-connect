@@ -48,9 +48,24 @@ function sandbox(n = 3) {
  * An MCP node over real HTTP. `answers[i]` is the reply to the i-th remember: 'ok', a status code
  * (NOT stored), 'toolError' (refused, NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is the node's idempotency store:
  * a repeat of an idempotency_key on the connection stores nothing and replays the WHOLE first
- * answer (import_done included). `sends` lists every remember it saw.
+ * answer (import_done included). `sends` lists every remember it saw. With `strict` it checks the
+ * arguments as the node's remember schema does and refuses the whole call (a tool error) on any mismatch.
  */
-async function httpNode({ answers = [], dedupe = false, importDone = true } = {}) {
+const NODE_CATEGORIES = ['fact', 'preference', 'pattern', 'entity', 'insight', 'relation'];
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const nodeSchemaError = (args) => {
+  const items = args.items;
+  if (!Array.isArray(items) || items.length < 1 || items.length > 50) return 'items';
+  for (const it of items) {
+    if (typeof it.content !== 'string' || it.content.length < 1 || it.content.length > 4000) return 'content';
+    if (it.category !== undefined && !NODE_CATEGORIES.includes(it.category)) return `category: ${it.category}`;
+    if (it.subject !== undefined && (typeof it.subject !== 'string' || it.subject.length < 1 || it.subject.length > 200)) return 'subject';
+  }
+  if (args.answers !== undefined && (!Array.isArray(args.answers) || args.answers.length > 10 || !args.answers.every((a) => UUID.test(a)))) return 'answers';
+  if (args.import_of !== undefined && (typeof args.import_of !== 'string' || args.import_of.length < 1 || args.import_of.length > 64)) return 'import_of';
+  return null;
+};
+async function httpNode({ answers = [], dedupe = false, importDone = true, strict = false } = {}) {
   let n = 0;
   const stored = [];
   const sends = [];
@@ -71,6 +86,8 @@ async function httpNode({ answers = [], dedupe = false, importDone = true } = {}
       const a = answers[n++] ?? 'ok';
       if (typeof a === 'number') { res.writeHead(a); return res.end('upstream error'); }
       if (a === 'toolError') return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text: 'Invalid arguments: items[0].content: too long' }] } });
+      const invalid = strict ? nodeSchemaError(args) : null;
+      if (invalid) return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text: `MCP error -32602: Input validation error: ${invalid}` }] } });
       const key = dedupe ? args.idempotency_key : undefined;
       let answer = key !== undefined ? first.get(key) : undefined;
       if (!answer) {
@@ -770,6 +787,31 @@ test('Import: a request runs once, sends import_of on its last call, and counts 
   assert.equal(D.requestImport(p, at), false, 'the same request is not run twice');
   assert.equal(D.maybeRun({ paths: p, env: {}, now: T + MIN, spawnImpl: recorder().spawnImpl }), null);
   node.close();
+});
+
+test('Import: facts in the words a model picks (category, empty subject, a non-id answer) reach a node that checks its schema, and the import is confirmed', async () => {
+  const { root, p, files } = sandbox();
+  const node = await httpNode({ strict: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  const log = join(root, 'fake.log');
+  const r = await cycle(p, { now: T, env: { FAKE_CALLS: '1', FAKE_LOG: log, FAKE_ITEM: JSON.stringify({ category: 'ways of working', subject: '' }), FAKE_ANSWERS: JSON.stringify(['q-1']) } });
+  node.close();
+  assert.equal(r.outcome.ok, true);
+  assert.equal(r.outcome.refused, 0, 'the node refused nothing');
+  assert.equal(r.outcome.importDone, true, 'the node confirmed the import');
+  assert.deepEqual(node.stored, ['Fact 1 of 1.']);
+  assert.equal(node.sends[0].import_of, at);
+  assert.equal(D.loadState(p).lastError, null);
+});
+
+test('the distil run\'s remember offers exactly the node\'s categories', async () => {
+  const { DISTIL_TOOLS } = await lib('mcp-proxy.js');
+  const remember = DISTIL_TOOLS.find((t) => t.name === 'remember');
+  assert.deepEqual(remember.inputSchema.properties.items.items.properties.category.enum, NODE_CATEGORIES);
 });
 
 test('Import: a run that sent no import_of is a failed distil, retried after the back-off', async () => {
