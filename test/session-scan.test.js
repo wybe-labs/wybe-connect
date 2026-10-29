@@ -107,9 +107,14 @@ test('in batches of at most SCAN_BATCH, open first; the same sessions unchanged 
     assert.equal(second.reported, n + 1 - SCAN_BATCH);
     assert.equal(new Set(sent(node).map((s) => s.id)).size, n + 1, 'every session once');
     // nothing changed: the next due tick sends nothing
-    const third = await scan(h, { now: () => Date.now() + 10 * 60_000 });
+    const third = await scan(h, { now: () => Date.now() + 6 * 60_000 });
+    assert.equal(third.ran, true);
     assert.equal(third.reported, 0);
     assert.equal(node.tool('sessions_report').length, 2);
+    // a session that stopped being written is closed now: only that change is sent
+    const fourth = await scan(h, { now: () => Date.now() + 20 * 60_000 });
+    assert.equal(fourth.reported, 1);
+    assert.deepEqual(node.tool('sessions_report').at(-1).args.sessions.map((s) => [s.id, s.state]), [[recent.id, 'closed']]);
   } finally {
     await node.close();
   }
