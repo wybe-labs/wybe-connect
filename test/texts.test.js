@@ -74,7 +74,12 @@ const MANIFESTS = [
   'packages/cursor/.cursor-plugin/plugin.json',
 ];
 const PUBLIC_TEXTS = ['README.md', 'package.json', ...MANIFESTS];
+// What the plugin itself says: its READMEs, and the connect skills the model reads aloud.
+const SKILLS = ['claude-code', 'codex', 'cursor'].map((h) => `packages/${h}/skills/connect/SKILL.md`);
+const PLUGIN_TEXTS = [...['claude-code', 'codex', 'cursor'].map((h) => `packages/${h}/README.md`), ...SKILLS];
 const read = (f) => readFileSync(join(ROOT, f), 'utf8');
+const flat = (t) => t.replace(/\s+/g, ' ');
+const TASK_EXCEPTION = 'Sends only; the one thing that comes back is a task you gave your colleague for an open session, and one that needs your yes is shown to you first';
 
 test('no «KI-assistenter», «Andre KI» or «Importer» in the README, package.json or any manifest', () => {
   for (const f of PUBLIC_TEXTS) {
@@ -85,17 +90,43 @@ test('no «KI-assistenter», «Andre KI» or «Importer» in the README, package
 });
 
 test('the README keeps «Only sends» together with its one exception, the task', () => {
-  const promise = readme.slice(readme.indexOf('1. **Only sends.**'), readme.indexOf('2. **Redacts'));
+  const promise = flat(readme.slice(readme.indexOf('1. **Only sends.**'), readme.indexOf('2. **Redacts')));
   assert.ok(promise.length > 0, 'the README states the «Only sends» promise first');
-  assert.match(promise, /The one thing that comes back is a\s+task/);
-  assert.match(readme, /sender bare\*\* — det eneste som kommer tilbake er en oppgave/);
+  assert.match(promise, /The one thing that comes back is a task the person gave their colleague for an open session; one that needs their yes is shown to them first\./);
+  assert.match(flat(readme), /sender bare\*\* — det eneste som kommer tilbake er en oppgave du selv har gitt KI-kollegaen til en åpen økt, og en oppgave som trenger ditt ja, vises deg først\./);
+});
+
+test('every «see "…"» in the README names a heading the README has', () => {
+  const headings = readme.split('\n').filter((l) => /^#{1,4} /.test(l)).map((l) => l.replace(/^#+ /, ''));
+  const refs = [...flat(readme).matchAll(/see "([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(refs.length > 0);
+  for (const r of refs) assert.ok(headings.some((h) => h.startsWith(r)), `no heading «${r}»`);
 });
 
 test('no manifest says «write-only»: each says it sends only, and what comes back', () => {
   for (const f of MANIFESTS) assert.doesNotMatch(read(f), /write-only/i, f);
   for (const f of ['packages/claude-code/.claude-plugin/plugin.json', 'packages/codex/.codex-plugin/plugin.json', '.claude-plugin/marketplace.json']) {
-    assert.match(read(f), /Sends only; the one thing that comes back is a task for an open session, shown to you first/, f);
+    assert.ok(read(f).includes(TASK_EXCEPTION), f);
   }
+  assert.match(read('package.json'), /the one thing that comes back is a task you gave your colleague for an open session, and one that needs your yes is shown to you first/);
+  // A task in mode run carries its text at once (the person said yes to the colleague); only a
+  // task that needs the person's yes is shown first. No text may say every task is.
+  for (const f of [...PUBLIC_TEXTS, ...PLUGIN_TEXTS]) assert.doesNotMatch(flat(read(f)), /open session, shown to you first/, f);
+});
+
+test('the connect skills say the plugin only sends, with the same exception, and never «write-only»', () => {
+  for (const f of SKILLS) assert.doesNotMatch(read(f), /write-only/i, f);
+  for (const h of ['claude-code', 'codex']) {
+    const t = flat(read(`packages/${h}/skills/connect/SKILL.md`));
+    assert.match(t, /\*\*only sends\*\*/, h);
+    assert.ok(t.includes('the one thing that comes back is a task the person gave their colleague for an open session, and one that needs their yes is shown to them first'), h);
+    assert.doesNotMatch(t, /the flow is one way/, h);
+  }
+  assert.match(flat(read('packages/cursor/skills/connect/SKILL.md')), /\*\*only sends\*\* \(nothing comes back into Cursor\)/);
+});
+
+test('no «Importer» button in the plugin READMEs or the connect skills', () => {
+  for (const f of PLUGIN_TEXTS) assert.doesNotMatch(read(f), /Importer/, f);
 });
 
 test('install lines are the two-step marketplace form, never the one-line --marketplace form', () => {
