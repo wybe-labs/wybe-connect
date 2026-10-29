@@ -53,3 +53,26 @@ test('the scanner and its test are not scanned', () => {
   assert.equal(isChecked('lib/distil.js'), true);
   assert.equal(isChecked('test/fixtures/session.jsonl'), false);
 });
+
+test('a name with a spelled-out date, or near a date in parentheses, is flagged; «Plan» is a citation in any case', () => {
+  for (const s of [
+    '// Kari wrote this (2026-10-29)',
+    '// (Ola, Oct 21)',
+    '// Kari, 21 October',
+    '// Ola, 3. mai',
+    '// Kari 21 Oct: keep it',
+    '- Plan B4.2 says so',
+  ]) assert.ok(flagged(s), s);
+});
+
+test('an OS, runtime or database version next to a capitalised name is not a dated attribution', () => {
+  for (const s of [
+    'runs on Ubuntu 22.04',
+    'Postgres 16.10 is needed',
+    'Debian 12.05 image',
+    'PostgreSQL 15.04 or newer',
+    'Python 3.12 and Fedora 39',
+    'Alpine 03.12 base',
+    '// the cache may fail, 2 may retry',
+  ]) assert.ok(!flagged(s), s);
+});

@@ -85,3 +85,48 @@ test('only lines a commit added are read, with their file and line number', () =
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an added line that starts with "++" is content, not a file header: it is read, and later lines keep their file', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wc-leak-'));
+  const git = (...args) => execFileSync('git', args, { cwd: dir, encoding: 'utf8' });
+  try {
+    git('init', '-q');
+    git('config', 'user.email', at('ci', 'example.invalid'));
+    git('config', 'user.name', 'ci');
+    git('config', 'core.autocrlf', 'false');
+    writeFileSync(join(dir, 'a.txt'), 'kept\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'one');
+    writeFileSync(join(dir, 'a.txt'), 'kept\n++ b/test/fixtures/x\n++ plain\nafter\n');
+    writeFileSync(join(dir, 'b.txt'), 'second file\n');
+    git('add', '.');
+    git('commit', '-q', '-m', 'two');
+    assert.deepEqual(addedLines('HEAD~1', dir), [
+      { file: 'a.txt', nr: 2, text: '++ b/test/fixtures/x' },
+      { file: 'a.txt', nr: 3, text: '++ plain' },
+      { file: 'a.txt', nr: 4, text: 'after' },
+      { file: 'b.txt', nr: 1, text: 'second file' },
+    ]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a bare 8-digit Norwegian number is a phone number; made-up ones and longer digit runs are not', () => {
+  assert.deepEqual(kinds('ring 41234567'), ['phone']);   // leak-scan: ignore
+  assert.deepEqual(kinds('ring 91234567 i kveld'), ['phone']);   // leak-scan: ignore
+  assert.deepEqual(kinds('placeholder 99999999'), []);
+  assert.deepEqual(kinds('placeholder 40000000'), []);
+  assert.deepEqual(kinds('const big = 412345678;'), []);
+  assert.deepEqual(kinds('id 4123456789abcdef'), []);
+  assert.deepEqual(kinds('version 4.12345678'), []);
+});
+
+test('a push is diffed against the commit the branch pointed at before the push, so every pushed commit is read', () => {
+  const refs = { 'origin/main': 'aaa', 'HEAD^1': 'bbb', ccc: 'ccc' };
+  const mergeBase = (ref) => { if (refs[ref]) return refs[ref]; throw new Error('no ref'); };
+  assert.deepEqual(findBase(null, { GITHUB_EVENT_NAME: 'push', PUSH_BEFORE: 'ccc' }, mergeBase), { base: 'ccc' });
+  // A new branch (all zeros) or a before-commit not in the checkout: the commit before HEAD.
+  assert.deepEqual(findBase(null, { GITHUB_EVENT_NAME: 'push', PUSH_BEFORE: '0000000000000000000000000000000000000000' }, mergeBase), { base: 'bbb' });
+  assert.deepEqual(findBase(null, { GITHUB_EVENT_NAME: 'push', PUSH_BEFORE: 'ddd' }, mergeBase), { base: 'bbb' });
+});
