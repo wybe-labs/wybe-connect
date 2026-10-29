@@ -2,8 +2,8 @@
 // obedient headless run:
 //   - it reads its MCP servers the way Codex layers config: the person's config.toml (here one
 //     server named `person-server`), then every `-c key=value` override in order, a value parsed
-//     as TOML (the subset these overrides use: a string, an array of strings, an inline table of
-//     strings, an empty inline table);
+//     as TOML (the subset these overrides use: a boolean, a string, an array of strings, an inline
+//     table of strings, an empty inline table);
 //   - it starts the `wybe` server with only a few variables of its own environment plus that
 //     server's `env` table, as Codex does for a stdio server;
 //   - it reads the "- <path> lines a-b" ranges the prompt lists, and turns every line it read into
@@ -34,6 +34,7 @@ for (let i = 1; i < argv.length; i++) {
 
 function tomlValue(v) {
   const t = v.trim();
+  if (t === 'true' || t === 'false') return t === 'true';
   if (t.startsWith('"') || t.startsWith('[')) return JSON.parse(t);
   if (t.startsWith('{')) {
     const out = {};
