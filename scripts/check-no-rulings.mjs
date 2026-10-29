@@ -14,7 +14,8 @@
  *   citation       "ruling R.."/"rulings index|file|list|log", "QA #12", "QA round 3", "plan [track] B4.2"
  *   attribution    a capitalised name next to a calendar date ("Kari 10.17:", "(Ola, 2026-09-29)",
  *                  "Ola, Oct 21", "Kari, 3. mai"), a name that wrote or said something on a date
- *                  ("Kari wrote this (2026-10-29)"), a possessive decision word ("Kari's call"),
+ *                  ("Kari wrote this (2026-10-29)", not "Tests added for 2026-01-01 dates"), a
+ *                  possessive decision word ("Kari's call"),
  *                  "Ola decided|ruled", a quote "verbatim"
  *
  * Names are matched by shape, not from a list: this repository is public, and a list of the team's
@@ -42,6 +43,11 @@ const DATE = String.raw`(?:(?:0[1-9]|[12]\d|3[01])[./](?:0[1-9]|1[0-2])|(?:0[1-9
 const DECISION_WORD = '(?:ruling|call|decision|verdict|word|words|brief|instruction|instructions|order|orders|requirement|ask|request)';
 const VERB = '(?:ruled|decided|insisted|approved|confirmed|wants|wanted)';
 const SAID = '(?:wrote|said|asked|noted|added|changed|reported|suggested|agreed|signed)';
+// After a said-verb the date must read as when it was said: not inside a number, not after a
+// preposition that makes it the thing's own time ("added for 2026-01-01", "changed since 10.17"),
+// and ending the clause (end of line, a bracket, a colon, a comma, a full stop, a dash).
+const SAID_DATE = String.raw`(?<![\d./-])(?<!\b(?:for|in|of|since|before|after|until|till|at|from|to|by|per)\s)(?:${DATE})` +
+  String.raw`(?=\s*(?:$|[)\]:;,]|[.!?](?:\s|$)|[-–—]\s))`;
 const NOT_QUOTED_BEFORE = String.raw`(?<![“"'«\`\w/-])`;
 const NOT_QUOTED_AFTER = String.raw`(?![”"'»\`\w.-])`;
 
@@ -64,7 +70,7 @@ export const PATTERNS = [
   ['citation', /\bQA\s*(?:#\s*\d+|round\s*\d+|r\d+)\b/i, false],
   ['citation', /\b[Pp]lan\s+(?:[Tt]rack\s+)?[A-Z]\d+(?:\.\d+)*\b/, false],
   ['attribution', new RegExp(String.raw`${NAME}[ ,:(]{1,3}(?:${DATE})`, 'u'), true],
-  ['attribution', new RegExp(String.raw`${NAME}\s+${SAID}\b[^\n]{0,40}?(?:${DATE})`, 'u'), true],
+  ['attribution', new RegExp(String.raw`${NAME}\s+${SAID}\b[^\n]{0,40}?${SAID_DATE}`, 'u'), true],
   ['attribution', new RegExp(String.raw`${NAME}['’]s\s+${DECISION_WORD}\b`, 'u'), true],
   ['attribution', new RegExp(String.raw`${NAME}\s+${VERB}\b`, 'u'), true],
   ['attribution', new RegExp(String.raw`${NAME}\b[^\n]{0,24}\bverbatim\b`, 'u'), true],
