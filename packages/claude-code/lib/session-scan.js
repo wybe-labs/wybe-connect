@@ -23,7 +23,8 @@
 // reach another account's connection.
 //
 // Bounds: a tick lists the folders (asynchronously, never blocking a hook or the MCP server: it runs
-// in the session's background poller), reports at most SCAN_BATCH changed sessions in one call, and
+// in the session's background poller), reports at most SCAN_BATCH changed sessions in one call (an open
+// one also when REFRESH_OPEN_MS passed since it was last sent), and
 // only one process scans a connection at a time (a lock taken without waiting). What changed since
 // the last report is known from <connection>/bridge/scan.json; a session already reported unchanged
 // is not sent again. A tick that leaves a backlog asks for the next one at the next poll round.
@@ -43,6 +44,9 @@ import { redact } from './redact.js';
 
 export const SCAN_BATCH = 25;
 export const SCAN_EVERY_MS = 5 * 60_000;
+// An open session is sent again this often while unchanged: the node counts a session open only while it is
+// reported or active within a day.
+export const REFRESH_OPEN_MS = 60 * 60_000;
 export const OPEN_RECENT_MS = 10 * 60_000;
 export const IDLE_LIMIT_MS = 24 * 60 * 60_000;
 export const SUMMARY_MAX = 600;
@@ -314,6 +318,7 @@ export async function scanTick({
   }
   try {
     const state = quietJson(f.state) ?? {};
+    // { [id]: { fp, at } }: what was last sent for each session, and when
     const sent = state.sent && typeof state.sent === 'object' ? state.sent : {};
     const heads = state.heads && typeof state.heads === 'object' ? state.heads : {};
     const full = hasScope(credentials, 'sessions:full');
@@ -324,6 +329,7 @@ export async function scanTick({
     delete envNoPin[NODE_ENV];
     const files = harness === 'codex' ? await codexFiles(codexHome) : await claudeFiles(claudeHome);
     const live = harness === 'claude-code' ? await liveClaudeSessions(claudeHome, alive) : new Set();
+    const summaries = full ? quietJson(f.summaries) ?? {} : {};
 
     const candidates = [];
     for (const file of files) {
@@ -352,12 +358,12 @@ export async function scanTick({
       entry.last_active_at = iso(Math.max(file.mtimeMs, Date.parse(rec?.lastActiveAt ?? '') || 0));
       entry.state = open ? 'open' : 'closed';
       entry.can_take_tasks = Boolean(open && hooked && hasPoller(file.id));
-      if (full) {
-        const s = summaryOf(p, file.id);
-        if (s) entry.summary = s;
-      }
+      const summary = summaries[file.id]?.text;
+      if (typeof summary === 'string' && summary) entry.summary = summary;
       const fp = fingerprint(entry);
-      if (sent[file.id] !== fp) candidates.push({ entry, fp });
+      const was = sent[file.id];
+      const stale = open && t - (Number(was?.at) || 0) >= REFRESH_OPEN_MS;
+      if (was?.fp !== fp || stale) candidates.push({ entry, fp });
     }
     candidates.sort((a, b) => (a.entry.state === b.entry.state ? 0 : a.entry.state === 'open' ? -1 : 1)
       || Date.parse(b.entry.last_active_at) - Date.parse(a.entry.last_active_at));
@@ -366,7 +372,7 @@ export async function scanTick({
     if (now1.length) {
       const out = await report(now1.map((c) => c.entry));
       if (out?.ok) {
-        for (const c of now1) sent[c.entry.id] = c.fp;
+        for (const c of now1) sent[c.entry.id] = { fp: c.fp, at: t };
         reported = now1.length;
       }
     }

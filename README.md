@@ -214,7 +214,8 @@ the person's own words for a task, never anything the colleague knows.
 - **Every other session on the machine.** The colleague sees all of the person's sessions, not
   only the ones the plugin ran in: each session's poller also scans every Claude Code
   transcript (`projects/<dir>/<session>.jsonl`) or Codex rollout (`sessions/`,
-  `archived_sessions/`) still on disk and reports the ones that changed, at most 25 per call,
+  `archived_sessions/`) still on disk and reports the ones that changed (an open one also
+  hourly, so the node keeps it open), at most 25 per call,
   open first (`lib/session-scan.js`). A session is open while Claude Code's own mark of a
   running session has a live process, while its hooks say it has not ended, or while its
   transcript was written in the last 10 minutes; else closed. `can_take_tasks` is true only for
