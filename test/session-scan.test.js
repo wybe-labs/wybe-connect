@@ -368,3 +368,21 @@ test('Codex: can_take_tasks follows the detached poller\'s process, not only its
     await node.close();
   }
 });
+
+test('a hooked session\'s own report and the scan agree on when it was last active', async () => {
+  const node = await startFakeNode();
+  try {
+    const h = home(node);
+    const s = transcript(h.claude, { project: 'atlas-demo', prompt: 'Write the changelog' });
+    // the last hook ran half an hour ago; the transcript was written since
+    touchSession(h.p, s.id, { harness: 'claude-code', cwd: '/home/eier/work/atlas-demo', transcriptPath: s.path, now: Date.now() - 30 * 60_000 });
+    claimPoller(h.p, s.id);
+    await reportSession(h.p, s.id, { env: h.env });
+    await scan(h);
+    const times = sent(node).filter((x) => x.id === s.id).map((x) => x.last_active_at);
+    assert.equal(times.length, 2);
+    assert.equal(times[0], times[1]);
+  } finally {
+    await node.close();
+  }
+});
