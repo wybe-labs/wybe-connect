@@ -7,6 +7,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { get as httpGet } from 'node:http';
+import { createHash } from 'node:crypto';
 import { connect, discover, exchangeCode, refreshTokens, renewGrant, STATIC_CLIENTS, ALL_SCOPES } from '../lib/oauth.js';
 import { runConnect } from '../lib/connect-cli.js';
 import { connectionPaths, saveConnection, listConnections } from '../lib/connections.js';
@@ -308,4 +309,39 @@ test('connect.js run again renews the connection of the harness account it runs 
   assert.match(out.text, /already connected/i);
   assert.equal(loadCredentials(connectionPaths(root, privat)).accessToken, ACCESS2, 'the second account\'s grant was renewed');
   assert.equal(loadCredentials(connectionPaths(root, jobb)).accessToken, ACCESS, 'the first account\'s grant was not touched');
+});
+
+test('a connection made before accounts were recorded is renewed but never marked as the account that renewed it; connect.js says how that account gets its own', async (t) => {
+  const prev = process.env.WYBE_CONNECT_HOME;
+  const home = tempHome();
+  process.env.WYBE_CONNECT_HOME = home;
+  t.after(() => { if (prev === undefined) delete process.env.WYBE_CONNECT_HOME; else process.env.WYBE_CONNECT_HOME = prev; rmSync(home, { recursive: true, force: true }); });
+  const root = harnessHome('claude-code');
+  const PRIVAT = 'privat@example.invalid';
+  const legacy = saveConnection(root, stored());
+  const as = fakeAs();
+  const out = sink();
+  const code = await runConnect({ harness: 'claude-code', clientName: 'x', argv: [NODE], out, err: sink(), nextSteps: () => '', fetchImpl: as.fetchImpl, account: PRIVAT, connectImpl: async () => { throw new Error('must not sign in'); } });
+  assert.equal(code, 0);
+  assert.match(out.text, /already connected/i);
+  const after = loadCredentials(connectionPaths(root, legacy));
+  assert.equal(after.accessToken, ACCESS2, 'renewed');
+  assert.equal(after.harnessAccount, undefined, 'not marked as the account that renewed it');
+  const derived = `${legacy}~${createHash('sha256').update(PRIVAT).digest('hex').slice(0, 8)}`;
+  assert.ok(out.text.includes(`--name ${derived}`), out.text);
+  assert.ok(!out.text.includes('privat'), 'the account is never printed');
+
+  const proxy = createProxy({ root, env: {}, clientId: STATIC_CLIENTS['claude-code'], harnessAccount: () => PRIVAT, fetchImpl: as.fetchImpl, connectImpl: async () => { throw new Error('must not sign in'); } });
+  const call = (id) => proxy.handle({ jsonrpc: '2.0', id, method: 'tools/call', params: { name: 'connect', arguments: { node_url: NODE } } });
+  const textOf = (r) => r.result.content.map((c) => c.text).join(' ');
+  let msg = textOf(await call(1));
+  if (!/connected/i.test(msg) || /browser/i.test(msg)) msg = textOf(await call(2));
+  assert.match(msg, /connected/i);
+  assert.equal(loadCredentials(connectionPaths(root, legacy)).harnessAccount, undefined, 'the connect tool does not mark it either');
+
+  const own = await runConnect({ harness: 'claude-code', clientName: 'x', argv: [NODE, '--name', derived], out: sink(), err: sink(), nextSteps: () => '', fetchImpl: as.fetchImpl, account: PRIVAT, connectImpl: async (url, opts) => ({ ...stored(opts.clientId), accessToken: ACCESS }) });
+  assert.equal(own, 0);
+  assert.equal(loadCredentials(connectionPaths(root, derived)).harnessAccount, PRIVAT, 'the account\'s own sign-in is recorded as its own');
+  assert.equal(loadCredentials(connectionPaths(root, legacy)).harnessAccount, undefined, 'the older connection stays unmarked');
+  assert.equal(listConnections(root).length, 2);
 });

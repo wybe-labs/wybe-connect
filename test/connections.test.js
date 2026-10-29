@@ -403,6 +403,21 @@ test('an existing pin is never moved by an account change', () => {
   assert.equal(resolveSession(root, { sessionId: 'p2', env: {}, account: PRIVAT }), privat, 'a new session follows the new account');
 });
 
+test('a new session of an account no connection records stays off another account\'s connection on that node: it goes to the one made before accounts were recorded', () => {
+  const root = home();
+  const node = 'https://dittfirma.wybe.me';
+  const legacy = saveConnection(root, creds(node, TOKEN_A));
+  const privat = saveConnection(root, under(PRIVAT, node, TOKEN_B), { name: `dittfirma.wybe.me~${short(PRIVAT)}` });
+  assert.equal(resolveSession(root, { sessionId: 'u1', env: {}, account: JOBB }), legacy, 'not the newest connection, which is another account\'s');
+  assert.equal(resolveSession(root, { sessionId: 'u2', env: {}, account: PRIVAT }), privat);
+  assert.equal(resolveSession(root, { sessionId: 'u3', env: {} }), privat, 'no account: the default');
+
+  const other = home();
+  saveConnection(other, creds('https://andrefirma.wybe.me', TOKEN_A));
+  const elsewhere = saveConnection(other, under(PRIVAT, node, TOKEN_B));
+  assert.equal(resolveSession(other, { sessionId: 'u4', env: {}, account: JOBB }), elsewhere, 'never another node instead: the default');
+});
+
 // Through the real SessionStart hooks: the harness account each one reads decides where a new session goes.
 const HARNESS_HOOKS = {
   'claude-code': { script: 'packages/claude-code/hooks/session-start.js', home: (root) => root, account: (dir, email) => { writeFileSync(join(dir, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: email } })); return { CLAUDE_CONFIG_DIR: dir }; } },
