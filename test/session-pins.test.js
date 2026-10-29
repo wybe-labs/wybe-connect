@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { appendFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createProxy, NO_SESSION } from '../lib/mcp-proxy.js';
@@ -674,6 +674,25 @@ test('session pins cursorPrune: Cursor\'s sessionStart prunes, and leaves its ow
   rmSync(tr);
   await runHook(HOOKS.cursor[0], { conversation_id: 'new', hook_event_name: 'sessionStart' }, root);
   assert.deepEqual({ gone: pinnedConnection(cursorHome, 'gone'), old: pinnedConnection(cursorHome, 'old'), new: pinnedConnection(cursorHome, 'new') }, { gone: undefined, old: H('a'), new: H('a') });
+});
+
+// Keep on doubt: a transcript whose stat fails for another reason than "not there" (here a parent directory with no
+// permissions) keeps its pin; only ENOENT and ENOTDIR mean the transcript is gone.
+test('session pins statDoubt: a stat error other than ENOENT/ENOTDIR keeps the pin', { skip: process.platform === 'win32' || process.getuid?.() === 0 }, () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  const locked = join(root, 'locked');
+  mkdirSync(locked);
+  const tr = join(locked, 'kept.jsonl');
+  writeFileSync(tr, 'x\n');
+  hookNode(root, 'kept', tr);
+  chmodSync(locked, 0o000);
+  try {
+    prunePins(root);
+  } finally {
+    chmodSync(locked, 0o700);
+  }
+  assert.equal(pinnedConnection(root, 'kept'), H('a'));
 });
 
 // A Cursor conversation has no transcript, so its pin is never pruned: a null pin or a move holds after a month, every
