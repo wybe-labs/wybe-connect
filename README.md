@@ -1,12 +1,13 @@
 # wybe-connect
 
-The public, MIT-licensed, dependency-free client side of **Andre KI-assistenter**: it lets a
-person's coding harness (Claude Code, Codex, Cursor) feed their Wybe AI colleague (their Wybe
-node), and carries the standing texts for assistants without hooks (Claude Desktop / claude.ai,
-ChatGPT). Three promises, in order of importance:
+The public, MIT-licensed, dependency-free client side of the Wybe integrations for Claude,
+ChatGPT (Codex) and Cursor: it lets a person's coding harness (Claude Code, Codex, Cursor) feed
+their Wybe AI colleague (their Wybe node), and carries the standing texts for assistants without
+hooks (Claude Desktop / claude.ai, ChatGPT). Three promises, in order of importance:
 
 1. **Only sends.** There is no tool, scope or code path by which the harness reads anything
-   from the node. The node retrieves and acts on its own.
+   from the node. The node retrieves and acts on its own. The one thing that comes back is a
+   task the person gave their colleague for an open session (see "Tasks from the colleague").
 2. **Redacts on your machine first.** Credentials, connection strings, private keys, Norwegian
    national identity numbers and (by default) e-mail addresses are replaced with
    `[REDACTED:<family>]` before anything leaves the laptop. Pattern-based and deterministic; no
@@ -14,13 +15,13 @@ ChatGPT). Three promises, in order of importance:
 3. **You choose how much, once, on the consent screen.** The sharing degree is the set of OAuth
    scopes you tick at `auth.wybe.me`. A scope you did not tick never flows.
 
-Install and pairing take one pasted sentence; see "Getting started".
+Install takes two commands and pairing one pasted sentence; see "Getting started".
 
 ## What leaves your machine, per scope
 
 | Scope | Consent label (nb) | What flows | When |
 |---|---|---|---|
-| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session; and (Claude Code) from the background distil: at most every 6 hours, and when you press «Importer» |
+| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session; and (Claude Code) from the background distil: at most every 6 hours, and once by itself on first connect (the import) |
 | `conversations` | Samtalesammendrag | a title and a summary of a past chat, and its messages only if you ask for them | only when you explicitly ask Claude to import a conversation |
 | `sessions:light` | Arbeidsøkter — hva du ba om | per session: project name (the folder name), the **names** of your git remotes (never their URLs), branch, files Claude wrote or edited, start/end time, and **your own prompts**. Zero assistant text, zero tool output, zero thinking. Prompts written by Claude to its own subagents are excluded; text a hook injected into your prompt is stripped. | automatically at every stop, before every context compaction, and at session end |
 | `sessions:full` | Arbeidsøkter — alt innhold | everything in `sessions:light` plus Claude's replies and every tool call's input and output (each clipped to 4000 characters). Thinking blocks still never leave. | same as above |
@@ -66,13 +67,13 @@ itself (it is sent as a header to your node, and to nothing else).
 
 ## Getting started (Claude Code)
 
-One command in a terminal (Claude Code 2.1.292 or newer):
+Two commands inside Claude Code (2.1.292 or newer):
 
 ```
-claude plugin install wybe-connect --marketplace wybe-labs/wybe-connect
+/plugin marketplace add wybe-labs/wybe-connect
+/plugin install wybe-connect@wybe-connect
 ```
 
-(or, inside Claude Code: `/plugin install wybe-connect --marketplace wybe-labs/wybe-connect`).
 Then paste one of these with your own node address:
 
 > Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
@@ -322,7 +323,8 @@ Node 20.11 or newer. No dependencies, ever: the code runs inside people's editor
 ## Kort på norsk
 
 `wybe-connect` er den åpne (MIT) klientsiden som lar kodeassistenten din (Claude Code, Codex,
-Cursor) mate KI-kollegaen din i Wybe. Den **sender bare** — ingenting leses tilbake. Alt **sladdes på din
+Cursor) mate KI-kollegaen din i Wybe. Den **sender bare** — det eneste som kommer tilbake er en oppgave
+du selv har gitt KI-kollegaen til en åpen økt, og den vises deg først. Alt **sladdes på din
 maskin først** (nøkler, passord i tilkoblingsstrenger, private nøkler, fødselsnummer,
 e-postadresser). Hvor mye som deles velger du én gang, på samtykkeskjermen på `auth.wybe.me`:
 

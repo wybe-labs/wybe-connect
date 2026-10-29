@@ -24,9 +24,10 @@ start; the person is granting access to their work context and should hear what 
    is no URL, ask for it: "Hvilken adresse har KI-kollegaen din i Wybe? (https://dittfirma.wybe.me)".
 
 2. **Make sure the plugin is installed.** Its `wybe` MCP server offers a `connect` tool. If you
-   do not have it, tell the person to run, in a terminal:
+   do not have it, tell the person to run, inside Claude Code:
    ```
-   claude plugin install wybe-connect --marketplace wybe-labs/wybe-connect
+   /plugin marketplace add wybe-labs/wybe-connect
+   /plugin install wybe-connect@wybe-connect
    ```
    and to start Claude Code again and paste the sentence once more.
 

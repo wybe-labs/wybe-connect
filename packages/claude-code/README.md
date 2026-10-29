@@ -3,7 +3,8 @@
 The plugin. Install from the marketplace at the root of this repository:
 
 ```
-claude plugin install wybe-connect --marketplace wybe-labs/wybe-connect
+/plugin marketplace add wybe-labs/wybe-connect
+/plugin install wybe-connect@wybe-connect
 ```
 
 Then paste, with your own node address:

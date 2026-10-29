@@ -11,7 +11,7 @@
     {
       "name": "wybe-connect",
       "source": "./packages/claude-code",
-      "description": "Feeds your Wybe node from Claude Code: a background distil turns your sessions into short work facts, redacted on your laptop before anything leaves it. Write-only - the node never reads your machine and Claude Code never reads the node.",
+      "description": "Feeds your Wybe node from Claude Code: a background distil turns your sessions into short work facts, redacted on your laptop before anything leaves it. The node never reads your machine. Sends only; the one thing that comes back is a task for an open session, shown to you first.",
       "version": "0.3.0",
       "category": "productivity"
     }
