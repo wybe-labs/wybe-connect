@@ -2,19 +2,24 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, mkdirSync, copyFileSync, readFileSync, readdirSync, existsSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, copyFileSync, readFileSync, existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { STANDING_INSTRUCTION } from '../lib/session-context.js';
+import { pendingView } from '../lib/distil.js';
+import { connectionPaths } from '../lib/connections.js';
 
 // Spawns packages/codex/hooks/*.js with stdin shaped like
 // codex-rs/hooks/schema/generated/*.command.input.schema.json (openai/codex @ 0462dcc0) against the
-// synthetic rollouts in test/fixtures. Not a live Codex run.
+// synthetic rollouts in test/fixtures. Not a live Codex run. The hooks send nothing themselves:
+// they note the rollout for the background distil (test/codex-distil.test.js covers the run). A
+// Stop may start a run, so every hook here gets WYBE_CONNECT_CODEX_BIN = the fake codex.
 
 const ROOT = join(import.meta.dirname, '..');
 const PKG = join(ROOT, 'packages', 'codex');
 const HOOKS = join(PKG, 'hooks');
 const FIX = join(import.meta.dirname, 'fixtures');
+const FAKE_CODEX = join(FIX, 'fake-codex.mjs');
 const TOKEN = ['wat_', 'p0Oi9Uy8Tr7Ew6Qa5Sd4Fg3Hj2Kl1Zx0Cv9Bn8Mm'].join('');
 const REFUSED = 'http://127.0.0.1:9';
 const SID = '0190c0de-0000-7000-8000-00000000c0de';
@@ -22,7 +27,9 @@ const ROLLOUT_NAME = `rollout-2026-09-22T09-00-00-${SID}.jsonl`;
 
 function runHook(script, input, home, args = []) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [join(HOOKS, script), ...args], { env: { ...process.env, WYBE_CONNECT_HOME: home }, stdio: ['pipe', 'pipe', 'pipe'] });
+    const env = { ...process.env, WYBE_CONNECT_HOME: home, WYBE_CONNECT_CODEX_BIN: FAKE_CODEX, CODEX_HOME: join(home, '..', 'codex-home') };
+    delete env.WYBE_CONNECT_DISTIL;
+    const child = spawn(process.execPath, [join(HOOKS, script), ...args], { env, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     let stderr = '';
     child.stdout.on('data', (d) => { stdout += d; });
@@ -44,12 +51,23 @@ function sandbox(fixture = 'codex-rollout.jsonl') {
   return { dir, home, codexHome: join(home, 'codex'), project, rollout };
 }
 
+/** The one connection these tests use, in the layout of lib/connections.js. */
+const conn = (dir) => join(dir, 'connections', 'node');
+/** Every rollout waiting for the distil of that connection: notes on disk and those folded into its state. */
+const notesOf = (codexHome) => (existsSync(conn(codexHome)) ? pendingView(connectionPaths(codexHome, 'node')) : []);
+
 function writeCredentials(dir, endpointBase, scopes) {
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'credentials.json'), JSON.stringify({
+  mkdirSync(conn(dir), { recursive: true });
+  writeFileSync(join(conn(dir), 'credentials.json'), JSON.stringify({
     version: 1, nodeUrl: endpointBase, mcpEndpoint: `${endpointBase}/mcp`, issuer: REFUSED, tokenEndpoint: `${REFUSED}/oauth/token`,
     clientId: 'c-codex', accessToken: TOKEN, refreshToken: null, expiresAt: null, scopes,
   }));
+}
+
+/** A recent failure: the back-off keeps a Stop from starting a run, so a test sees the note alone. */
+function holdRuns(codexHome) {
+  const at = new Date().toISOString();
+  writeFileSync(join(conn(codexHome), 'distil.json'), JSON.stringify({ version: 2, lastFailureAt: at, lastError: { class: 'node-unreachable', message: 'x', at } }));
 }
 
 const stopInput = (rollout, project, extra = {}) => ({
@@ -63,120 +81,84 @@ function fakeNodeServer() {
     let body = '';
     req.on('data', (d) => { body += d; });
     req.on('end', () => {
-      const msg = body ? JSON.parse(body) : null;
-      seen.push({ method: req.method, auth: req.headers.authorization, rpc: msg?.method ?? null, params: msg?.params ?? null });
-      if (req.method === 'DELETE') { res.writeHead(200).end(); return; }
-      if (msg.method === 'initialize') { res.writeHead(200, { 'content-type': 'application/json', 'mcp-session-id': 's1' }).end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: {} })); return; }
-      if (msg.method === 'notifications/initialized') { res.writeHead(202).end(); return; }
-      res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text: 'ok' }], structuredContent: { open_questions: [{ id: 'q-9', text: 'Hva bruker du Codex mest til?' }] } } }));
+      seen.push({ method: req.method, body });
+      res.writeHead(500).end();
     });
   });
   return new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve({ server, seen, base: `http://127.0.0.1:${server.address().port}` })));
 }
 
-test('codex Stop, node unreachable: exit 0, one stderr line, delta queued under the codex home only, light and redacted', async () => {
-  const { home, codexHome, project, rollout } = sandbox();
-  writeCredentials(codexHome, REFUSED, ['remember', 'sessions:light']);
-  const r = await runHook('flush.js', stopInput(rollout, project), home);
-  assert.equal(r.code, 0);
-  assert.equal(r.stdout, '', 'Codex parses stdout as hook output: a flush prints nothing there');
-  assert.equal(r.stderr.trim().split('\n').length, 1, r.stderr);
-  assert.match(r.stderr, /node not reachable \(network\); 1 delta\(s\) queued locally/);
-  assert.ok(!r.stderr.includes(TOKEN));
-  assert.equal(existsSync(join(home, 'queue')), false, 'Claude Code\'s queue is not touched');
-
-  const cursor = JSON.parse(readFileSync(join(codexHome, 'state', `rollout-2026-09-22T09-00-00-${SID}.json`), 'utf8'));
-  assert.equal(cursor.byteOffset, statSync(rollout).size);
-  const queued = readdirSync(join(codexHome, 'queue'));
-  assert.equal(queued.length, 1);
-  const payload = JSON.parse(readFileSync(join(codexHome, 'queue', queued[0]), 'utf8'));
-  assert.equal(payload.harness, 'codex');
-  assert.equal(payload.scope, 'sessions:light');
-  assert.equal(payload.session_id, SID);
-  assert.deepEqual(payload.project, { name: 'atlas-demo', git_remotes: ['origin'], branch: 'feat/retry' });
-  assert.deepEqual(payload.delta, { seq: 1, event: 'Stop', byte_from: 0, byte_to: statSync(rollout).size, restarted: false });
-  const s = JSON.stringify(payload);
-  for (const needle of ['PLANTED-ASSISTANT-SENTENCE', 'PLANTED-TOOL-OUTPUT', 'PLANTED-THINKING', 'PLANTED-AGENTS-MD', 'PLANTED-ENV-CONTEXT', 'PLANTED-DEVELOPER', 'PLANTED-REMOTE-PW', 'Pl4nted-Pw']) {
-    assert.ok(!s.includes(needle), `${needle} left the machine`);
-  }
-  assert.ok(s.includes('[REDACTED:url-userinfo]'));
-  assert.deepEqual(payload.redaction, { families: [{ family: 'url-userinfo', count: 1 }] });
-});
-
-test('codex Stop with sessions:full against a node: sent, open questions cached, SessionStart hands them over', async () => {
+test('codex Stop: sends nothing, queues no rollout delta, and notes the rollout for the background distil', async () => {
   const { home, codexHome, project, rollout } = sandbox();
   const node = await fakeNodeServer();
   try {
-    writeCredentials(codexHome, node.base, ['sessions:full']);
+    writeCredentials(codexHome, node.base, ['remember', 'sessions:full']);
+    holdRuns(codexHome);
     const r = await runHook('flush.js', stopInput(rollout, project), home);
-    assert.deepEqual(r, { code: 0, stdout: '', stderr: '' });
-    const calls = node.seen.filter((c) => c.rpc === 'tools/call');
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].params.name, 'report_session');
-    const session = calls[0].params.arguments.session;
-    assert.equal(session.harness, 'codex');
-    assert.ok(JSON.stringify(session).includes('PLANTED-ASSISTANT-SENTENCE'), 'POSITIVE CONTROL: sessions:full carries assistant text');
-    assert.ok(!JSON.stringify(session).includes('PLANTED-THINKING'));
-    for (const c of node.seen) assert.equal(c.auth, `Bearer ${TOKEN}`);
-    const cached = JSON.parse(readFileSync(join(codexHome, 'state', 'open-questions.json'), 'utf8'));
-    assert.deepEqual(cached.open_questions, [{ id: 'q-9', text: 'Hva bruker du Codex mest til?' }]);
-
-    const start = await runHook('session-start.js', { session_id: SID, transcript_path: rollout, cwd: project, hook_event_name: 'SessionStart', model: 'gpt-5.5-codex', permission_mode: 'default', source: 'startup' }, home);
-    assert.equal(start.code, 0);
-    assert.equal(start.stderr, '');
-    const out = JSON.parse(start.stdout);
-    assert.deepEqual(Object.keys(out), ['hookSpecificOutput']);
-    assert.deepEqual(Object.keys(out.hookSpecificOutput).sort(), ['additionalContext', 'hookEventName']);
-    assert.equal(out.hookSpecificOutput.hookEventName, 'SessionStart');
-    assert.ok(out.hookSpecificOutput.additionalContext.includes(STANDING_INSTRUCTION));
-    assert.ok(out.hookSpecificOutput.additionalContext.includes('(q-9) Hva bruker du Codex mest til?'));
-    assert.ok(!out.hookSpecificOutput.additionalContext.includes(TOKEN));
+    assert.deepEqual(r, { code: 0, stdout: '', stderr: '' }, 'Codex parses stdout as hook output: the hook prints nothing');
+    assert.deepEqual(node.seen, [], 'not a single request: nothing raw leaves');
+    assert.equal(existsSync(join(conn(codexHome), 'queue')), false);
+    assert.equal(existsSync(join(conn(home), 'queue')), false, 'Claude Code\'s home is not touched');
+    const notes = notesOf(codexHome);
+    assert.equal(notes.length, 1);
+    assert.equal(notes[0].path, rollout);
+    assert.equal(notes[0].sessionId, SID);
+    assert.equal(notes[0].cwd, project);
   } finally {
     node.server.close();
   }
 });
 
-test('codex SessionEnd (--offline): queued without a single request, and the next Stop sends it', async () => {
+test('codex SessionStart hands over the cached open questions and the standing instruction, in Codex\'s output shape', async () => {
   const { home, codexHome, project, rollout } = sandbox();
-  const node = await fakeNodeServer();
-  try {
-    writeCredentials(codexHome, node.base, ['sessions:light']);
-    const end = await runHook('flush.js', { session_id: SID, transcript_path: rollout, cwd: project, hook_event_name: 'SessionEnd', reason: 'other' }, home, ['--offline']);
-    assert.deepEqual(end, { code: 0, stdout: '', stderr: '' });
-    assert.equal(node.seen.length, 0, 'SessionEnd must not touch the network');
-    assert.equal(readdirSync(join(codexHome, 'queue')).length, 1);
-    const next = await runHook('flush.js', stopInput(rollout, project), home);
-    assert.equal(next.code, 0);
-    assert.equal(readdirSync(join(codexHome, 'queue')).length, 0, 'the queue drained');
-    const calls = node.seen.filter((c) => c.rpc === 'tools/call');
-    assert.equal(calls.length, 1);
-    assert.equal(calls[0].params.arguments.session.delta.event, 'SessionEnd');
-  } finally {
-    node.server.close();
-  }
+  writeCredentials(codexHome, REFUSED, ['remember']);
+  writeFileSync(join(conn(codexHome), 'open-questions.json'), JSON.stringify({ fetched_at: new Date().toISOString(), open_questions: [{ id: 'q-9', question: 'Hva bruker du Codex mest til?' }] }));
+  const start = await runHook('session-start.js', { session_id: SID, transcript_path: rollout, cwd: project, hook_event_name: 'SessionStart', model: 'gpt-5.5-codex', permission_mode: 'default', source: 'startup' }, home);
+  assert.equal(start.code, 0);
+  assert.equal(start.stderr, '');
+  const out = JSON.parse(start.stdout);
+  assert.deepEqual(Object.keys(out), ['hookSpecificOutput']);
+  assert.deepEqual(Object.keys(out.hookSpecificOutput).sort(), ['additionalContext', 'hookEventName']);
+  assert.equal(out.hookSpecificOutput.hookEventName, 'SessionStart');
+  assert.ok(out.hookSpecificOutput.additionalContext.includes(STANDING_INSTRUCTION));
+  assert.ok(out.hookSpecificOutput.additionalContext.includes('(q-9) Hva bruker du Codex mest til?'));
+  assert.ok(!out.hookSpecificOutput.additionalContext.includes(TOKEN));
 });
 
-test('codex: a subagent rollout, a subagent PreCompact (agent_id), no credential and no sessions scope all do nothing', async () => {
+test('codex SessionStart tells a background-distil problem once, in Codex\'s words', async () => {
+  const { home, codexHome } = sandbox();
+  writeCredentials(codexHome, REFUSED, ['remember']);
+  const at = new Date().toISOString();
+  writeFileSync(join(conn(codexHome), 'distil.json'), JSON.stringify({ version: 2, lastFailureAt: at, lastError: { class: 'codex-missing', message: 'codex was not found on this machine', at } }));
+  const first = await runHook('session-start.js', { session_id: SID, hook_event_name: 'SessionStart' }, home);
+  assert.match(JSON.parse(first.stdout).hookSpecificOutput.additionalContext, /could not find the codex command/);
+  const again = await runHook('session-start.js', { session_id: SID, hook_event_name: 'SessionStart' }, home);
+  assert.doesNotMatch(JSON.parse(again.stdout).hookSpecificOutput.additionalContext, /codex command/, 'told once');
+});
+
+test('codex: a subagent rollout, a subagent PreCompact (agent_id), no credential and no remember scope note nothing', async () => {
   const sub = sandbox('codex-rollout-subagent.jsonl');
-  writeCredentials(sub.codexHome, REFUSED, ['sessions:full']);
+  writeCredentials(sub.codexHome, REFUSED, ['remember']);
+  holdRuns(sub.codexHome);
   assert.deepEqual(await runHook('flush.js', stopInput(sub.rollout, sub.project), sub.home), { code: 0, stdout: '', stderr: '' });
-  assert.equal(existsSync(join(sub.codexHome, 'queue')), false);
-  assert.equal(existsSync(join(sub.codexHome, 'state')), false);
+  assert.deepEqual(notesOf(sub.codexHome), []);
 
   const main = sandbox();
-  writeCredentials(main.codexHome, REFUSED, ['sessions:full']);
+  writeCredentials(main.codexHome, REFUSED, ['remember']);
+  holdRuns(main.codexHome);
   const pre = await runHook('flush.js', { ...stopInput(main.rollout, main.project), hook_event_name: 'PreCompact', trigger: 'auto', agent_id: 'a-1', agent_type: 'reviewer' }, main.home);
   assert.deepEqual(pre, { code: 0, stdout: '', stderr: '' });
-  assert.equal(existsSync(join(main.codexHome, 'queue')), false);
+  assert.deepEqual(notesOf(main.codexHome), []);
 
   const none = sandbox();
   assert.deepEqual(await runHook('flush.js', stopInput(none.rollout, none.project), none.home), { code: 0, stdout: '', stderr: '' });
   assert.deepEqual(await runHook('session-start.js', { hook_event_name: 'SessionStart' }, none.home), { code: 0, stdout: '', stderr: '' });
 
   const noScope = sandbox();
-  writeCredentials(noScope.codexHome, REFUSED, ['remember']);
+  writeCredentials(noScope.codexHome, REFUSED, ['sessions:full']);
   assert.deepEqual(await runHook('flush.js', stopInput(noScope.rollout, noScope.project), noScope.home), { code: 0, stdout: '', stderr: '' });
-  assert.equal(existsSync(join(noScope.codexHome, 'queue')), false);
+  assert.deepEqual(notesOf(noScope.codexHome), []);
+  assert.equal(existsSync(join(conn(noScope.codexHome), 'queue')), false);
 
   const bad = await runHook('flush.js', '{not json', none.home);
   assert.equal(bad.code, 0);
@@ -210,5 +192,6 @@ test('codex plugin: manifest, marketplace listing, AGENTS.md snippet and the con
   assert.deepEqual(market.plugins.map((p) => [p.name, p.source]), [['wybe-connect', { source: 'local', path: './packages/codex' }]]);
   assert.ok(readFileSync(join(PKG, 'AGENTS.snippet.md'), 'utf8').includes(STANDING_INSTRUCTION), 'the AGENTS.md snippet carries the standing line verbatim');
   const toml = readFileSync(join(PKG, 'config.toml.snippet'), 'utf8');
-  assert.match(toml, /^\[mcp_servers\.wybe\]\nurl = "https:\/\/dittfirma\.wybe\.me\/mcp"$/m);
+  assert.match(toml, /^\[mcp_servers\.wybe\]\ncommand = "node"\n/m);
+  assert.doesNotMatch(toml, /^url = /m, 'the node\'s URL is not added as a second server with its own sign-in');
 });

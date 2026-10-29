@@ -6,7 +6,8 @@ node), and carries the standing texts for assistants without hooks (Claude Deskt
 ChatGPT). Three promises, in order of importance:
 
 1. **Only sends.** There is no tool, scope or code path by which the harness reads anything
-   from the node. The node retrieves and acts on its own.
+   from the node. The node retrieves and acts on its own. The one thing that comes back is a
+   task the person gave their colleague for an open session (see "Tasks from the colleague").
 2. **Redacts on your machine first.** Credentials, connection strings, private keys, Norwegian
    national identity numbers and (by default) e-mail addresses are replaced with
    `[REDACTED:<family>]` before anything leaves the laptop. Pattern-based and deterministic; no
@@ -20,14 +21,14 @@ Install and pairing take one pasted sentence; see "Getting started".
 
 | Scope | Consent label (nb) | What flows | When |
 |---|---|---|---|
-| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session; and (Claude Code) from the background distil: at most every 6 hours, and when you press «Importer» |
+| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session; and (Claude Code, Codex) from the background distil: at most every 6 hours, and when you press «Importer» |
 | `conversations` | Samtalesammendrag | a title and a summary of a past chat, and its messages only if you ask for them | only when you explicitly ask Claude to import a conversation |
 | `sessions:light` | Arbeidsøkter — hva du ba om | per session: project name (the folder name), the **names** of your git remotes (never their URLs), branch, files Claude wrote or edited, start/end time, and **your own prompts**. Zero assistant text, zero tool output, zero thinking. Prompts written by Claude to its own subagents are excluded; text a hook injected into your prompt is stripped. | automatically at every stop, before every context compaction, and at session end |
 | `sessions:full` | Arbeidsøkter — alt innhold | everything in `sessions:light` plus Claude's replies and every tool call's input and output (each clipped to 4000 characters). Thinking blocks still never leave. | same as above |
 
-Claude Code sends no `sessions:*` payload: its hooks only note the session, and a background
-distil on your machine turns your sessions into short `remember` facts (see "The background
-distil"). The `sessions:*` rows apply to Codex and Cursor.
+Claude Code and Codex send no `sessions:*` payload: their hooks only note the session, and a
+background distil on your machine turns your sessions into short `remember` facts (see "The
+background distil"). The `sessions:*` rows apply to Cursor.
 
 With no `sessions:*` scope the hooks build nothing and send nothing. Every payload carries a
 `redaction.families` count (which families hit, how often, never the values) so a review can
@@ -99,10 +100,13 @@ codex plugin add wybe-connect@wybe-connect
 
 Codex reads `.agents/plugins/marketplace.json` at the root of this repository (it looks there
 before `.claude-plugin/`, so it never picks up the Claude Code hooks). Paste the same sentence;
-the plugin's `connect` skill runs the OAuth flow as its own client, adds the MCP server with
-`codex mcp add wybe --url https://dittfirma.wybe.me/mcp` and `codex mcp login wybe`, and offers
-the standing line for `~/.codex/AGENTS.md`. Codex runs a plugin's hooks only after you have
-trusted them once. Details and what was verified where: `packages/codex/README.md`.
+the plugin's `connect` skill runs the OAuth flow as its own client and offers the standing line
+for `~/.codex/AGENTS.md`. That one grant serves the hooks and the plugin's own MCP server
+(`packages/codex/mcp.json`), so there is no MCP server to add and no second sign-in. Like Claude
+Code, Codex then sends the essence only: a background distil (`codex exec`) turns your sessions
+into short `remember` facts, and on first connect it imports your Codex sessions of the last 30
+days by itself. Codex runs a plugin's hooks only after you have trusted them once. Details and
+what was verified where: `packages/codex/README.md`.
 
 ## Getting started (Cursor)
 
@@ -114,6 +118,22 @@ sends. Details: `packages/cursor/README.md`.
 
 Each harness is its own pairing with its own grant: Claude Code keeps `~/.wybe-connect/`, Codex
 and Cursor use `~/.wybe-connect/codex/` and `~/.wybe-connect/cursor/`.
+
+**Several nodes or accounts.** Within a harness, each connect is its own connection
+(`connections/<name>/`: grant, queue, question cache), keyed by the node host or by `--name`, so
+a second node never replaces the first and one node's queue is never sent to another. A session
+uses the connection its first hook found: one it was moved to (`connect.js use <name> --session
+<id>`), else `WYBE_CONNECT_NODE=<name>` in the harness's environment, else the default (the one
+connected or `use`d last, or the only one). `connect.js list` and `connect.js remove <name>`
+manage them. A 0.1 `credentials.json` moves under its node on the first hook, queue included.
+A session is the harness's `session_id`: `/clear` starts a new one (where any new session goes),
+`/resume` keeps it. A move sends the session's later transcript lines to the new connection; the
+lines written before it stay with the one it left, and a removed connection's lines go nowhere.
+In Claude Code the background distil is kept per connection too. The plugin's `wybe` MCP server
+remembers no session: with one connection, and every session on it, its tools go there. With two
+or more, or a session sent elsewhere (a removed connection pins its sessions to none until
+`connect.js use`), every call passes the `session_id` the SessionStart note gives, and a call
+without it is refused. Its `connect` tool stores a new connection and makes it the default.
 
 ## Claude Desktop, claude.ai and ChatGPT (no hooks)
 
@@ -178,6 +198,45 @@ generated from `texts/standing.json`, the file the node's connect cards pin agai
 
 <!-- texts:end -->
 
+## Tasks from the colleague
+
+The person can ask their Wybe AI colleague to hand a task to one of their open Claude Code or
+Codex sessions, and to read the result. This is the only thing that ever comes from the node:
+the person's own words for a task, never anything the colleague knows.
+
+- **Which sessions are open.** Each session's hooks send `sessions_report`: the session id,
+  harness, project (the last segment of the working directory, never the path), a title (the
+  first prompt, redacted, at most 80 characters), the vendor account as the harness knows it
+  locally (Claude Code's signed-in e-mail from `.claude.json`; Codex's from the `email` claim of
+  `auth.json`'s id token, decoded on the machine; no token is ever read out or sent), when it
+  started, when it was last active, and open or closed. At start, every 5 minutes while open,
+  and at the end.
+- **Delivery into the live session.** A poller per session asks the node's `inbox` for that
+  session's tasks about every 20 s (backing off while the node is down).
+  - Claude Code: `hooks/task-wait.js` is an `asyncRewake` hook on SessionStart, Stop and
+    StopFailure. It waits in the background and exits 2 with the notice when a task arrives,
+    which wakes Claude even when the session is idle. Every Stop re-arms it, a newer one
+    supersedes the older, and it pauses while the person's own turn runs (UserPromptSubmit), so
+    a task always gets a turn of its own.
+  - Codex: no hook can wake an idle Codex session, so SessionStart starts a detached poller
+    that runs `codex queue --thread <session> --message <notice>`. If that fails, the next
+    Stop hook hands the notice over as a `decision: block` (a new turn), once.
+- **The person's yes, by the node's access level.** At `read` nothing is ever delivered. A task
+  in mode `run` (the person already said yes to their colleague) carries its text in the
+  notice. A task in mode `confirm` carries only its id: the session must call the plugin's
+  `take_task` tool, which shows the exact text in an MCP elicitation form (Godta / Avvis) and
+  returns it only on accept; a decline sends `task_result` refused.
+- **The result.** The Stop that ends the task's turn sends `task_result` with status `done`
+  (Claude Code's StopFailure: `failed`) and the turn's last message, redacted, at most 20 000
+  characters. Once per task.
+
+Limits: a client without elicitation gets the confirm task's text with the instruction to show
+it word for word and act only after an explicit yes in the chat; that yes is the model's
+reading of the chat, not a form. A Claude Code session idle for more than 24 hours stops
+waiting until its next Stop. A Codex task's result is taken from the turn whose prompt carries
+the task's mark (`[wybe-task <id>]`), which relies on `codex queue` putting the notice in the
+rollout as that turn's prompt.
+
 ## How it works
 
 ### The background distil (Claude Code)
@@ -188,12 +247,20 @@ Stop / SessionEnd / PreCompact ─▶ hooks/flush.js ─ one note file per trans
                                         ▼
             bin/distil-run.js (detached watchdog, ends the run at 30 min)
                 │ claude -p  --tools Read,Glob,Grep  --strict-mcp-config (only the plugin's `wybe`)
+                │   --setting-sources ""  (none of your hooks, plugins or settings; your login)
                 │   reads the noted transcript ranges, calls remember … then distil_done
                 │   └▶ bin/mcp-proxy.js in distil mode: redacts, appends to the run's OUTBOX
                 ▼
             delivery: each outbox record ─ remember + idempotency_key ─▶ the node
                       each ack (ok and a numeric `stored`) ─▶ the run's ACKS file
 ```
+
+The run reads only what its plan names: each noted transcript, and for an import also
+`~/.claude/CLAUDE.md` and, of the projects in those transcripts, their `CLAUDE.md` and auto
+memory folder. Each is one path-scoped `Read(//…)` rule in the run's own settings file
+(`runs/<run>.settings.json`, passed with `--settings` and removed when the run ends; on Windows in
+Claude Code's POSIX form, `//c/Users/…`); everything else is refused. It runs in the distil's
+own folder, with none of your settings files, so your hooks and plugins do not run in it.
 
 It runs on your machine and on your own Claude subscription. Nothing raw leaves the machine:
 only the facts the run chose, redacted again by `lib/redact.js`. What makes it exactly once:
@@ -211,6 +278,13 @@ only the facts the run chose, redacted again by `lib/redact.js`. What makes it e
   The import does not let the model look for transcripts: the plugin lists every session of
   the last 30 days that is not distilled yet (the distil runs' own left out), and the model
   reads only those ranges.
+- **One distil per connection.** Each connection keeps its own notes, state, outboxes and locks
+  under `connections/<name>/`. A session's Stop hook notes it for the connection that session
+  uses, and a run reads only those sessions and delivers only to that connection's node, with
+  its grant. Every Stop hook ticks every connection, so an outbox never waits for a session of
+  its own. An import takes only sessions fixed to its connection, or never fixed to any. A
+  delivery whose grant is removed or replaced meanwhile stops and writes nothing back; the next
+  tick sends the rest with the grant on disk then.
 - **An outbox belongs to one node.** Its keys are made with the node's address in them, and it
   is sent only to that node. After connecting to another colleague it waits on this machine,
   and is sent if this Claude Code connects to that node again.
@@ -231,18 +305,48 @@ only the facts the run chose, redacted again by `lib/redact.js`. What makes it e
 The node should keep each `idempotency_key` once. Until it does, a reply lost after the node
 stored the facts (beyond the 60 s delivery timeout) means that one record can be stored twice.
 
-### Codex and Cursor
+### The background distil (Codex)
+
+The same pipeline, the same files and the same guarantees, with Codex's pieces:
+
+- **The hooks** (Stop, PreCompact; SessionEnd only notes, as Codex caps it at 3 s) note the
+  rollout Codex names in `transcript_path`. A spawned subagent's thread (`agent_id`, or a
+  subagent or internal `source` in `session_meta`) and a compressed rollout are not noted. No
+  rollout delta is sent.
+- **The run** is a headless `codex exec`, started by `bin/distil-run.js` in the distil's own
+  folder:
+  `codex exec --sandbox read-only --json --ephemeral --skip-git-repo-check -c features.hooks=false -c mcp_servers={}`
+  `-c mcp_servers.wybe_distil.command="<node>" -c mcp_servers.wybe_distil.args=["<plugin>/bin/mcp-proxy.js"]`
+  `-c mcp_servers.wybe_distil.env={ WYBE_CONNECT_DISTIL = "<run>", ... } "<prompt>"`.
+  `features.hooks=false` keeps your own hooks (user, project and plugin) out of the run.
+  `mcp_servers={}` drops every MCP server you configured, so the plugin's own server in distil
+  mode (named `wybe_distil`, so it is never confused with the interactive `wybe`) is the only
+  one. Codex starts a stdio server with only a few variables of its own
+  environment, so the distil mode travels in the server's `env` table. `--ephemeral` keeps the
+  run from writing a rollout, so it never becomes a session to import (a rollout whose first
+  prompt is the distil prompt is left out as well).
+- **The import** lists `<CODEX_HOME or ~/.codex>/sessions/YYYY/MM/DD/rollout-*.jsonl` changed in
+  the last 30 days, the person's threads only, and also reads `~/.codex/AGENTS.md` and the
+  projects' `AGENTS.md`.
+- **First connect.** The node asks for the first sync by itself (an `import_request` in its
+  answers). The plugin's MCP server (`mcp.json` → `bin/mcp-proxy.js`) asks the node for it
+  2 seconds after Codex starts it, every 5 minutes, and at once when a sign-in through its
+  `connect` tool finishes. The import then runs in the background: no button and no command.
+
+It runs on your machine and on your own ChatGPT/Codex plan.
+
+### Cursor
 
 ```
-Codex / Cursor ──hook stdin (transcript)──▶ hooks/flush.js
+Cursor ──hook stdin (transcript)──▶ hooks/flush.js
                                                 │ delta since the cursor (~/.wybe-connect/state/<id>.json)
                                                 │ scope-aware payload (lib/transcript.js)
                                                 │ redaction (lib/redact.js)
                                                 ▼
                                     lib/post.js ── JSON-RPC tools/call report_session ──▶ https://<slug>.wybe.me/mcp
-                                                │ Bearer wat_… from ~/.wybe-connect/credentials.json
+                                                │ Bearer wat_… from ~/.wybe-connect/connections/<node>/credentials.json
                                                 │ 401 → one refresh → else queue
-                                                │ unreachable → ~/.wybe-connect/queue/ (7 days / 50 MB, oldest dropped)
+                                                │ unreachable → ~/.wybe-connect/connections/<node>/queue/ (7 days / 50 MB, oldest dropped)
                                                 ▼
                                     next flush drains the queue, oldest first
 ```
@@ -251,7 +355,7 @@ Codex / Cursor ──hook stdin (transcript)──▶ hooks/flush.js
 and no access to Claude Code's own OAuth session. So the plugin obtains its **own** grant once
 (`bin/connect.js` runs the OAuth 2.1 authorization-code flow with PKCE against `auth.wybe.me`:
 discovery, dynamic client registration with a loopback `redirect_uri`, browser, code exchange)
-and stores it in `~/.wybe-connect/credentials.json` (owner-only). The hooks then speak MCP's
+and stores it in `~/.wybe-connect/connections/<node>/credentials.json` (owner-only). The hooks then speak MCP's
 Streamable HTTP transport directly (`initialize`, `notifications/initialized`, `tools/call`)
 with `fetch`. The interactive tools (`remember`, `import_conversation`, `pending_questions`)
 go through the plugin's own MCP server (`.mcp.json` → `bin/mcp-proxy.js`, a stdio server):
@@ -274,11 +378,12 @@ flush drains the queue. A queue older than 7 days or larger than 50 MB loses its
 ```
 lib/            shared, dependency-free: redact, transcript, codex-rollout, cursor-spool, post, oauth,
                 queue, home, flush, session-context, hook-io, connect-cli, mcp-proxy,
-                distil (the background distil), ledger (checksummed records), lock
+                distil (the background distil), ledger (checksummed records), lock,
+                session-info, bridge and task-poller (tasks from the colleague)
 packages/
   claude-code/  the Claude Code plugin (plugin.json, hooks/, bin/connect.js, skills/connect)
-  codex/        the Codex plugin (.codex-plugin/, hooks/, bin/connect.js, skills/connect, AGENTS.md
-                and config.toml snippets)
+  codex/        the Codex plugin (.codex-plugin/, mcp.json, hooks/, bin/{connect,mcp-proxy,distil-run}.js,
+                skills/connect, AGENTS.md and config.toml snippets)
   cursor/       the Cursor plugin (.cursor-plugin/, hooks/, bin/connect.js, skills/connect, mcp.json snippet)
                 every package ships a byte-identical copy of lib/
 texts/standing.json               the Claude Desktop / ChatGPT texts (nb + en)
@@ -318,8 +423,9 @@ and two scans of the added lines (`scripts/leak-scan.mjs` for e-mail addresses a
 - **A live run in Codex and in Cursor.** Both adapters are tested by spawning their hook scripts
   with stdin shaped from the vendors' published schemas and docs, against synthetic fixtures. The
   Codex rollout reader was also checked against the structure of real Codex desktop-app rollouts;
-  the Codex CLI's legacy history mode and Cursor itself have not been run. See the packages'
-  READMEs for the exact list.
+  the Codex CLI's legacy history mode and Cursor itself have not been run. The Codex distil is
+  tested with a fake `codex` that plays an obedient `codex exec`; a real `codex exec` run has not
+  been made. See the packages' READMEs for the exact list.
 - **A dry run in a fresh `~/.claude` sandbox** with the marketplace installed from a local path
   (C2.3's check): the hook scripts are tested by spawning them with hook-shaped stdin; the
   marketplace install itself has not been exercised end to end.

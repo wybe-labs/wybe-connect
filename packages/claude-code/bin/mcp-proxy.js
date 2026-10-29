@@ -1,22 +1,27 @@
 #!/usr/bin/env node
 // The plugin's `wybe` MCP server (stdio), started by Claude Code from .mcp.json. See lib/mcp-proxy.js:
-// one sign-in (the `connect` tool) serves both the hooks and the node's tools. Inside a background
-// distil run (WYBE_CONNECT_DISTIL, set by lib/distil.js) it is the run's outbox instead. An import
-// request in a node answer goes to the distil scheduler.
+// one sign-in (the `connect` tool) serves both the hooks and the node's tools. It uses the
+// connection WYBE_CONNECT_NODE names, else the default one (lib/connections.js). Inside a
+// background distil run (WYBE_CONNECT_DISTIL, set by lib/distil.js) it is the run's outbox
+// instead, in exactly the connection the run was planned for. An import request in a node answer
+// goes to that connection's distil scheduler.
 
 import { runStdio } from '../lib/mcp-proxy.js';
-import { paths, harnessHome } from '../lib/home.js';
-import { DISTIL_ENV, requestImport, maybeRun } from '../lib/distil.js';
+import { STATIC_CLIENTS } from '../lib/oauth.js';
+import { harnessHome } from '../lib/home.js';
+import { NODE_ENV } from '../lib/connections.js';
+import { DISTIL_ENV, requestImport, maybeRun, planPaths } from '../lib/distil.js';
 
-const p = paths(harnessHome('claude-code'));
+const root = harnessHome('claude-code');
 const run = process.env[DISTIL_ENV];
 const distilRun = typeof run === 'string' && /^[A-Za-z0-9-]{1,80}$/.test(run) ? run : null;
 
 runStdio({
-  paths: p,
+  ...(distilRun ? { paths: planPaths({ connection: process.env[NODE_ENV] || null }, root) } : { root }),
+  clientId: STATIC_CLIENTS['claude-code'],
   clientName: 'wybe-connect (Claude Code)',
   distilRun,
-  onImportRequest: (requestedAt) => {
-    if (requestImport(p, requestedAt)) maybeRun({ paths: p });
+  onImportRequest: (requestedAt, p) => {
+    if (p && requestImport(p, requestedAt)) maybeRun({ paths: p });
   },
 });
