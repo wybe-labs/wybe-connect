@@ -67,7 +67,8 @@ test('distil run: remember\'s schema offers session_id on an item', async () => 
 test('the prompt names each range\'s session and asks for one short summary per session, sent with session_id', () => {
   const { plan } = run();
   const prompt = buildPrompt(plan);
-  assert.ok(prompt.includes(`(session ${S1})`) && prompt.includes(`(session ${S2})`));
+  assert.ok(prompt.includes(`- ${S1}: `) && prompt.includes(`- ${S2}: `));
+  assert.match(prompt, /^- \S+\.jsonl lines 1-10$/m, 'the range lines keep their form');
   assert.match(prompt, /one short summary of each session/i);
   assert.match(prompt, /session_id/);
   assert.match(prompt, /never sent as a fact/i);

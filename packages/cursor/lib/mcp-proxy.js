@@ -13,6 +13,9 @@
 //                  whatever the node or the sign-in: remember, distil_done, pending_questions.
 //                  remember is redacted and appended to the run's outbox, never forwarded; the
 //                  watchdog delivers the outbox after distil_done. pending_questions is forwarded.
+//                  An item with the session_id of a session the run reads is that session's short
+//                  summary: kept on this machine (lib/session-scan.js saveSummary) for sessions_report,
+//                  never queued as a fact.
 // Import: a node answer carrying import_request.requested_at is handed to `onImportRequest`
 // (Claude Code and Codex wire it to the distil scheduler). pollImport() asks pending_questions for
 // one: at start, every 5 minutes, and as soon as a sign-in from `connect` is stored.
@@ -24,11 +27,12 @@ import { connect as defaultConnect, refreshTokens, harnessOf, ALL_SCOPES } from 
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
 import { connectionPaths, connectionNames, checkSave, saveConnection, sessionConnection, pinnedConnection, sessionIdRequired } from './connections.js';
-import { spoolRemember, spoolDone } from './distil.js';
+import { spoolRemember, spoolDone, distilPaths } from './distil.js';
 import { redactValue } from './redact.js';
 import { renewStored } from './connect-cli.js';
 import { accountOf } from './session-info.js';
 import { findTask, decideTask } from './bridge.js';
+import { saveSummary } from './session-scan.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'wybe', version: '0.2.0' });
 
@@ -92,7 +96,7 @@ export const DISTIL_TOOLS = Object.freeze([
     inputSchema: {
       type: 'object',
       properties: {
-        items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'object', properties: { content: { type: 'string', minLength: 1, maxLength: 4000 }, category: { type: 'string' }, subject: { type: 'string', maxLength: 200 } }, required: ['content'] } },
+        items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'object', properties: { content: { type: 'string', minLength: 1, maxLength: 4000 }, category: { type: 'string' }, subject: { type: 'string', maxLength: 200 }, session_id: { type: 'string', maxLength: 200, description: 'only on a session summary: the session id from the instructions. The item stays on this machine as the summary of that session and is never sent as a fact.' } }, required: ['content'] } },
         answers: { type: 'array', maxItems: 10, items: { type: 'string' }, description: 'ids of open_questions this send answers' },
         import_of: { type: 'string', maxLength: 64, description: 'the import_of value from the instructions, on the last call of an import' },
       },
@@ -111,19 +115,33 @@ export const DISTIL_TOOLS = Object.freeze([
   }),
 ]);
 
-/** The node's remember shape, unknown keys dropped. Returns { args } or { error }. */
+/**
+ * The node's remember shape, unknown keys dropped. Returns { args, summaries } or { error }. An item with a
+ * `session_id` is a session summary ({ sessionId, content } in `summaries`), never one of the node's items; `args`
+ * is null when every item was one.
+ */
 export function cleanRememberArgs(raw) {
   const items = Array.isArray(raw?.items) ? raw.items : null;
   if (!items || items.length < 1 || items.length > 50) return { error: 'items must be a list of 1 to 50 facts' };
   const clean = [];
+  const summaries = [];
   for (const it of items) {
     if (typeof it?.content !== 'string' || it.content.trim() === '' || it.content.length > 4000) return { error: 'each item needs a content string of 1 to 4000 characters' };
+    if (it.session_id !== undefined) {
+      if (typeof it.session_id !== 'string' || !it.session_id || it.session_id.length > 200) return { error: 'session_id must be a session id from the instructions' };
+      summaries.push({ sessionId: it.session_id, content: it.content });
+      continue;
+    }
     clean.push({ content: it.content, ...(typeof it.category === 'string' ? { category: it.category } : {}), ...(typeof it.subject === 'string' && it.subject.length <= 200 ? { subject: it.subject } : {}) });
+  }
+  if (!clean.length) {
+    if (typeof raw.import_of === 'string') return { error: 'pass import_of on a call that carries facts, not only session summaries' };
+    return { args: null, summaries };
   }
   const args = { items: clean };
   if (Array.isArray(raw.answers)) args.answers = raw.answers.filter((a) => typeof a === 'string').slice(0, 10);
   if (typeof raw.import_of === 'string' && raw.import_of.length <= 64) args.import_of = raw.import_of;
-  return { args };
+  return { args, summaries };
 }
 
 /** import_request.requested_at in a node answer, or null. */
@@ -352,9 +370,20 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         if (name === 'remember') {
           const cleaned = cleanRememberArgs(params?.arguments);
           if (cleaned.error) return reply(text(cleaned.error, true));
-          const r = spoolRemember(current(), distilRun, cleaned.args);
-          if (r.error) return reply(text(r.error, true));
-          return reply(text(`Queued ${cleaned.args.items.length} item(s) as call ${r.seq}. They are sent to the colleague after distil_done.`));
+          if (cleaned.summaries.length) {
+            const ours = new Set((readJson(distilPaths(current()).plan(distilRun))?.transcripts ?? []).map((t) => t?.sessionId).filter(Boolean));
+            const unknown = cleaned.summaries.find((x) => !ours.has(x.sessionId));
+            if (unknown) return reply(text(`session_id ${JSON.stringify(unknown.sessionId)} is not a session this run reads; nothing of this call was kept.`, true));
+          }
+          let r = null;
+          if (cleaned.args) {
+            r = spoolRemember(current(), distilRun, cleaned.args);
+            if (r.error) return reply(text(r.error, true));
+          }
+          for (const x of cleaned.summaries) saveSummary(current(), x.sessionId, x.content);
+          const kept = cleaned.summaries.length ? ` Kept ${cleaned.summaries.length} session summary(ies) on this machine.` : '';
+          if (!cleaned.args) return reply(text(`Nothing queued for the colleague.${kept}`));
+          return reply(text(`Queued ${cleaned.args.items.length} item(s) as call ${r.seq}. They are sent to the colleague after distil_done.${kept}`));
         }
         if (name === 'distil_done') {
           const r = spoolDone(current(), distilRun);
