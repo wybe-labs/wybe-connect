@@ -4,6 +4,7 @@ import { mkdtempSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { parseConnectArgs, runConnect } from '../lib/connect-cli.js';
 import { harnessHome, HARNESSES } from '../lib/home.js';
 
@@ -137,6 +138,45 @@ test('runConnect: two nodes coexist; list, use (default and one session) and rem
     assert.match((await run(['list'])).out, /^\* andrefirma\.wybe\.me/m);
     assert.equal((await run(['remove', 'andrefirma.wybe.me'])).code, 0);
     assert.match((await run(['list'])).out, /No connections/);
+  } finally {
+    if (prev === undefined) delete process.env.WYBE_CONNECT_HOME;
+    else process.env.WYBE_CONNECT_HOME = prev;
+  }
+});
+
+test('runConnect: a second account on a connected node gets a connection of its own (<host>~<short hash>); list shows each account masked', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'wybe-connect-cli-'));
+  const prev = process.env.WYBE_CONNECT_HOME;
+  process.env.WYBE_CONNECT_HOME = home;
+  const hints = [];
+  const fake = (token) => async (url, opts) => {
+    hints.push(opts.harnessAccount ?? null);
+    return { nodeUrl: url, mcpEndpoint: `${url}/mcp`, accessToken: token, refreshToken: null, scopes: opts.scopes, connectedAt: '2026-10-22T08:00:00.000Z', ...(opts.harnessAccount ? { harnessAccount: opts.harnessAccount } : {}) };
+  };
+  const run = async (argv, { account, connectImpl } = {}) => {
+    const out = sink();
+    const err = sink();
+    const code = await runConnect({ harness: 'claude-code', clientName: 'x', argv, out, err, nextSteps: () => '', connectImpl, account });
+    return { code, out: out.text, err: err.text };
+  };
+  try {
+    assert.equal((await run(['https://dittfirma.wybe.me'], { account: 'jobb.konto@example.invalid', connectImpl: fake(TOKEN) })).code, 0);
+    const second = await run(['https://dittfirma.wybe.me'], { account: 'privat@example.invalid', connectImpl: fake(`${TOKEN}2`) });
+    assert.equal(second.code, 0, second.err);
+    const derived = `dittfirma.wybe.me~${createHash('sha256').update('privat@example.invalid').digest('hex').slice(0, 8)}`;
+    assert.match(second.out, /Also connected: dittfirma\.wybe\.me\./);
+    assert.ok(second.out.includes(`${derived} is now the default`), second.out);
+    assert.deepEqual(hints, ['jobb.konto@example.invalid', 'privat@example.invalid']);
+    const jobb = JSON.parse(readFileSync(join(home, 'connections', 'dittfirma.wybe.me', 'credentials.json'), 'utf8'));
+    assert.equal(jobb.accessToken, TOKEN, 'the first account\'s grant is kept');
+    assert.equal(jobb.harnessAccount, 'jobb.konto@example.invalid');
+
+    const list = await run(['list']);
+    assert.equal(list.code, 0);
+    assert.ok(list.out.includes(derived));
+    assert.match(list.out, /^ +dittfirma\.wybe\.me +https:\/\/dittfirma\.wybe\.me .*account jo…@example\.invalid/m);
+    assert.match(list.out, /^\* dittfirma\.wybe\.me~[0-9a-f]{8} +https:\/\/dittfirma\.wybe\.me .*account pr…@example\.invalid/m);
+    assert.ok(!list.out.includes('jobb.konto') && !list.out.includes('privat@'), 'the full account is never printed');
   } finally {
     if (prev === undefined) delete process.env.WYBE_CONNECT_HOME;
     else process.env.WYBE_CONNECT_HOME = prev;
