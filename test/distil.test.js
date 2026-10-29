@@ -922,3 +922,13 @@ test('connections: an import takes only the sessions of its own connection and t
   assert.equal(plan.mode, 'import');
   assert.deepEqual(plan.transcripts.map((t) => t.path).sort(), [files[0], files[2]].sort());
 });
+
+test('no notice or comment in the plugin code sends the person to an «Importer» button: the import starts by itself', () => {
+  const REPO = join(import.meta.dirname, '..');
+  const dirs = ['lib', ...['claude-code', 'codex', 'cursor'].flatMap((h) => [`packages/${h}/lib`, `packages/${h}/bin`, `packages/${h}/hooks`])];
+  for (const d of dirs) {
+    for (const f of readdirSync(join(REPO, d)).filter((x) => x.endsWith('.js'))) {
+      assert.doesNotMatch(readFileSync(join(REPO, d, f), 'utf8'), /Importer/, `${d}/${f}`);
+    }
+  }
+});

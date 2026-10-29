@@ -344,6 +344,75 @@ test('an ongoing run lists the memory of its own transcripts\' projects only', (
   assert.equal(claimOf(px.root, other.memory), null);
 });
 
+test('a failed ongoing run gives the home CLAUDE.md back as the person\'s, never as a project file to claim', () => {
+  const m = machine();
+  saveCredentials(creds('http://127.0.0.1:9/mcp'), m.p);
+  const T = Date.now();
+  const demo = m.project('demo-app');
+  const f = demo.transcript(uuid(1), T - H);
+  const global = join(m.claudeHome, 'CLAUDE.md');
+  writeFileSync(global, 'Write tests first.\n');
+  D.noteSession(m.p, { transcriptPath: f, sessionId: uuid(1), now: T - H });
+  const pl = plan(m.p, m, T, { alive: () => false });
+  assert.equal(pl.mode, 'ongoing');
+  assert.ok(pl.memory.some((x) => x.path === global));
+  assert.equal(plan(m.p, m, T + 3 * MIN, { alive: () => false }), null, 'the dead run is settled and backs off');
+  const back = D.loadState(m.p).memoryBacklog.find((x) => x.path === global);
+  assert.deepEqual(back, { path: global, shared: true }, 'the home file goes back as the person\'s');
+  assert.equal(pl.claudeHome, m.claudeHome, 'an ongoing plan carries its home, as an import plan does');
+});
+
+// ------------------------------------------------------------------ the import reads the disk in chunks
+/** `n` transcripts over three projects, oldest first by index, and an import request. */
+function manyOnDisk(n) {
+  const m = machine();
+  saveCredentials(creds('http://127.0.0.1:9/mcp'), m.p);
+  const T = Date.now();
+  const projects = ['a', 'b', 'c'].map((x) => m.project(`chunk-${x}`));
+  const files = [];
+  for (let i = 0; i < n; i++) files.push(projects[i % 3].transcript(uuid(i), T - (n - i) * MIN));
+  assert.equal(D.requestImport(m.p, new Date(T).toISOString()), true);
+  return { m, T, files };
+}
+
+test('an import request reads the disk a bounded chunk per tick, and the next tick goes on where the last stopped: none lost, none read twice', () => {
+  const chunk = D.IMPORT_SCAN_FILES;
+  assert.ok(Number.isInteger(chunk) && chunk > 0 && chunk <= 200, 'one tick reads a bounded number of transcripts');
+  const n = 2 * chunk + 7;
+  const { m, T, files } = manyOnDisk(n);
+  assert.equal(plan(m.p, m, T), null, 'the first tick only reads');
+  assert.equal(D.loadState(m.p).pending.length, chunk);
+  assert.equal(plan(m.p, m, T), null);
+  assert.equal(D.loadState(m.p).pending.length, 2 * chunk);
+  const pl = plan(m.p, m, T);
+  assert.equal(pl?.mode, 'import', 'the tick that reads the last chunk plans the import');
+  assert.equal(pl.transcripts.length, D.MAX_RUN_TRANSCRIPTS);
+  const seen = D.pendingView(m.p).map((x) => x.path);
+  assert.equal(new Set(seen).size, seen.length, 'none twice');
+  assert.deepEqual([...seen].sort(), [...files].sort(), 'every transcript on disk is in flight or pending');
+  assert.equal(D.loadState(m.p).importScan ?? null, null, 'nothing left to read');
+});
+
+test('the MCP server\'s import ticks yield to its event loop between chunks, so it answers its client while an import reads the disk', async () => {
+  const chunk = D.IMPORT_SCAN_FILES;
+  assert.ok(Number.isInteger(chunk) && chunk > 0);
+  assert.equal(typeof D.maybeRunUntilPlanned, 'function');
+  const { m, T } = manyOnDisk(3 * chunk + 1);
+  let done = false;
+  let turns = 0;
+  const spin = () => { turns += 1; if (!done) setImmediate(spin); };
+  setImmediate(spin);
+  let pl;
+  try {
+    pl = await D.maybeRunUntilPlanned({ paths: m.p, env: {}, now: T, spawnImpl: recorder, claudeHome: m.claudeHome });
+  } finally {
+    done = true;
+  }
+  assert.equal(pl?.mode, 'import');
+  assert.ok(turns >= 3, `the event loop ran between the chunks (${turns} turns)`);
+  assert.equal(D.pendingView(m.p).length, 3 * chunk + 1);
+});
+
 // ------------------------------------------------------------------ volume
 test('an import of more transcripts than pending holds takes one run\'s worth and folds the rest as notes, none lost', () => {
   const m = machine();
