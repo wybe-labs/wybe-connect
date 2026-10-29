@@ -1,7 +1,7 @@
 {
   "name": "wybe-connect",
   "version": "0.1.0",
-  "description": "Feeds your Wybe AI colleague from Codex. Hooks send redacted session deltas per the OAuth scopes you granted (sessions:light = your own prompts and metadata; sessions:full = also assistant output and tool I/O); the connect skill pairs this machine once. Sends only; the one thing that comes back is a task for an open session, shown to you first.",
+  "description": "Feeds your Wybe AI colleague from Codex. Hooks send redacted session deltas per the OAuth scopes you granted (sessions:light = your own prompts and metadata; sessions:full = also assistant output and tool I/O); the connect skill pairs this machine once. Sends only; the one thing that comes back is a task you gave your colleague for an open session, and one that needs your yes is shown to you first.",
   "author": {
     "name": "Wybe Labs AS"
   },

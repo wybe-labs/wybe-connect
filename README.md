@@ -7,7 +7,8 @@ hooks (Claude Desktop / claude.ai, ChatGPT). Three promises, in order of importa
 
 1. **Only sends.** There is no tool, scope or code path by which the harness reads anything
    from the node. The node retrieves and acts on its own. The one thing that comes back is a
-   task the person gave their colleague for an open session (see "Tasks from the colleague").
+   task the person gave their colleague for an open session; one that needs their yes is shown
+   to them first.
 2. **Redacts on your machine first.** Credentials, connection strings, private keys, Norwegian
    national identity numbers and (by default) e-mail addresses are replaced with
    `[REDACTED:<family>]` before anything leaves the laptop. Pattern-based and deterministic; no
@@ -324,7 +325,8 @@ Node 20.11 or newer. No dependencies, ever: the code runs inside people's editor
 
 `wybe-connect` er den åpne (MIT) klientsiden som lar kodeassistenten din (Claude Code, Codex,
 Cursor) mate KI-kollegaen din i Wybe. Den **sender bare** — det eneste som kommer tilbake er en oppgave
-du selv har gitt KI-kollegaen til en åpen økt, og den vises deg først. Alt **sladdes på din
+du selv har gitt KI-kollegaen til en åpen økt, og en oppgave som trenger ditt ja, vises deg først.
+Alt **sladdes på din
 maskin først** (nøkler, passord i tilkoblingsstrenger, private nøkler, fødselsnummer,
 e-postadresser). Hvor mye som deles velger du én gang, på samtykkeskjermen på `auth.wybe.me`:
 
