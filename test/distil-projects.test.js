@@ -420,13 +420,22 @@ test('an import of more transcripts than pending holds takes one run\'s worth an
   const T = Date.now();
   const n = D.MAX_PENDING + 150;
   const projects = ['a', 'b', 'c', 'd', 'e'].map((x) => m.project(`proj-${x}`));
-  for (let i = 0; i < n; i++) projects[i % projects.length].transcript(uuid(i), T - (n - i) * MIN);
+  // The oldest transcripts lie in the project the walk reads last: pending still keeps the oldest.
+  for (let i = 0; i < n; i++) projects[projects.length - 1 - (i % projects.length)].transcript(uuid(i), T - (n - i) * MIN);
   assert.equal(D.requestImport(m.p, new Date(T).toISOString()), true);
   const t0 = Date.now();
-  const pl = plan(m.p, m, T);
+  let pl = null;
+  let ticks = 0;
+  while (!pl && ticks < 100) {
+    const t = Date.now();
+    pl = plan(m.p, m, T);
+    ticks += 1;
+    assert.ok(Date.now() - t < 20000, 'one tick reads one chunk, never the whole disk');
+  }
+  assert.equal(ticks, Math.ceil(n / D.IMPORT_SCAN_FILES), 'a chunk a tick, the last one plans');
   assert.ok(Date.now() - t0 < 60000, 'planned in well under a minute');
   assert.equal(pl.transcripts.length, D.MAX_RUN_TRANSCRIPTS);
-  assert.deepEqual([...new Set(pl.transcripts.map((t) => t.project))], ['proj-a'], 'one whole project at a time');
+  assert.deepEqual([...new Set(pl.transcripts.map((t) => t.project))], ['proj-e'], 'one whole project at a time, the oldest first');
   assert.equal(D.pendingView(m.p).length, n, 'every transcript is pending, in flight or a note on disk');
   assert.equal(readdirSync(D.distilPaths(m.p).notes).length, n - D.MAX_PENDING);
 });
