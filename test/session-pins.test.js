@@ -10,7 +10,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { appendFileSync, chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createProxy, NO_SESSION } from '../lib/mcp-proxy.js';
@@ -586,11 +586,11 @@ for (const [name, row] of Object.entries(rows)) test(`session pins ${name}`, row
 
 // R4c through the real hooks: each harness's SessionStart gives the id with no connection at all.
 const ROOT = join(import.meta.dirname, '..');
-function runHook(script, input, root) {
+function runHook(script, input, root, extraEnv = {}) {
   return new Promise((resolve, reject) => {
     const base = { ...process.env };
     delete base.WYBE_CONNECT_NODE;
-    const child = spawn(process.execPath, [join(ROOT, script)], { env: { ...base, WYBE_CONNECT_HOME: root }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    const child = spawn(process.execPath, [join(ROOT, script)], { env: { ...base, WYBE_CONNECT_HOME: root, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
     let stdout = '';
     child.stdout.on('data', (d) => { stdout += d; });
     child.on('error', reject);
@@ -607,6 +607,42 @@ for (const [harness, [script, input, context]] of Object.entries(HOOKS)) {
   test(`session pins R4c, ${harness} hook: a session opened before any connection is told its id`, async () => {
     const out = await runHook(script, input, home());
     assert.equal(context(JSON.parse(out || '{}')), 'This session is not connected yet; its session_id is sess-first.');
+  });
+}
+
+// The session starting now is never pruned: each SessionStart hook resolves its own session first and then prunes the
+// others with exceptSessionId. Here S was moved to B, the transcript its pin holds is gone, and the hook gives one not
+// written yet, so transcript liveness alone would drop S's pin and S would fall to the default A. Pruning before
+// resolving, or without exceptSessionId, fails these rows.
+const HOOK_HOMES = { 'claude-code': (root) => root, codex: (root) => join(root, 'codex'), cursor: (root) => join(root, 'cursor') };
+const movedWithGoneTranscript = (h, root, sid) => {
+  saveConnection(h, grant('b'));
+  saveConnection(h, grant('a'));
+  const tr = join(root, `${sid}.jsonl`);
+  writeFileSync(tr, 'x\n');
+  hookNode(h, sid, tr);
+  useConnection(h, H('b'), { sessionId: sid });
+  rmSync(tr);
+};
+test('session pins ownStart: prunePins never prunes the session given as exceptSessionId', () => {
+  const root = home();
+  movedWithGoneTranscript(root, root, 'own');
+  movedWithGoneTranscript(root, root, 'other');
+  prunePins(root, { exceptSessionId: 'own' });
+  assert.deepEqual({ own: pinnedConnection(root, 'own'), other: pinnedConnection(root, 'other') }, { own: H('b'), other: undefined });
+});
+for (const [harness, [script, input, context]] of Object.entries(HOOKS)) {
+  test(`session pins ownStart, ${harness} hook: the session starting now keeps its pin though its transcript is gone`, async () => {
+    const root = home();
+    const h = HOOK_HOMES[harness](root);
+    movedWithGoneTranscript(h, root, 'S');
+    movedWithGoneTranscript(h, root, 'T');
+    const start = harness === 'cursor'
+      ? { ...input, conversation_id: 'S' }
+      : { ...input, session_id: 'S', source: 'resume', transcript_path: join(root, 'not-written-yet.jsonl') };
+    const out = await runHook(script, start, root, { CODEX_HOME: join(root, 'codex-home') });
+    assert.deepEqual({ S: pinnedConnection(h, 'S'), T: pinnedConnection(h, 'T') }, { S: H('b'), T: undefined });
+    assert.match(context(JSON.parse(out || '{}')) ?? '', new RegExp(`sends to the connection ${H('b').replace(/\./g, '\\.')};`));
   });
 }
 
@@ -740,6 +776,22 @@ test('session pins statDoubt: a stat error other than ENOENT/ENOTDIR keeps the p
   } finally {
     chmodSync(locked, 0o700);
   }
+  assert.equal(pinnedConnection(root, 'kept'), H('a'));
+});
+
+// The same on every platform and as root: a transcript path the OS refuses to stat as too long (ENAMETOOLONG on Linux,
+// macOS and Windows alike) keeps its pin.
+test('session pins statDoubt, any platform: a stat error other than ENOENT/ENOTDIR keeps the pin', () => {
+  const root = home();
+  saveConnection(root, grant('a'));
+  const tr = join(root, 'kept.jsonl');
+  writeFileSync(tr, 'x\n');
+  hookNode(root, 'kept', tr);
+  const odd = join(root, 'x'.repeat(40000));
+  assert.throws(() => statSync(odd), (e) => e.code === 'ENAMETOOLONG');
+  const file = join(root, 'state', 'sessions', 'kept.json');
+  writeFileSync(file, JSON.stringify({ ...JSON.parse(readFileSync(file, 'utf8')), transcriptPath: odd }));
+  prunePins(root);
   assert.equal(pinnedConnection(root, 'kept'), H('a'));
 });
 

@@ -247,12 +247,19 @@ Stop / SessionEnd / PreCompact ─▶ hooks/flush.js ─ one note file per trans
                                         ▼
             bin/distil-run.js (detached watchdog, ends the run at 30 min)
                 │ claude -p  --tools Read,Glob,Grep  --strict-mcp-config (only the plugin's `wybe`)
+                │   --setting-sources ""  (none of your hooks, plugins or settings; your login)
                 │   reads the noted transcript ranges, calls remember … then distil_done
                 │   └▶ bin/mcp-proxy.js in distil mode: redacts, appends to the run's OUTBOX
                 ▼
             delivery: each outbox record ─ remember + idempotency_key ─▶ the node
                       each ack (ok and a numeric `stored`) ─▶ the run's ACKS file
 ```
+
+The run reads only what its plan names: its transcript ranges and the memory files the plan
+lists (`CLAUDE.md` and auto memory of its own projects). Each is one path-scoped `Read(//…)` rule in the run's own settings file
+(`runs/<run>.settings.json`, passed with `--settings` and removed when the run ends; on Windows in
+Claude Code's POSIX form, `//c/Users/…`); everything else is refused. It runs in the distil's
+own folder, with none of your settings files, so your hooks and plugins do not run in it.
 
 It runs on your machine and on your own Claude subscription. Nothing raw leaves the machine:
 only the facts the run chose, redacted again by `lib/redact.js`. What makes it exactly once:
@@ -307,9 +314,10 @@ The same pipeline, the same files and the same guarantees, with Codex's pieces:
   rollout delta is sent.
 - **The run** is a headless `codex exec`, started by `bin/distil-run.js` in the distil's own
   folder:
-  `codex exec --sandbox read-only --json --ephemeral --skip-git-repo-check -c mcp_servers={}`
+  `codex exec --sandbox read-only --json --ephemeral --skip-git-repo-check -c features.hooks=false -c mcp_servers={}`
   `-c mcp_servers.wybe_distil.command="<node>" -c mcp_servers.wybe_distil.args=["<plugin>/bin/mcp-proxy.js"]`
   `-c mcp_servers.wybe_distil.env={ WYBE_CONNECT_DISTIL = "<run>", ... } "<prompt>"`.
+  `features.hooks=false` keeps your own hooks (user, project and plugin) out of the run.
   `mcp_servers={}` drops every MCP server you configured, so the plugin's own server in distil
   mode (named `wybe_distil`, so it is never confused with the interactive `wybe`) is the only
   one. Codex starts a stdio server with only a few variables of its own
