@@ -57,6 +57,8 @@ export const MAX_NOTE_FILES = 20000;
 export const MAX_RUN_TRANSCRIPTS = 40;
 export const MAX_RUN_PATH_CHARS = 12000;
 export const MAX_PATH_CHARS = 1024;
+// A record the node answers "busy" (its daily budget or rate limit) this many times is set aside.
+export const MAX_BUSY = 5;
 export const IMPORT_DAYS = 30;
 // How much of a transcript's head is read to tell a distil run's own session from the person's.
 const HEAD_BYTES = 64 * 1024;
@@ -835,14 +837,21 @@ const parseAnswer = (result) => {
   }
 };
 
+// The node's refusal when its daily budget or rate limit is reached: the record is fine, the timing is not.
+const isBusy = (out) => out.retry === true || /try again later/i.test(String(out.message ?? ''));
+
 /**
  * Sends every record of the outbox the node has not settled, in order (the record carrying
  * import_of last), and appends each answer to the acks file. An ack is a JSON-RPC result that is
- * not an error, says ok: true and has a numeric `stored`. A tool error is the node refusing that
- * record for good: it is recorded as refused, never re-sent, and delivery goes on. An outbox line
+ * not an error, says ok: true and has a numeric `stored`. A tool error that says the node is busy
+ * (retry: true, or "try again later") is noted as { busy: n } and stops delivery as class
+ * node-busy: the record is sent again after the backoff with the same key, and set aside as refused
+ * at its MAX_BUSY-th busy answer. Any other tool error is the node refusing that record for good:
+ * it is recorded as refused, never re-sent, and delivery goes on. An outbox line
  * that no longer checks out (damaged after distil_done, when the run was already judged whole) is
  * copied aside to <run>.torn and the intact records are delivered. Stops at the first other
- * failure. Returns { ok, class?, message?, importDone, sent, refused, torn }.
+ * failure. Returns { ok, class?, message?, importDone, sent, refused, torn, importRefusal? }:
+ * importRefusal is the node's own text when it refused a record carrying import_of.
  */
 export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs = DELIVERY_TIMEOUT_MS, now = Date.now } = {}) {
   const dp = distilPaths(p);
@@ -860,11 +869,14 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
     if (!torn && records.filter((r) => r.kind === 'done').length !== 1) return { ok: false, class: 'distil-failed', message: 'the run did not finish (no distil_done)', importDone: false, sent: 0 };
     if (torn) writeFileSync(dp.torn(run.runId), `${tornLines.join('\n')}\n`, { mode: 0o600 });
     const acks = readRecords(dp.acks(run.runId)).records;
-    const acked = new Set(acks.map((a) => a.seq));
+    const acked = new Set(acks.filter((a) => a.refused === true || typeof a.stored === 'number').map((a) => a.seq));
+    const busyOf = (seq) => acks.reduce((n, a) => (a.seq === seq && typeof a.busy === 'number' ? Math.max(n, a.busy) : n), 0);
     let importDone = acks.some((a) => a.importDone === true);
+    const importSeqs = new Set(items.filter((r) => r.args?.import_of).map((r) => r.seq));
     const settled = () => {
       const all = readRecords(dp.acks(run.runId)).records;
-      return { refused: new Set(all.filter((a) => a.refused === true).map((a) => a.seq)).size, torn };
+      const importRefusal = all.filter((a) => a.refused === true && importSeqs.has(a.seq)).at(-1)?.message;
+      return { refused: new Set(all.filter((a) => a.refused === true).map((a) => a.seq)).size, torn, ...(importRefusal ? { importRefusal } : {}) };
     };
     const order = [...items].sort((a, b) => (a.args?.import_of ? 1 : 0) - (b.args?.import_of ? 1 : 0) || a.seq - b.seq);
     let c;
@@ -906,7 +918,13 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
       }
       if (gone(p)) return changed(); // removed while the call ran: its files are gone, write none back
       if (!out.ok && out.toolError) {
-        appendRecord(dp.acks(run.runId), { seq: r.seq, key: r.key, refused: true, message: String(out.message).slice(0, 200), at: iso(now()) });
+        const message = String(out.message).slice(0, 200);
+        const busy = isBusy(out) ? busyOf(r.seq) + 1 : 0;
+        if (busy && busy < MAX_BUSY) {
+          appendRecord(dp.acks(run.runId), { seq: r.seq, key: r.key, busy, message, at: iso(now()) });
+          return { ok: false, class: 'node-busy', message, importDone, sent };
+        }
+        appendRecord(dp.acks(run.runId), { seq: r.seq, key: r.key, refused: true, ...(busy ? { busy } : {}), message, at: iso(now()) });
         sent += 1;
         continue;
       }
@@ -1056,21 +1074,19 @@ export function ruleAbsPath(path) {
   return `/${s.replace(/[\\[\]*?]/g, (c) => `\\${c}`)}`;
 }
 
-/** The run's file tools: each gets the same path-scoped rules. */
-const READ_TOOLS = ['Read', 'Glob', 'Grep'];
-const toolRules = (rulePath) => READ_TOOLS.map((tool) => `${tool}(${rulePath})`);
-
 /**
- * The run's read permission: for each path the plan reads, one Read, one Glob and one Grep rule,
- * never a broader one (a run that greps a parent folder is refused). A folder gets rules for
- * itself (so it can be listed) and for what lies in it.
+ * The run's read permission: for each path the plan reads, one Read rule, never a broader one (a
+ * run that greps a parent folder is refused). Claude Code checks the path of every file-reading
+ * tool (Read, Glob, Grep) against Read(path) rules only, so a Read rule for a transcript is what
+ * lets the run Grep that file; a Glob(path) or Grep(path) rule would never be matched. A folder gets
+ * a rule for itself (so it can be listed) and for what lies in it.
  */
 export function claudeReadRules(plan) {
-  const rules = (plan.transcripts ?? []).flatMap((t) => toolRules(ruleAbsPath(t.path)));
+  const rules = (plan.transcripts ?? []).map((t) => `Read(${ruleAbsPath(t.path)})`);
   if (plan.mode === 'import') {
     const extra = importReads(plan);
-    for (const f of [extra.home, ...extra.files]) rules.push(...toolRules(ruleAbsPath(f)));
-    for (const d of extra.dirs) rules.push(...toolRules(ruleAbsPath(d)), ...toolRules(`${ruleAbsPath(d)}/**`));
+    for (const f of [extra.home, ...extra.files]) rules.push(`Read(${ruleAbsPath(f)})`);
+    for (const d of extra.dirs) rules.push(`Read(${ruleAbsPath(d)})`, `Read(${ruleAbsPath(d)}/**)`);
   }
   return [...new Set(rules)];
 }
@@ -1278,7 +1294,8 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
     }
     if (d.ok) {
       // An import the node did not confirm is still handled: its facts are stored, and running it
-      // again would only send them twice. The person is told and can press «Importer» again.
+      // again would only send them twice. The person is told and can press «Importer» again; when
+      // the node refused the batch carrying import_of, they are told its own reason.
       const unconfirmed = s.outbox.mode === 'import' && !d.importDone;
       if (s.outbox.mode === 'import') {
         s.importHandled = s.outbox.importOf;
@@ -1290,7 +1307,7 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
       s.lastRunAt = iso(now());
       s.lastSuccessAt = iso(now());
       s.lastFailureAt = null;
-      s.lastError = unconfirmed ? { class: 'import-unconfirmed', message: 'no import_done in the answer', at: iso(now()) } : null;
+      s.lastError = unconfirmed ? { class: 'import-unconfirmed', message: d.importRefusal ? `the colleague refused the batch carrying import_of: ${d.importRefusal}` : 'no import_done in the answer', at: iso(now()) } : null;
       if (!unconfirmed) s.problemShown = null;
       save();
       return { ok: true, sent: d.sent, importDone: d.importDone, refused: d.refused ?? 0, torn: d.torn ?? 0 };
@@ -1316,6 +1333,7 @@ const NOTICES = {
   'claude-missing': 'the background distil could not find the claude command on this machine',
   'codex-missing': 'the background distil could not find the codex command on this machine',
   'import-unconfirmed': 'the import was sent, but the colleague did not confirm it; the person can press «Importer» again',
+  'node-busy': 'the colleague could not take more work facts right now (its limit for the day, or too many at once), so they wait on this machine and are sent again later (every 30 minutes)',
 };
 
 const noticeOf = (cls, label) => {
