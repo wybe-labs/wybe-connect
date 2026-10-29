@@ -377,7 +377,7 @@ test('resolveSession: a connection made under the session\'s harness account win
   saveConnection(root, creds('https://andrefirma.wybe.me', TOKEN_B));
   assert.equal(resolveSession(root, { sessionId: 'k1', env: {}, account: JOBB }), 'dittfirma.wybe.me', 'the work account\'s session goes to its own connection, not the newest');
   assert.equal(resolveSession(root, { sessionId: 'o1', env: {}, account: () => PRIVAT }), privat, 'the account may be read lazily');
-  assert.equal(resolveSession(root, { sessionId: 'x1', env: {}, account: 'per@example.invalid' }), 'andrefirma.wybe.me', 'no match: the default');
+  assert.equal(resolveSession(root, { sessionId: 'x1', env: {}, account: 'annen@example.invalid' }), 'andrefirma.wybe.me', 'no match: the default');
   assert.equal(resolveSession(root, { sessionId: 'x2', env: {} }), 'andrefirma.wybe.me', 'no account: the default');
   assert.equal(resolveSession(root, { sessionId: 'e1', env: { [NODE_ENV]: 'andrefirma.wybe.me' }, account: JOBB }), 'andrefirma.wybe.me', 'WYBE_CONNECT_NODE still comes first');
   useConnection(root, privat);

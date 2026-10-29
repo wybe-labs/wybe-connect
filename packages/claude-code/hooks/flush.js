@@ -8,6 +8,7 @@
 import { readHookInput, failOpen } from '../lib/hook-io.js';
 import { homePath } from '../lib/home.js';
 import { sessionPaths } from '../lib/connections.js';
+import { accountOf } from '../lib/session-info.js';
 import { DISTIL_ENV, noteSession, maybeRunAll } from '../lib/distil.js';
 
 try {
@@ -15,7 +16,7 @@ try {
   if (!process.env[DISTIL_ENV]) {
     const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
     const root = homePath();
-    const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null });
+    const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null, account: () => accountOf('claude-code') });
     if (p.connection) {
       noteSession(p, {
         transcriptPath: input.transcript_path,

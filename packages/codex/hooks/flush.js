@@ -14,6 +14,7 @@
 import { readHookInput, failOpen } from '../lib/hook-io.js';
 import { harnessHome } from '../lib/home.js';
 import { sessionPaths } from '../lib/connections.js';
+import { accountOf } from '../lib/session-info.js';
 import { rolloutHead } from '../lib/codex-rollout.js';
 import { DISTIL_ENV, noteSession, maybeRunAll } from '../lib/distil.js';
 
@@ -31,7 +32,7 @@ try {
   if (!process.env[DISTIL_ENV] && typeof input.agent_id !== 'string') {
     const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
     const root = harnessHome('codex');
-    const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null });
+    const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null, account: () => accountOf('codex') });
     if (p.connection && personRollout(input.transcript_path)) {
       noteSession(p, {
         transcriptPath: input.transcript_path,
