@@ -210,9 +210,8 @@ only the facts the run chose, redacted again by `lib/redact.js`. What makes it e
 - **Each line is distilled at most once per node.** The "distilled up to" mark is kept per
   node and per transcript file, and lasts as long as the file does. Every run reads a transcript
   from its mark on, whatever started it: a hook, the import, or a session resumed months later.
-  The import does not let the model look for transcripts: the plugin lists every session of
-  the last 30 days that is not distilled yet (the distil runs' own left out), and the model
-  reads only those ranges.
+  The import does not let the model look for transcripts: the plugin lists the sessions that
+  are not distilled yet (the distil runs' own left out), and the model reads only those ranges.
 - **An outbox belongs to one node.** Its keys are made with the node's address in them, and it
   is sent only to that node. After connecting to another colleague it waits on this machine,
   and is sent if this Claude Code connects to that node again.
