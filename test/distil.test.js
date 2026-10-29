@@ -48,9 +48,24 @@ function sandbox(n = 3) {
  * An MCP node over real HTTP. `answers[i]` is the reply to the i-th remember: 'ok', a status code
  * (NOT stored), 'toolError' (refused, NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is the node's idempotency store:
  * a repeat of an idempotency_key on the connection stores nothing and replays the WHOLE first
- * answer (import_done included). `sends` lists every remember it saw.
+ * answer (import_done included). `sends` lists every remember it saw. With `strict` it checks the
+ * arguments as the node's remember schema does and refuses the whole call (a tool error) on any mismatch.
  */
-async function httpNode({ answers = [], dedupe = false, importDone = true } = {}) {
+const NODE_CATEGORIES = ['fact', 'preference', 'pattern', 'entity', 'insight', 'relation'];
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const nodeSchemaError = (args) => {
+  const items = args.items;
+  if (!Array.isArray(items) || items.length < 1 || items.length > 50) return 'items';
+  for (const it of items) {
+    if (typeof it.content !== 'string' || it.content.length < 1 || it.content.length > 4000) return 'content';
+    if (it.category !== undefined && !NODE_CATEGORIES.includes(it.category)) return `category: ${it.category}`;
+    if (it.subject !== undefined && (typeof it.subject !== 'string' || it.subject.length < 1 || it.subject.length > 200)) return 'subject';
+  }
+  if (args.answers !== undefined && (!Array.isArray(args.answers) || args.answers.length > 10 || !args.answers.every((a) => UUID.test(a)))) return 'answers';
+  if (args.import_of !== undefined && (typeof args.import_of !== 'string' || args.import_of.length < 1 || args.import_of.length > 64)) return 'import_of';
+  return null;
+};
+async function httpNode({ answers = [], dedupe = false, importDone = true, strict = false } = {}) {
   let n = 0;
   const stored = [];
   const sends = [];
@@ -71,6 +86,8 @@ async function httpNode({ answers = [], dedupe = false, importDone = true } = {}
       const a = answers[n++] ?? 'ok';
       if (typeof a === 'number') { res.writeHead(a); return res.end('upstream error'); }
       if (a === 'toolError') return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text: 'Invalid arguments: items[0].content: too long' }] } });
+      const invalid = strict ? nodeSchemaError(args) : null;
+      if (invalid) return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text: `MCP error -32602: Input validation error: ${invalid}` }] } });
       const key = dedupe ? args.idempotency_key : undefined;
       let answer = key !== undefined ? first.get(key) : undefined;
       if (!answer) {
@@ -655,13 +672,16 @@ test('the headless run is confined: read-only tools, only the plugin\'s own serv
   assert.equal(ran.flags.settings, join(D.distilPaths(p).runs, `${r.plan.runId}.settings.json`), 'the rules are a file of the run, so each path is on the command line once');
   const settings = JSON.parse(ran.settingsFile);
   assert.equal(settings.disableAllHooks, true);
-  assert.deepEqual([...settings.permissions.allow].sort(), files.map(readRule).sort(), 'it may read exactly the noted transcripts');
+  assert.deepEqual([...settings.permissions.allow].sort(), files.flatMap(fileRules).sort(), 'it may read, glob and grep exactly the noted transcripts');
   assert.equal(existsSync(ran.flags.settings), false, 'the file goes when the run ends');
   assert.equal(ran.cwd, join(p.state, 'distil'), 'it runs in the distil\'s own folder, never in a project of the person');
 });
 
 // The absolute form of a path in a permission rule: POSIX, `//` from the root, a drive as /c/.
-const readRule = (path) => `Read(/${path.replace(/^([A-Za-z]):\\/, (_, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/')})`;
+const ruleAbs = (path) => `/${path.replace(/^([A-Za-z]):\\/, (_, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/')}`;
+// Read, Glob and Grep each get the same path-scoped rule: a file, or a folder and what lies in it.
+const fileRules = (path) => ['Read', 'Glob', 'Grep'].map((tool) => `${tool}(${ruleAbs(path)})`);
+const folderRules = (path) => [...fileRules(path), ...['Read', 'Glob', 'Grep'].map((tool) => `${tool}(${ruleAbs(path)}/**)`)];
 
 test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s POSIX form on Windows and elsewhere', () => {
   const plan = {
@@ -680,9 +700,17 @@ test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s PO
   assert.equal(settings.disableAllHooks, true);
   assert.deepEqual(settings.permissions.allow, [
     'Read(//c/Users/Ola Nordmann/.claude/projects/C--work-demo/a.jsonl)',
+    'Glob(//c/Users/Ola Nordmann/.claude/projects/C--work-demo/a.jsonl)',
+    'Grep(//c/Users/Ola Nordmann/.claude/projects/C--work-demo/a.jsonl)',
     'Read(//d/claude \\[work\\]/projects/x/b\\*\\?.jsonl)',
+    'Glob(//d/claude \\[work\\]/projects/x/b\\*\\?.jsonl)',
+    'Grep(//d/claude \\[work\\]/projects/x/b\\*\\?.jsonl)',
     'Read(//home/ola/.claude/projects/-home-ola-demo/c.jsonl)',
+    'Glob(//home/ola/.claude/projects/-home-ola-demo/c.jsonl)',
+    'Grep(//home/ola/.claude/projects/-home-ola-demo/c.jsonl)',
   ]);
+  const prompt = args[args.indexOf('-p') + 1];
+  assert.match(prompt, /Grep a listed transcript by its own path/, 'the run is told how it may search a long range');
   assert.ok(!settings.permissions.allow.some((r) => /^(Read|Glob|Grep)$/.test(r)), 'never a rule for every path');
   assert.deepEqual(args[args.indexOf('--allowedTools') + 1].split(',').sort(), ['mcp__wybe__distil_done', 'mcp__wybe__pending_questions', 'mcp__wybe__remember']);
 });
@@ -704,15 +732,14 @@ test('an import may also read the Claude home\'s CLAUDE.md and, of the projects 
   const plan = { runId: 'r-i', mode: 'import', importOf: '2026-10-21T10:00:00.000Z', connection: null, claudeHome: home, transcripts: [{ path: t, sessionId: 's', cwd: null, fromLine: 0, toLine: 1 }] };
   const args = D.claudeArgs(plan, { root: '/h', settingsFile: '/h/run.settings.json' });
   const allow = D.claudeSettings(plan).permissions.allow;
-  const mem = readRule(join(folder, 'memory'));
   assert.deepEqual([...allow].sort(), [
-    readRule(t),
-    readRule(join(home, 'CLAUDE.md')),
-    readRule(join(project, 'CLAUDE.md')),
-    readRule(join(project, '.claude', 'CLAUDE.md')),
-    mem,
-    `${mem.slice(0, -1)}/**)`,
+    ...fileRules(t),
+    ...fileRules(join(home, 'CLAUDE.md')),
+    ...fileRules(join(project, 'CLAUDE.md')),
+    ...fileRules(join(project, '.claude', 'CLAUDE.md')),
+    ...folderRules(join(folder, 'memory')),
   ].sort());
+  assert.ok(!allow.some((r) => /^(Glob|Grep)\(.*\/projects(\/\*\*)?\)$/.test(r)), 'never the projects folder itself');
   assert.ok(!allow.some((r) => r.includes('C--other')), 'another project\'s memory is not in this import');
   const prompt = args[args.indexOf('-p') + 1];
   assert.ok(prompt.includes(join(folder, 'memory')), 'the prompt names the memory folder it may read');
@@ -770,6 +797,31 @@ test('Import: a request runs once, sends import_of on its last call, and counts 
   assert.equal(D.requestImport(p, at), false, 'the same request is not run twice');
   assert.equal(D.maybeRun({ paths: p, env: {}, now: T + MIN, spawnImpl: recorder().spawnImpl }), null);
   node.close();
+});
+
+test('Import: facts in the words a model picks (category, empty subject, a non-id answer) reach a node that checks its schema, and the import is confirmed', async () => {
+  const { root, p, files } = sandbox();
+  const node = await httpNode({ strict: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  const log = join(root, 'fake.log');
+  const r = await cycle(p, { now: T, env: { FAKE_CALLS: '1', FAKE_LOG: log, FAKE_ITEM: JSON.stringify({ category: 'ways of working', subject: '' }), FAKE_ANSWERS: JSON.stringify(['q-1']) } });
+  node.close();
+  assert.equal(r.outcome.ok, true);
+  assert.equal(r.outcome.refused, 0, 'the node refused nothing');
+  assert.equal(r.outcome.importDone, true, 'the node confirmed the import');
+  assert.deepEqual(node.stored, ['Fact 1 of 1.']);
+  assert.equal(node.sends[0].import_of, at);
+  assert.equal(D.loadState(p).lastError, null);
+});
+
+test('the distil run\'s remember offers exactly the node\'s categories', async () => {
+  const { DISTIL_TOOLS } = await lib('mcp-proxy.js');
+  const remember = DISTIL_TOOLS.find((t) => t.name === 'remember');
+  assert.deepEqual(remember.inputSchema.properties.items.items.properties.category.enum, NODE_CATEGORIES);
 });
 
 test('Import: a run that sent no import_of is a failed distil, retried after the back-off', async () => {

@@ -969,6 +969,7 @@ export function buildPrompt(plan) {
   for (const t of plan.transcripts) lines.push(`- ${t.path} lines ${t.fromLine + 1}-${t.toLine}`);
   if (!plan.transcripts.length) lines.push('- (none)');
   lines.push('Read only those ranges: never another transcript, nor other lines of these. What lies outside them was distilled already, and reading it again would store the same facts twice.');
+  if (!codex) lines.push('A range too long to read whole: Grep a listed transcript by its own path (one file per call, never a folder) and use only the matches inside its range.');
   if (codex) {
     lines.push('In a rollout the person\'s own words are the event_msg user_message (or item_completed UserMessage) events and the answers are response_item messages with role assistant. Developer messages, AGENTS.md and <environment_context> blocks are the harness talking, not the person. Run nothing that writes or changes anything.');
   }
@@ -1055,17 +1056,21 @@ export function ruleAbsPath(path) {
   return `/${s.replace(/[\\[\]*?]/g, (c) => `\\${c}`)}`;
 }
 
+/** The run's file tools: each gets the same path-scoped rules. */
+const READ_TOOLS = ['Read', 'Glob', 'Grep'];
+const toolRules = (rulePath) => READ_TOOLS.map((tool) => `${tool}(${rulePath})`);
+
 /**
- * The run's read permission: one Read rule per path the plan reads, never a broader one. Read
- * rules are what Claude Code applies to Glob and Grep too; a folder gets a rule for itself (so it
- * can be listed) and one for what lies in it.
+ * The run's read permission: for each path the plan reads, one Read, one Glob and one Grep rule,
+ * never a broader one (a run that greps a parent folder is refused). A folder gets rules for
+ * itself (so it can be listed) and for what lies in it.
  */
 export function claudeReadRules(plan) {
-  const rules = (plan.transcripts ?? []).map((t) => `Read(${ruleAbsPath(t.path)})`);
+  const rules = (plan.transcripts ?? []).flatMap((t) => toolRules(ruleAbsPath(t.path)));
   if (plan.mode === 'import') {
     const extra = importReads(plan);
-    for (const f of [extra.home, ...extra.files]) rules.push(`Read(${ruleAbsPath(f)})`);
-    for (const d of extra.dirs) rules.push(`Read(${ruleAbsPath(d)})`, `Read(${ruleAbsPath(d)}/**)`);
+    for (const f of [extra.home, ...extra.files]) rules.push(...toolRules(ruleAbsPath(f)));
+    for (const d of extra.dirs) rules.push(...toolRules(ruleAbsPath(d)), ...toolRules(`${ruleAbsPath(d)}/**`));
   }
   return [...new Set(rules)];
 }
