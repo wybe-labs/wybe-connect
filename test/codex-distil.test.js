@@ -117,7 +117,7 @@ const rolloutsUnder = (codexHome) => {
 };
 
 // ------------------------------------------------------------------ the headless run
-test('codex exec: read-only sandbox, JSON events, ephemeral, no git check, only the plugin\'s own server, in distil mode', () => {
+test('codex exec: read-only sandbox, JSON events, ephemeral, no git check, no hooks of the person, only the plugin\'s own server, in distil mode', () => {
   const plan = { runId: 'r-1', mode: 'ongoing', harness: 'codex', connection: 'node', transcripts: [{ path: '/x/rollout-a.jsonl', fromLine: 0, toLine: 4 }] };
   const args = D.codexArgs(plan, { root: '/h/wybe-connect/codex', pluginRoot: '/plugins/wybe-connect' });
   assert.equal(args[0], 'exec');
@@ -127,6 +127,7 @@ test('codex exec: read-only sandbox, JSON events, ephemeral, no git check, only 
     '--json',
     '--ephemeral',
     '--skip-git-repo-check',
+    '-c', 'features.hooks=false',
     '-c', 'mcp_servers={}',
     '-c', `mcp_servers.wybe_distil.command=${JSON.stringify(process.execPath)}`,
     '-c', `mcp_servers.wybe_distil.args=${JSON.stringify([join('/plugins/wybe-connect', 'bin', 'mcp-proxy.js')])}`,
