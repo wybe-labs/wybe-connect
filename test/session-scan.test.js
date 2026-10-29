@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { connectionPaths, resolveSession } from '../lib/connections.js';
 import { saveCredentials } from '../lib/home.js';
 import { touchSession, claimPoller, runPoller, scanSessions, reportSession } from '../lib/bridge.js';
-import { scanTick, saveSummary, SCAN_BATCH } from '../lib/session-scan.js';
+import { scanTick, saveSummary, SCAN_BATCH, SCAN_EVERY_MS, REFRESH_OPEN_MS } from '../lib/session-scan.js';
 import { startFakeNode, grantFor, TOKEN } from './fixtures/fake-node.mjs';
 
 const FIX = join(import.meta.dirname, 'fixtures');
@@ -235,6 +235,27 @@ test('Codex: every rollout of the person\'s, archived ones closed; subagent thre
     assert.equal(got.get(id).project, 'atlas-demo');
     assert.equal(got.get(archId).state, 'closed');
     assert.ok(!node.calls.map((c) => c.body).join('\n').includes('PLANTED-REMOTE-PW'));
+  } finally {
+    await node.close();
+  }
+});
+
+test('an open session is sent again every REFRESH_OPEN_MS while unchanged, so the node keeps it open; a closed one is not', async () => {
+  const node = await startFakeNode();
+  try {
+    const h = home(node);
+    const open = transcript(h.claude, { project: 'atlas-demo', ageMs: 2 * DAY });
+    const closed = transcript(h.claude, { project: 'crm-demo', ageMs: 2 * DAY });
+    mkdirSync(join(h.claude, 'sessions'), { recursive: true });
+    writeFileSync(join(h.claude, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: open.id }));
+    const t0 = Date.now();
+    await scan(h, { now: () => t0 });
+    assert.equal(sent(node).length, 2);
+    await scan(h, { now: () => t0 + SCAN_EVERY_MS + 1000 });
+    assert.equal(sent(node).length, 2, 'nothing changed within the hour');
+    await scan(h, { now: () => t0 + REFRESH_OPEN_MS + SCAN_EVERY_MS });
+    assert.deepEqual(node.tool('sessions_report').at(-1).args.sessions.map((s) => s.id), [open.id]);
+    assert.ok(!sent(node).slice(2).some((s) => s.id === closed.id));
   } finally {
     await node.close();
   }
