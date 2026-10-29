@@ -36,8 +36,14 @@ function run(input, home) {
   });
 }
 
+let sandboxes = 0;
+
 function sandbox() {
-  const dir = mkdtempSync(join(tmpdir(), 'wybe-connect-cursor-'));
+  // Not mkdtemp: its random suffix mixes case and digits, and on Linux the whole project path is one
+  // token, so now and then the redactor's high-entropy family took it for a secret. A lowercase
+  // folder never reads as one.
+  const dir = join(tmpdir(), `wybe-connect-cursor-${process.pid}-${Date.now()}-${sandboxes++}`);
+  mkdirSync(dir, { recursive: true });
   const home = join(dir, 'home');
   const project = join(dir, 'atlas-demo').replace(/\\/g, '/');
   mkdirSync(join(project, '.git'), { recursive: true });
