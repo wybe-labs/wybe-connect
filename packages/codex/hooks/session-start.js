@@ -6,6 +6,8 @@
 // connection this session uses (lib/connections.js) and, when there are several, says so. Exit 0 always.
 
 import { fileURLToPath } from 'node:url';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import { readHookInput, failOpen } from '../lib/hook-io.js';
 import { harnessHome, loadCredentials, readJson } from '../lib/home.js';
 import { prunePins, sessionPaths, sessionNote } from '../lib/connections.js';
@@ -15,8 +17,10 @@ try {
   const input = await readHookInput();
   const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
   const root = harnessHome('codex');
-  prunePins(root);
+  // this session first, so pruning the others can never reset it; a rollout compressed or archived under
+  // CODEX_HOME keeps its session's pin
   const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null });
+  prunePins(root, { exceptSessionId: sessionId, codexHome: process.env.CODEX_HOME || join(homedir(), '.codex') });
   let context = buildContext({ credentials: loadCredentials(p), cached: readJson(p.openQuestions) });
   const note = sessionNote(root, p.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
   context = [context, note].filter(Boolean).join('\n');
