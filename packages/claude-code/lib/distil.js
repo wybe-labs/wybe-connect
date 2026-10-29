@@ -978,11 +978,14 @@ export function buildPrompt(plan) {
       `This is the import the person asked for in Wybe. The ranges above are every Codex session of the last ${IMPORT_DAYS} days that is not distilled yet. Also read ${join(home, 'AGENTS.md')} and the AGENTS.md of the projects in those rollouts (their session_meta cwd).`,
     );
   } else if (plan.mode === 'import') {
-    const home = plan.claudeHome ?? '~/.claude';
+    const extra = importReads(plan);
     lines.push(
       '',
-      `This is the import the person asked for in Wybe. The ranges above are every Claude Code session of the last ${IMPORT_DAYS} days that is not distilled yet. Also read ${join(home, 'CLAUDE.md')}, the CLAUDE.md of the projects in those transcripts, and the auto memory under ${join(home, 'projects', '*', 'memory')}.`,
+      `This is the import the person asked for in Wybe. The ranges above are every Claude Code session of the last ${IMPORT_DAYS} days that is not distilled yet. Also read ${extra.home}.`,
     );
+    if (extra.files.length) lines.push('The CLAUDE.md of the projects in those transcripts:', ...extra.files.map((f) => `- ${f}`));
+    if (extra.dirs.length) lines.push('The auto memory of those projects (Glob each folder for *.md, then Read):', ...extra.dirs.map((d) => `- ${d}`));
+    lines.push('Nothing else can be read.');
   }
   lines.push(
     '',
@@ -998,12 +1001,93 @@ export function buildPrompt(plan) {
 /** The environment of a run's claude and its MCP server: the run, the home, and the connection the run is for. */
 const runEnv = (plan, root) => ({ [DISTIL_ENV]: plan.runId, WYBE_CONNECT_HOME: wybeHomeOf(root, harnessOf(plan)), [NODE_ENV]: typeof plan.connection === 'string' ? plan.connection : '' });
 
+/** The first `cwd` a Claude Code transcript records (every entry carries the session's), or null. */
+function transcriptCwd(path) {
+  const head = headText(path, HEAD_BYTES);
+  if (head === null) return null;
+  for (const line of head.split('\n')) {
+    try {
+      const cwd = JSON.parse(line)?.cwd;
+      if (typeof cwd === 'string' && cwd) return cwd;
+    } catch {
+      // a torn last line
+    }
+  }
+  return null;
+}
+
+const isDir = (p) => {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * What a Claude Code import reads besides its transcript ranges: the Claude home's CLAUDE.md and,
+ * of the projects in those transcripts only, their CLAUDE.md (where it exists) and their auto
+ * memory folder (<home>/projects/<project>/memory, beside the transcript, where it exists).
+ */
+function importReads(plan) {
+  const home = join(plan.claudeHome ?? claudeHomeOf(), 'CLAUDE.md');
+  const files = new Set();
+  const dirs = new Set();
+  for (const t of plan.transcripts ?? []) {
+    const cwd = typeof t.cwd === 'string' && t.cwd ? t.cwd : transcriptCwd(t.path);
+    if (cwd) for (const f of [join(cwd, 'CLAUDE.md'), join(cwd, '.claude', 'CLAUDE.md')]) if (existsSync(f)) files.add(f);
+    const memory = join(dirname(t.path), 'memory');
+    if (isDir(memory)) dirs.add(memory);
+  }
+  return { home, files: [...files], dirs: [...dirs] };
+}
+
+/**
+ * A path as the absolute path of a permission rule. Claude Code matches rule paths in POSIX form,
+ * with Windows paths normalized first (C:\Users\x becomes /c/Users/x), and an absolute rule path
+ * starts with `//`. gitignore's pattern characters are escaped, so the rule is that literal path.
+ */
+export function ruleAbsPath(path) {
+  let s = String(path);
+  const drive = /^([A-Za-z]):[\\/]/.exec(s);
+  if (drive) s = `/${drive[1].toLowerCase()}/${s.slice(3).replace(/\\/g, '/')}`;
+  return `/${s.replace(/[\\[\]*?]/g, (c) => `\\${c}`)}`;
+}
+
+/**
+ * The run's read permission: one Read rule per path the plan reads, never a broader one. Read
+ * rules are what Claude Code applies to Glob and Grep too; a folder gets a rule for itself (so it
+ * can be listed) and one for what lies in it.
+ */
+export function claudeReadRules(plan) {
+  const rules = (plan.transcripts ?? []).map((t) => `Read(${ruleAbsPath(t.path)})`);
+  if (plan.mode === 'import') {
+    const extra = importReads(plan);
+    for (const f of [extra.home, ...extra.files]) rules.push(`Read(${ruleAbsPath(f)})`);
+    for (const d of extra.dirs) rules.push(`Read(${ruleAbsPath(d)})`, `Read(${ruleAbsPath(d)}/**)`);
+  }
+  return [...new Set(rules)];
+}
+
+/**
+ * `claude -p` for one plan. Its file tools are Read, Glob and Grep only, and in dontAsk mode a read
+ * outside the working directory is refused unless a rule allows it: the transcripts live under
+ * the Claude home, so the plan's own paths are allowed one by one (claudeReadRules), never a
+ * whole folder of the person's. The run uses the person's Claude login but none of their
+ * settings files (`--setting-sources ""`): no hooks, plugins, permission rules or MCP servers of
+ * theirs load, and `disableAllHooks` holds even where a settings layer still applied. (`--bare`
+ * would skip the login, and `--safe-mode` ignores `--mcp-config`, so neither fits.) Its only
+ * server is the plugin's own, in distil mode. It runs in the distil's own folder (runRunner).
+ */
 export function claudeArgs(plan, { root, pluginRoot = PLUGIN_ROOT }) {
   const mcp = { mcpServers: { wybe: { command: process.execPath, args: [join(pluginRoot, 'bin', 'mcp-proxy.js')], env: runEnv(plan, root) } } };
+  const settings = { disableAllHooks: true, permissions: { allow: claudeReadRules(plan) } };
   return [
     '-p', buildPrompt(plan),
     '--tools', 'Read,Glob,Grep',
     '--allowedTools', 'mcp__wybe__remember,mcp__wybe__distil_done,mcp__wybe__pending_questions',
+    '--setting-sources', '',
+    '--settings', JSON.stringify(settings),
     '--strict-mcp-config', '--mcp-config', JSON.stringify(mcp),
     '--permission-mode', 'dontAsk',
     '--max-turns', '40',
@@ -1016,7 +1100,8 @@ const tomlTable = (o) => `{ ${Object.entries(o).map(([k, v]) => `${k} = ${JSON.s
 
 /**
  * `codex exec` for one plan: the read-only sandbox, JSON events to the run's log, --ephemeral so
- * the run leaves no rollout (it is never a session to import), no git-repository check, and as its
+ * the run leaves no rollout (it is never a session to import), no git-repository check, no hooks
+ * (`features.hooks=false`: none of the person's user, project or plugin hooks run in it), and as its
  * only MCP server the plugin's own, in distil mode. `mcp_servers={}` first drops every server the
  * person configured; Codex starts a stdio server with only a few variables of its own environment
  * plus the server's `env` table, so the distil mode is carried there. It is named wybe_distil, not
@@ -1029,6 +1114,7 @@ export function codexArgs(plan, { root, pluginRoot = PLUGIN_ROOT }) {
     '--json',
     '--ephemeral',
     '--skip-git-repo-check',
+    '-c', 'features.hooks=false',
     '-c', 'mcp_servers={}',
     '-c', `mcp_servers.wybe_distil.command=${JSON.stringify(process.execPath)}`,
     '-c', `mcp_servers.wybe_distil.args=${JSON.stringify([join(pluginRoot, 'bin', 'mcp-proxy.js')])}`,
@@ -1068,8 +1154,9 @@ function runRunner(plan, { root, resolve, spawnImpl, runTimeoutMs, logFile, cwd 
     const io = fd === null ? 'ignore' : fd;
     let child;
     try {
-      // codex runs in the distil's own folder, so no project's AGENTS.md or .codex/config.toml applies to it
-      child = spawnImpl(how.cmd, [...how.pre, ...runner.args(plan, { root })], { stdio: ['ignore', io, io], windowsHide: true, detached: process.platform !== 'win32', env: { ...process.env, ...runEnv(plan, root) }, ...(runner.name === 'codex' ? { cwd } : {}) });
+      // The run is in the distil's own folder: no project's AGENTS.md, CLAUDE.md or settings apply
+      // to it, and its working directory (readable without a rule) is never a project of the person's.
+      child = spawnImpl(how.cmd, [...how.pre, ...runner.args(plan, { root })], { stdio: ['ignore', io, io], windowsHide: true, detached: process.platform !== 'win32', env: { ...process.env, ...runEnv(plan, root) }, cwd });
     } catch (err) {
       if (fd !== null) closeSync(fd);
       done({ code: null, error: `could not start ${runner.name}: ${err?.code ?? err}` });
