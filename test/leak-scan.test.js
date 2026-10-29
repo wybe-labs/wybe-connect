@@ -29,15 +29,20 @@ test('an SSH remote (git@host) is not a person', () => {
   assert.deepEqual(kinds(`git clone ${at('git', 'github.com')}:wybe-labs/wybe-connect.git`), []);
 });
 
+test('URL userinfo and an escaped SSH remote are not addresses', () => {
+  assert.deepEqual(kinds(`https://user:${at('PLANTED-PW', 'github.com')}/x.git`), []);
+  assert.deepEqual(kinds(`"url = ${at('\\tgit','github.com')}:x/y.git"`), []);
+});
+
 test('a scoped package name and a plugin@marketplace id are not e-mail addresses', () => {
   assert.deepEqual(kinds('"name": "@wybe-labs/wybe-connect"'), []);
   assert.deepEqual(kinds('/plugin install wybe-connect@wybe-connect'), []);
 });
 
 test('phone numbers fail, made-up ones pass', () => {
-  assert.deepEqual(kinds('call +47 412 34 567 after nine'), ['phone']);
-  assert.deepEqual(kinds('ring 912 34 567'), ['phone']);
-  assert.deepEqual(kinds('call +4412345678901 at once'), ['phone']);
+  assert.deepEqual(kinds('call +47 412 34 567 after nine'), ['phone']);   // leak-scan: ignore
+  assert.deepEqual(kinds('ring 912 34 567'), ['phone']);   // leak-scan: ignore
+  assert.deepEqual(kinds('call +4412345678901 at once'), ['phone']);   // leak-scan: ignore
   assert.deepEqual(kinds('placeholder +47 99999999'), []);
   assert.deepEqual(kinds('placeholder 12345678'), []);
 });
