@@ -3,10 +3,11 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { spawnSync } from 'node:child_process';
+import { spawnSync, spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   NODE_ENV, connectionKey, connectionPaths, migrateLegacy, listConnections, defaultConnection,
-  findConnection, saveConnection, checkSave, useConnection, removeConnection, resolveSession, sessionPaths,
+  findConnection, saveConnection, checkSave, useConnection, removeConnection, resolveSession, sessionPaths, accountKey,
 } from '../lib/connections.js';
 import { loadCredentials } from '../lib/home.js';
 import { createDelivery, newSummary } from '../lib/flush.js';
@@ -337,3 +338,116 @@ test('sessionPaths: credentials, queue, question caches and spool per connection
   assert.equal(a.cursor('t'), b.cursor('t'));
   assert.notEqual(a.spool, b.spool);
 });
+
+const JOBB = 'jobb@example.invalid';
+const PRIVAT = 'privat@example.invalid';
+const short = (account) => createHash('sha256').update(account).digest('hex').slice(0, 8);
+const under = (account, nodeUrl, token) => ({ ...creds(nodeUrl, token), harnessAccount: account });
+
+test('accountKey: a second harness account on the same node gets <host>~<short account hash>; the same account keeps its connection', () => {
+  const root = home();
+  const node = 'https://dittfirma.wybe.me';
+  assert.equal(accountKey(root, node, JOBB), 'dittfirma.wybe.me', 'the first one takes the host');
+  assert.equal(saveConnection(root, under(JOBB, node, TOKEN_A)), 'dittfirma.wybe.me');
+  assert.equal(accountKey(root, node, JOBB), 'dittfirma.wybe.me', 'the same account again');
+  assert.equal(accountKey(root, node, 'Jobb@Example.invalid '), 'dittfirma.wybe.me', 'an e-mail compares without case or spaces');
+  const second = `dittfirma.wybe.me~${short(PRIVAT)}`;
+  assert.equal(accountKey(root, node, PRIVAT), second);
+  assert.equal(saveConnection(root, under(PRIVAT, node, TOKEN_B)), second, 'a save under another account derives the name instead of replacing the first');
+  assert.equal(loadCredentials(connectionPaths(root, 'dittfirma.wybe.me')).accessToken, TOKEN_A, 'the first account\'s grant is untouched');
+  assert.equal(accountKey(root, node, PRIVAT), second);
+  assert.equal(findConnection(root, second), second, 'the derived name is a connection name like any other');
+  assert.ok(!second.includes('privat'), 'the name never carries the account');
+  assert.equal(accountKey(root, node, null), 'dittfirma.wybe.me', 'no account: the host, as before');
+  saveConnection(root, under(JOBB, 'https://andrefirma.wybe.me', TOKEN_A), { name: 'jobb' });
+  assert.equal(accountKey(root, 'https://andrefirma.wybe.me', JOBB), 'jobb', 'a named connection of this node and account is found');
+});
+
+test('accountKey: a connection made before accounts were recorded is taken as this account\'s', () => {
+  const root = home();
+  saveConnection(root, creds('https://dittfirma.wybe.me', TOKEN_A));
+  assert.equal(accountKey(root, 'https://dittfirma.wybe.me', JOBB), 'dittfirma.wybe.me');
+});
+
+test('resolveSession: a connection made under the session\'s harness account wins over the plain default; no match falls back to the default', () => {
+  const root = home();
+  const node = 'https://dittfirma.wybe.me';
+  saveConnection(root, under(JOBB, node, TOKEN_A));
+  const privat = saveConnection(root, under(PRIVAT, node, TOKEN_B));
+  saveConnection(root, creds('https://andrefirma.wybe.me', TOKEN_B));
+  assert.equal(resolveSession(root, { sessionId: 'k1', env: {}, account: JOBB }), 'dittfirma.wybe.me', 'the work account\'s session goes to its own connection, not the newest');
+  assert.equal(resolveSession(root, { sessionId: 'o1', env: {}, account: () => PRIVAT }), privat, 'the account may be read lazily');
+  assert.equal(resolveSession(root, { sessionId: 'x1', env: {}, account: 'annen@example.invalid' }), 'andrefirma.wybe.me', 'no match: the default');
+  assert.equal(resolveSession(root, { sessionId: 'x2', env: {} }), 'andrefirma.wybe.me', 'no account: the default');
+  assert.equal(resolveSession(root, { sessionId: 'e1', env: { [NODE_ENV]: 'andrefirma.wybe.me' }, account: JOBB }), 'andrefirma.wybe.me', 'WYBE_CONNECT_NODE still comes first');
+  useConnection(root, privat);
+  assert.equal(resolveSession(root, { sessionId: 'k2', env: {}, account: JOBB }), 'dittfirma.wybe.me', 'the account beats a default moved by use');
+});
+
+test('resolveSession: the account is not read while there is nothing to choose between', () => {
+  const root = home();
+  saveConnection(root, under(JOBB, 'https://dittfirma.wybe.me', TOKEN_A));
+  let reads = 0;
+  assert.equal(resolveSession(root, { sessionId: 'l1', env: {}, account: () => { reads += 1; return PRIVAT; } }), 'dittfirma.wybe.me');
+  assert.equal(reads, 0);
+});
+
+test('an existing pin is never moved by an account change', () => {
+  const root = home();
+  const node = 'https://dittfirma.wybe.me';
+  saveConnection(root, under(JOBB, node, TOKEN_A));
+  const privat = saveConnection(root, under(PRIVAT, node, TOKEN_B));
+  assert.equal(resolveSession(root, { sessionId: 'p1', env: {}, account: JOBB }), 'dittfirma.wybe.me');
+  assert.equal(resolveSession(root, { sessionId: 'p1', env: {}, account: PRIVAT }), 'dittfirma.wybe.me', 'the harness switched account: the session stays');
+  assert.equal(sessionPaths(root, { sessionId: 'p1', env: {}, account: PRIVAT }).connection, 'dittfirma.wybe.me');
+  assert.equal(resolveSession(root, { sessionId: 'p2', env: {}, account: PRIVAT }), privat, 'a new session follows the new account');
+});
+
+test('a new session of an account no connection records stays off another account\'s connection on that node: it goes to the one made before accounts were recorded', () => {
+  const root = home();
+  const node = 'https://dittfirma.wybe.me';
+  const legacy = saveConnection(root, creds(node, TOKEN_A));
+  const privat = saveConnection(root, under(PRIVAT, node, TOKEN_B), { name: `dittfirma.wybe.me~${short(PRIVAT)}` });
+  assert.equal(resolveSession(root, { sessionId: 'u1', env: {}, account: JOBB }), legacy, 'not the newest connection, which is another account\'s');
+  assert.equal(resolveSession(root, { sessionId: 'u2', env: {}, account: PRIVAT }), privat);
+  assert.equal(resolveSession(root, { sessionId: 'u3', env: {} }), privat, 'no account: the default');
+
+  const other = home();
+  saveConnection(other, creds('https://andrefirma.wybe.me', TOKEN_A));
+  const elsewhere = saveConnection(other, under(PRIVAT, node, TOKEN_B));
+  assert.equal(resolveSession(other, { sessionId: 'u4', env: {}, account: JOBB }), elsewhere, 'never another node instead: the default');
+});
+
+// Through the real SessionStart hooks: the harness account each one reads decides where a new session goes.
+const HARNESS_HOOKS = {
+  'claude-code': { script: 'packages/claude-code/hooks/session-start.js', home: (root) => root, account: (dir, email) => { writeFileSync(join(dir, '.claude.json'), JSON.stringify({ oauthAccount: { emailAddress: email } })); return { CLAUDE_CONFIG_DIR: dir }; } },
+  codex: { script: 'packages/codex/hooks/session-start.js', home: (root) => join(root, 'codex'), account: (dir, email) => {
+    const idToken = ['eyJhbGciOiJub25lIn0', Buffer.from(JSON.stringify({ email })).toString('base64url'), 'FAKEsig'].join('.');
+    writeFileSync(join(dir, 'auth.json'), JSON.stringify({ tokens: { id_token: idToken } }));
+    return { CODEX_HOME: dir };
+  } },
+};
+function runStart(script, sessionId, root, extraEnv) {
+  return new Promise((resolve, reject) => {
+    const base = { ...process.env };
+    delete base[NODE_ENV];
+    const child = spawn(process.execPath, [join(import.meta.dirname, '..', script)], { env: { ...base, WYBE_CONNECT_HOME: root, ...extraEnv }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+    child.on('error', reject);
+    child.on('close', resolve);
+    child.stdin.end(JSON.stringify({ session_id: sessionId, hook_event_name: 'SessionStart', source: 'startup' }));
+  });
+}
+for (const [harness, h] of Object.entries(HARNESS_HOOKS)) {
+  test(`${harness} SessionStart hook: a new session goes to the connection of the account the harness is signed in to`, async () => {
+    const root = home();
+    const hRoot = h.home(root);
+    const node = 'https://dittfirma.wybe.me';
+    const jobb = saveConnection(hRoot, under(JOBB, node, TOKEN_A));
+    const privat = saveConnection(hRoot, under(PRIVAT, node, TOKEN_B));
+    const accountDir = mkdtempSync(join(tmpdir(), 'wybe-connect-account-'));
+    await runStart(h.script, 'h1', root, h.account(accountDir, JOBB));
+    assert.equal(resolveSession(hRoot, { sessionId: 'h1', env: {} }), jobb, 'not the newest connection: the one of this account');
+    await runStart(h.script, 'h2', root, h.account(accountDir, PRIVAT));
+    assert.equal(resolveSession(hRoot, { sessionId: 'h2', env: {} }), privat);
+  });
+}

@@ -332,14 +332,23 @@ export function finishOnStop(p, sessionId, { lastMessage = '', failed = false, t
   });
 }
 
-/** Sends every finished result; one the node refuses (already has one, not this session's) is settled too. */
+/**
+ * A refusal that says the node is busy for now (its budget or rate limit): `retry: true` on the answer, or failing
+ * that, the words "try again later". The call may succeed later exactly as it is.
+ */
+export const busyRefusal = (out) => !out.ok && out.toolError === true && (out.retry === true || /try again later/i.test(String(out.message ?? '')));
+
+/**
+ * Sends every finished result; one the node refuses (already has one, not this session's) is settled too. One the
+ * node is too busy to take now (busyRefusal) waits for the next round.
+ */
 export async function flushResults(p, sessionId, { fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   if (!bridgeDir(p) || !existsSync(sessionFiles(p, sessionId).tasks)) return 0;
   const waiting = Object.values(readTasks(sessionFiles(p, sessionId)).tasks).filter((t) => t.status === 'finished' && t.result);
   let sent = 0;
   for (const task of waiting) {
     const out = await nodeCall(p, 'task_result', { task_id: task.id, session_id: sessionId, status: task.result.status, text: task.result.text }, { fetchImpl, now });
-    if (!out.ok && !out.toolError) continue;
+    if ((!out.ok && !out.toolError) || busyRefusal(out)) continue;
     withTasks(p, sessionId, (st) => {
       const t = st.tasks[task.id];
       if (t && t.status === 'finished') {

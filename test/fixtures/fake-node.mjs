@@ -12,6 +12,7 @@ export function startFakeNode({ valid = TOKEN, level = 'write' } = {}) {
     level,
     valid,
     down: false,
+    busy: null, // 'retry' | 'text': task_result refuses for now (see below)
     tasks: [], // { id, text, mode, session_id, created_at, expires_at }
     results: new Map(),
     calls: [], // { name, args, auth, body }
@@ -48,6 +49,10 @@ export function startFakeNode({ valid = TOKEN, level = 'write' } = {}) {
       }
       if (name === 'sessions_report') { text({ ok: true, known: (args.sessions ?? []).length }); return; }
       if (name === 'task_result') {
+        // busy: 'retry' answers the refusal with structuredContent { retry: true } and a text that does not say so;
+        // 'text' answers with only the words. Either way nothing is stored.
+        if (node.busy === 'retry') { reply({ content: [{ type: 'text', text: 'Refused.' }], structuredContent: { retry: true }, isError: true }); return; }
+        if (node.busy === 'text') { text('Too many results right now; try again later.', true); return; }
         if (node.results.has(args.task_id)) { text('No such task for this session.', true); return; }
         node.results.set(args.task_id, args);
         text({ ok: true });

@@ -20,13 +20,14 @@
 // stdout carries JSON-RPC only; nothing here prints a token.
 
 import { createInterface } from 'node:readline';
-import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js';
+import { connect as defaultConnect, refreshTokens, harnessOf, ALL_SCOPES } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
 import { connectionPaths, connectionNames, checkSave, saveConnection, sessionConnection, pinnedConnection, sessionIdRequired } from './connections.js';
 import { spoolRemember, spoolDone } from './distil.js';
 import { redactValue } from './redact.js';
 import { renewStored } from './connect-cli.js';
+import { accountOf } from './session-info.js';
 import { findTask, decideTask } from './bridge.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'wybe', version: '0.2.0' });
@@ -154,9 +155,12 @@ export function importRequestOf(result) {
 
 /**
  * handle(message) answers one JSON-RPC message (null for a notification); notify(message) is how
- * the proxy pushes notifications/tools/list_changed after a sign-in completes.
+ * the proxy pushes notifications/tools/list_changed after a sign-in completes. `harnessAccount()`
+ * is the account the harness is signed in to (by default read for the harness the fixed client
+ * stands for): `connect` sends it as the sign-in's account hint and keeps a second account's grant
+ * apart from the first (lib/connections.js accountKey). No answer of this server names it.
  */
-export function createProxy({ paths: fixed = null, root = null, env = process.env, clientId = null, clientName = 'wybe-connect (Claude Code)', notify = () => {}, request = null, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, distilRun = null, onImportRequest = null }) {
+export function createProxy({ paths: fixed = null, root = null, env = process.env, clientId = null, clientName = 'wybe-connect (Claude Code)', harnessAccount = () => accountOf(harnessOf(clientId), env), notify = () => {}, request = null, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, distilRun = null, onImportRequest = null }) {
   let pending = null; // { nodeUrl, url, done, error }
   const shown = new Set(); // ids of tasks whose text this server has returned to the session
   let canElicit = false; // the client declared the elicitation capability at initialize
@@ -228,6 +232,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
       scopes: ALL_SCOPES,
       clientId,
       clientName,
+      harnessAccount: harnessAccount(),
       fetchImpl,
       onUrl: (url) => { state.url = url; resolveUrl(); },
       log: () => {},
@@ -273,7 +278,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
         return text(`Could not start the sign-in: ${err instanceof Error ? err.message : String(err)}`, true);
       }
       // Already connected to this node under the same fixed client: renew, never a second grant.
-      const renewed = await renewStored(root, origin, { clientId, fetchImpl });
+      const renewed = await renewStored(root, origin, { clientId, account: harnessAccount(), fetchImpl });
       if (renewed) {
         notify({ jsonrpc: '2.0', method: 'notifications/tools/list_changed' });
         return text(`Connected to ${renewed.credentials.nodeUrl} (scopes: ${renewed.credentials.scopes.join(', ')}); the stored grant was renewed, no new sign-in. The Wybe tools are available now.`);

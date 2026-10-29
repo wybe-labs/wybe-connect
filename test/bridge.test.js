@@ -164,6 +164,37 @@ test('a failed turn sends failed; the node down keeps the result for the next ro
   }
 });
 
+test('a result the node refuses for now (retry: true, else the words try again later) waits for the next round; another refusal settles it', async () => {
+  const node = await startFakeNode();
+  try {
+    const { p } = setup(node);
+    const t = task();
+    node.tasks.push(t);
+    await pollOnce(p, SID);
+    finishOnStop(p, SID, { lastMessage: 'done' });
+    for (const busy of ['retry', 'text']) {
+      node.busy = busy;
+      assert.equal(await flushResults(p, SID), 0);
+      assert.equal(findTask(p, t.id).task.status, 'finished', `${busy}: the result is kept`);
+    }
+    node.busy = null;
+    assert.equal(await flushResults(p, SID), 1);
+    assert.equal(node.results.get(t.id).text, 'done');
+    assert.equal(findTask(p, t.id).task.status, 'reported');
+    assert.equal(await flushResults(p, SID), 0, 'sent once');
+
+    const u = task();
+    node.tasks.push(u);
+    await pollOnce(p, SID);
+    finishOnStop(p, SID, { lastMessage: 'again' });
+    node.results.set(u.id, {});
+    assert.equal(await flushResults(p, SID), 0);
+    assert.equal(findTask(p, u.id).task.status, 'reported', 'a refusal that does not say later is settled, not resent forever');
+  } finally {
+    await node.close();
+  }
+});
+
 test('a task queued for a turn of its own is finished only by the turn whose prompt carries its mark', async () => {
   const node = await startFakeNode();
   try {

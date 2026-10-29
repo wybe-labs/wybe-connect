@@ -1,18 +1,23 @@
 // The body of each package's bin/connect.js:
 //   <node-url> [--scopes a,b] [--name n]   run the OAuth flow once under the harness's own client
-//                                          name and store the grant as a connection of its own in
-//                                          that harness's home (lib/connections.js); it becomes the
+//                                          and store the grant as a connection of its own in that
+//                                          harness's home (lib/connections.js); it becomes the
 //                                          default for new sessions. A second node never replaces
-//                                          the first; the same node again replaces its grant.
-//   list                                   the connections, the default marked *
+//                                          the first; the same node again replaces its grant, and
+//                                          the same node under another harness account gets a
+//                                          connection of its own (connections.js accountKey). The
+//                                          harness account goes to the sign-in as its account hint.
+//   list                                   the connections, the default marked *, each with its
+//                                          harness account masked
 //   use <name> [--session <id>]            the default for new sessions, or one session's connection
 //   remove <name>                          delete a connection's local grant and queue
 // Prints where it connected, the granted scopes and the next steps. Never prints a token.
 
 import { connect, renewGrant, ALL_SCOPES, STATIC_CLIENTS } from './oauth.js';
 import { harnessHome } from './home.js';
-import { connectionPaths, connectionGrant, renewConnection, listConnections, saveConnection, useConnection, removeConnection, checkedName, checkSave, sessionTranscript, NODE_ENV } from './connections.js';
+import { connectionPaths, connectionGrant, renewConnection, listConnections, saveConnection, useConnection, removeConnection, checkedName, checkSave, sessionTranscript, accountKey, accountName, NODE_ENV } from './connections.js';
 import { noteSession } from './distil.js';
+import { accountOf } from './session-info.js';
 
 const USAGE = [
   'usage: connect.js <node-url> [--scopes remember,conversations,sessions:light,sessions:full] [--name <name>]',
@@ -62,6 +67,13 @@ export function parseConnectArgs(args) {
   }
 }
 
+/** An account as `list` prints it: enough to tell two apart, never the whole address. */
+export function maskedAccount(account) {
+  if (typeof account !== 'string' || !account.trim()) return null;
+  const [local, domain] = account.trim().split(/@(?=[^@]*$)/);
+  return `${local.slice(0, 2)}…${domain ? `@${domain}` : ''}`;
+}
+
 function printList(root, out) {
   const list = listConnections(root);
   if (!list.length) {
@@ -71,7 +83,8 @@ function printList(root, out) {
   const w = Math.max(...list.map((c) => c.key.length));
   const u = Math.max(...list.map((c) => c.nodeUrl.length));
   for (const c of list) {
-    const extra = [c.connectedAt ? `connected ${c.connectedAt.slice(0, 10)}` : null, c.queued ? `${c.queued} queued` : null].filter(Boolean).join(', ');
+    const account = maskedAccount(connectionGrant(root, c.key)?.harnessAccount);
+    const extra = [account ? `account ${account}` : null, c.connectedAt ? `connected ${c.connectedAt.slice(0, 10)}` : null, c.queued ? `${c.queued} queued` : null].filter(Boolean).join(', ');
     out.write(`${c.isDefault ? '*' : ' '} ${c.key.padEnd(w)}  ${c.nodeUrl.padEnd(u)}  ${c.scopes.join(', ') || '(no scopes)'}${extra ? `  (${extra})` : ''}\n`);
   }
   out.write(`* = the default for new sessions. Choose another per session with ${NODE_ENV}=<name> or: connect.js use <name> --session <session-id>\n`);
@@ -79,29 +92,32 @@ function printList(root, out) {
 
 /**
  * A connect to a node this home already holds a grant for (same fixed client, same scopes or
- * fewer) renews that grant instead of signing in again, so a re-run never makes a new grant.
- * Returns { key, credentials } when renewed, or null when a sign-in is needed.
+ * fewer, the same harness account) renews that grant instead of signing in again, so a re-run
+ * never makes a new grant. A grant made before accounts were recorded is renewed as it is: it may
+ * be another account's, so it is never marked as `account`'s, and `unmarked` says so.
+ * Returns { key, credentials, unmarked } when renewed, or null when a sign-in is needed.
  */
-export async function renewStored(root, nodeUrl, { name = null, scopes = null, clientId = null, fetchImpl = globalThis.fetch } = {}) {
+export async function renewStored(root, nodeUrl, { name = null, scopes = null, clientId = null, account = null, fetchImpl = globalThis.fetch } = {}) {
   if (!clientId) return null;
   let key;
   try {
-    key = checkSave(root, nodeUrl, name);
+    key = checkSave(root, nodeUrl, name ?? accountKey(root, nodeUrl, account));
   } catch {
     return null; // the name belongs to another node: the sign-in path reports it
   }
   const held = connectionGrant(root, key);
-  const next = await renewGrant(held, { clientId, nodeUrl, scopes, fetchImpl });
-  if (!next) return null;
+  const renewed = await renewGrant(held, { clientId, nodeUrl, scopes, fetchImpl });
+  if (!renewed) return null;
   try {
-    renewConnection(root, key, next);
+    renewConnection(root, key, renewed);
   } catch {
     return null;
   }
-  return { key, credentials: next };
+  const unmarked = typeof account === 'string' && Boolean(account.trim()) && !held.harnessAccount;
+  return { key, credentials: renewed, unmarked };
 }
 
-export async function runConnect({ harness, clientName, clientId = STATIC_CLIENTS[harness] ?? null, nextSteps, argv = process.argv.slice(2), out = process.stdout, err = process.stderr, connectImpl = connect, fetchImpl = globalThis.fetch }) {
+export async function runConnect({ harness, clientName, clientId = STATIC_CLIENTS[harness] ?? null, nextSteps, argv = process.argv.slice(2), out = process.stdout, err = process.stderr, connectImpl = connect, fetchImpl = globalThis.fetch, env = process.env, account = undefined }) {
   const parsed = parseConnectArgs(argv);
   if (parsed.help || parsed.error) {
     if (parsed.error) err.write(`${parsed.error}\n`);
@@ -130,17 +146,24 @@ export async function runConnect({ harness, clientName, clientId = STATIC_CLIENT
       out.write('The pairing on the node stays until you revoke it there (the Wybe portal\'s list of connected assistants).\n');
       return 0;
     }
+    // The harness's own account: which connection of this node is this one, and the sign-in's account hint.
+    const harnessAccount = account === undefined ? accountOf(harness, env) : account;
     // Scopes asked for explicitly must all be held; by default the grant's own scopes stand.
-    const renewed = await renewStored(root, parsed.nodeUrl, { name: parsed.name ?? null, scopes: argv.includes('--scopes') ? parsed.scopes : null, clientId, fetchImpl });
+    const renewed = await renewStored(root, parsed.nodeUrl, { name: parsed.name ?? null, scopes: argv.includes('--scopes') ? parsed.scopes : null, clientId, account: harnessAccount, fetchImpl });
     let credentials;
     let key;
     if (renewed) {
       ({ key, credentials } = renewed);
       out.write(`Already connected to ${credentials.nodeUrl}: the stored grant was renewed, no new sign-in.\n`);
+      if (renewed.unmarked) {
+        out.write(`${key} was connected before wybe-connect recorded which account a connection is for, so it is not marked as this account's.\n`);
+        out.write(`If it was made under another account, give this one a connection of its own: connect.js ${credentials.nodeUrl} --name ${accountName(parsed.nodeUrl, harnessAccount)}\n`);
+      }
     } else {
-      checkSave(root, parsed.nodeUrl, parsed.name ?? null); // a name another node holds is refused before the browser opens
-      credentials = await connectImpl(parsed.nodeUrl, { scopes: parsed.scopes, clientId, clientName, fetchImpl, log: (line) => err.write(`${line}\n`) });
-      key = saveConnection(root, credentials, { name: parsed.name ?? null });
+      const name = parsed.name ?? accountKey(root, parsed.nodeUrl, harnessAccount);
+      checkSave(root, parsed.nodeUrl, name); // a name another node holds is refused before the browser opens
+      credentials = await connectImpl(parsed.nodeUrl, { scopes: parsed.scopes, clientId, clientName, harnessAccount, fetchImpl, log: (line) => err.write(`${line}\n`) });
+      key = saveConnection(root, harnessAccount && !credentials.harnessAccount ? { ...credentials, harnessAccount } : credentials, { name });
       out.write(`Connected to ${credentials.nodeUrl}\n`);
     }
     const others = listConnections(root).filter((c) => c.key !== key).map((c) => c.key);
