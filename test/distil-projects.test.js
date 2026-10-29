@@ -193,6 +193,39 @@ test('a memory file is listed again only when it changed: the next ongoing run l
   }
 });
 
+test('memory files past the per-run cap are read by a later run of their own, with no new session', async () => {
+  const m = machine();
+  const node = await httpNode();
+  try {
+    saveCredentials(creds(node.url), m.p);
+    const T = Date.now();
+    const demo = m.project('demo-app');
+    demo.transcript(uuid(1), T - 30 * DAY);
+    const dir = join(demo.dir, 'memory');
+    mkdirSync(dir, { recursive: true });
+    const n = D.MAX_RUN_MEMORY_FILES + 5;
+    const all = [];
+    for (let i = 0; i < n; i++) {
+      const f = join(dir, `topic-${String(i).padStart(3, '0')}.md`);
+      writeFileSync(f, `- topic ${i}\n`);
+      all.push(f);
+    }
+    assert.equal(D.requestImport(m.p, new Date(T).toISOString()), true);
+    const r1 = await cycle(m.p, m, T);
+    assert.equal(r1.outcome.ok, true);
+    assert.equal(r1.plan.memory.length, D.MAX_RUN_MEMORY_FILES, 'one run reads at most the cap');
+    assert.equal(D.loadState(m.p).pending.length, 0, 'no transcript waits');
+    const r2 = await cycle(m.p, m, T + D.BACKLOG_INTERVAL_MS + MIN);
+    assert.equal(r2.plan?.mode, 'ongoing', 'a run for the memory left over');
+    assert.deepEqual(r2.plan.transcripts, []);
+    assert.deepEqual([...r1.plan.memory, ...r2.plan.memory].map((f) => f.path).sort(), [...all].sort(), 'every file read once');
+    assert.equal(r2.outcome.ok, true);
+    assert.equal(plan(m.p, m, T + 2 * D.BACKLOG_INTERVAL_MS + 2 * MIN), null, 'nothing left');
+  } finally {
+    node.close();
+  }
+});
+
 test('a summary item per project reaches the node with its subject intact through cleaning and redaction', async () => {
   const m = machine();
   const node = await httpNode();
@@ -263,6 +296,52 @@ test('project memory goes to the first connection whose run lists it; the home C
   assert.deepEqual(plan(px, m, T).memory.map((x) => x.path).sort(), [global, memory].sort());
   assert.equal(D.requestImport(py, new Date(T + MIN).toISOString()), true);
   assert.deepEqual(plan(py, m, T + MIN).memory.map((x) => x.path), [global]);
+});
+
+/** Two projects on one machine: `other` is pinned to Y, `mine` is X's; each has auto memory and a CLAUDE.md in its folder. */
+function pinnedProjects(T) {
+  const c = twoConnections();
+  const withMemory = (name, id, to) => {
+    const pr = c.m.project(name);
+    const f = pr.transcript(uuid(id), T - 20 * DAY);
+    if (to) C.sessionPaths(c.root, { sessionId: uuid(id), env: { WYBE_CONNECT_NODE: to }, transcriptPath: f });
+    mkdirSync(join(pr.dir, 'memory'), { recursive: true });
+    const memory = join(pr.dir, 'memory', 'MEMORY.md');
+    writeFileSync(memory, `- notes of ${name}\n`);
+    writeFileSync(join(pr.folder, 'CLAUDE.md'), `Rules of ${name}.\n`);
+    return { ...pr, f, memory };
+  };
+  return { ...c, other: withMemory('other-employer', 1, c.y), mine: withMemory('mine', 2, null) };
+}
+
+test('an import never lists or claims the memory of a project whose sessions are pinned to another connection', () => {
+  const T = Date.now();
+  const { m, x, px, py, other, mine } = pinnedProjects(T);
+  assert.equal(D.requestImport(px, new Date(T).toISOString()), true);
+  const pl = plan(px, m, T);
+  assert.deepEqual(pl.transcripts.map((t) => t.path), [mine.f]);
+  assert.deepEqual(pl.memory.map((f) => f.path).sort(), [mine.memory, join(mine.folder, 'CLAUDE.md')].sort(), 'only the memory of the projects this connection takes');
+  assert.ok(!D.buildPrompt(pl).includes(other.dir), 'the other project is not named in the prompt');
+  assert.equal(claimOf(px.root, other.memory), null, 'not claimed by X');
+  assert.equal(claimOf(px.root, mine.memory), x);
+  assert.equal(D.requestImport(py, new Date(T + MIN).toISOString()), true);
+  const py1 = plan(py, m, T + MIN);
+  assert.deepEqual(py1.transcripts.map((t) => t.path), [other.f]);
+  assert.deepEqual(py1.memory.map((f) => f.path).sort(), [other.memory, join(other.folder, 'CLAUDE.md')].sort(), 'Y gets the memory of its own project');
+});
+
+test('an ongoing run lists the memory of its own transcripts\' projects only', () => {
+  const T = Date.now();
+  const { m, root, x, px, other, mine } = pinnedProjects(T);
+  const later = mine.transcript(uuid(3), T - H);
+  C.sessionPaths(root, { sessionId: uuid(3), env: { WYBE_CONNECT_NODE: x }, transcriptPath: later });
+  D.noteSession(px, { transcriptPath: later, sessionId: uuid(3), now: T - H });
+  const pl = plan(px, m, T);
+  assert.equal(pl.mode, 'ongoing');
+  assert.deepEqual(pl.transcripts.map((t) => t.path), [later]);
+  assert.ok(pl.memory.every((f) => !f.path.startsWith(other.dir)), 'no memory of the project pinned to Y');
+  assert.ok(pl.memory.some((f) => f.path === mine.memory), 'its own project\'s memory');
+  assert.equal(claimOf(px.root, other.memory), null);
 });
 
 // ------------------------------------------------------------------ volume
