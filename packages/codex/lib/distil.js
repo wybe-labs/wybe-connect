@@ -24,18 +24,25 @@
 // wait on disk, folded oldest first as room frees. Past MAX_NOTE_FILES a note is dropped with a
 // count, and SessionStart says so. A failed run's transcripts go back by their noted time.
 //
+// The import lists every transcript still on disk, however old, and reads them grouped by project,
+// with the person's memory files (CLAUDE.md, auto memory, AGENTS.md). The run sends one summary per
+// project besides the facts. A memory file is read again only when its content changed (per node,
+// like the line marks). A transcript no session pin assigns goes to the first connection whose
+// import takes it (lib/claims.js).
+//
 // Codex has the same pipeline (a plan's `harness`): its hooks note rollouts, the run is a headless
 // `codex exec` (read-only sandbox, ephemeral, only the plugin's own server, in distil mode), and
 // the import lists the person's rollouts under <CODEX_HOME>/sessions. What differs per harness is
 // only: how the runner is found, its arguments, the prompt's reading instructions, and where the
-// transcripts are.
+// transcripts and memory files are.
 
 import { spawn as defaultSpawn, spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, openSync, closeSync, readdirSync, readFileSync, readSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
-import { delimiter, dirname, join, posix, win32 } from 'node:path';
+import { basename, delimiter, dirname, join, posix, win32 } from 'node:path';
 import { homedir } from 'node:os';
 import { withLock, acquire, isAlive as defaultAlive } from './lock.js';
+import { claim, claimKey, claims } from './claims.js';
 import { appendRecord, readRecords } from './ledger.js';
 import { paths as legacyPaths, harnessHome, loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
 import { rolloutHead, stripCodexInjected } from './codex-rollout.js';
@@ -57,7 +64,10 @@ export const MAX_NOTE_FILES = 20000;
 export const MAX_RUN_TRANSCRIPTS = 40;
 export const MAX_RUN_PATH_CHARS = 12000;
 export const MAX_PATH_CHARS = 1024;
-export const IMPORT_DAYS = 30;
+// Memory files one run reads; the rest have no mark yet and so are read by the next runs.
+export const MAX_RUN_MEMORY_FILES = 40;
+// A record the node answers "busy" (its daily budget or rate limit) this many times is set aside.
+export const MAX_BUSY = 5;
 // How much of a transcript's head is read to tell a distil run's own session from the person's.
 const HEAD_BYTES = 64 * 1024;
 const DISTIL_PROMPT_START = 'wybe-connect distil run';
@@ -102,7 +112,10 @@ const EMPTY = Object.freeze({
   // resume). A mark lives as long as its transcript file does, so no import window and no resume
   // can reach lines it already covers.
   distilled: {},
-  running: null, // { runId, mode, importOf, pid, startedAt, transcripts: [{ path, sessionId, cwd, notedAt, fromLine, toLine }] }
+  // What each memory file was when a run for that node last read it: { [node]: { [path]: sha256 } }.
+  // Set with the line marks, after a whole outbox; a mark goes with its file.
+  memoryMarks: {},
+  running: null, // { runId, mode, importOf, pid, startedAt, transcripts: [{ path, sessionId, cwd, project, notedAt, fromLine, toLine }], memory: [{ path, sha256 }] }
   outbox: null, // { runId, mode, importOf, node, doneAt }: distilled for `node`, not yet all acknowledged
   parked: [], // outboxes made for another node than the one connected now: kept, sent only to their own node
   importRequest: null,
@@ -327,7 +340,7 @@ function returnToPending(s, transcripts) {
 
 /** A transcript's identity: its full path, compared the way the file system does. */
 export function transcriptKey(path) {
-  return process.platform === 'win32' ? win32.resolve(path).toLowerCase() : posix.resolve(path);
+  return claimKey(path);
 }
 
 const marksOf = (s, node) => {
@@ -342,6 +355,12 @@ export function markOf(s, node, path) {
   return typeof line === 'number' ? line : null;
 }
 
+const memoryMarksOf = (s, node) => {
+  const all = s.memoryMarks && typeof s.memoryMarks === 'object' ? s.memoryMarks : (s.memoryMarks = {});
+  const bucket = all[node ?? ''];
+  return bucket && typeof bucket === 'object' ? bucket : null;
+};
+
 function bind(s, run, now) {
   const key = run.node ?? '';
   const marks = marksOf(s, key) ?? (s.distilled[key] = {});
@@ -351,6 +370,17 @@ function bind(s, run, now) {
     if (!bucket || typeof bucket !== 'object' || typeof bucket.line === 'number') { delete s.distilled[node]; continue; }
     for (const [k, d] of Object.entries(bucket)) if (typeof d?.path !== 'string' || !existsSync(d.path)) delete bucket[k];
     if (!Object.keys(bucket).length) delete s.distilled[node];
+  }
+  const memory = (Array.isArray(run.memory) ? run.memory : []).filter((f) => typeof f?.path === 'string' && typeof f.sha256 === 'string');
+  const read = memoryMarksOf(s, key); // also makes s.memoryMarks an object
+  if (memory.length) {
+    const into = read ?? (s.memoryMarks[key] = {});
+    for (const f of memory) into[f.path] = f.sha256;
+  }
+  for (const [node, bucket] of Object.entries(s.memoryMarks)) {
+    if (!bucket || typeof bucket !== 'object') { delete s.memoryMarks[node]; continue; }
+    for (const path of Object.keys(bucket)) if (!existsSync(path)) delete bucket[path];
+    if (!Object.keys(bucket).length) delete s.memoryMarks[node];
   }
   s.outbox = { runId: run.runId, mode: run.mode, importOf: run.importOf ?? null, node: run.node ?? null, doneAt: iso(now) };
 }
@@ -435,17 +465,21 @@ function countLines(path) {
  * transcript from its mark on, and never twice in one run. A moved session's transcript gives this
  * node only the lines written while the session was on it (lib/connections.js sessionLines), one
  * stretch per run; one with a later stretch here stays pending. Pending entries with nothing new,
- * whose file is gone, or with no lines here (moved away, or pinned to none) leave pending.
+ * whose file is gone, or with no lines here (moved away, pinned to none, or claimed by another
+ * connection's import) leave pending. An import (`grouped`) takes whole projects, the project with
+ * the oldest transcript first, so each project's summary is written from all of it the caps allow.
  */
-function pick(p, s, node) {
+function pick(p, s, node, { harness = 'claude-code', grouped = false } = {}) {
   const take = [];
   const seen = new Set();
   let chars = 0;
   const keep = [];
-  for (const x of s.pending) {
+  const claimed = p.connection ? claims(p.root) : null;
+  for (const x of grouped ? byProject(s.pending, harness) : s.pending) {
     const here = p.connection ? linesHere(p, x.sessionId) : null;
     if (here && !here.length) continue; // its lines belong to another connection, or to none
     const key = transcriptKey(x.path);
+    if (!here && claimed?.[key] !== undefined && claimed[key] !== p.connection) continue; // another connection's import took it
     if (seen.has(key)) continue; // the same transcript under another spelling: one range is enough
     if (take.length >= MAX_RUN_TRANSCRIPTS || chars + x.path.length > MAX_RUN_PATH_CHARS) {
       keep.push(x);
@@ -466,12 +500,153 @@ function pick(p, s, node) {
     }
     if (later) keep.push(x);
     if (toLine <= fromLine) continue; // nothing new
-    take.push({ ...x, fromLine, toLine });
+    take.push({ ...x, project: projectOf(harness, x), fromLine, toLine });
     seen.add(key);
     chars += x.path.length;
   }
-  s.pending = keep;
+  s.pending = grouped ? keep.sort(byNoted) : keep;
   return take;
+}
+
+/** Pending entries by project: the project with the oldest transcript first, then by name, then each oldest first. */
+function byProject(list, harness) {
+  const oldest = new Map();
+  for (const x of list) {
+    const name = projectOf(harness, x);
+    const at = ms(x.notedAt);
+    if (!(oldest.get(name) <= at)) oldest.set(name, at);
+  }
+  const byName = (a, b) => (a.project < b.project ? -1 : a.project > b.project ? 1 : 0);
+  return [...list].sort((a, b) => oldest.get(a.project) - oldest.get(b.project) || byName(a, b) || byNoted(a, b));
+}
+
+/** A project's name: the last part of its folder, never a path, so no plan or prompt says where it lies. */
+function projectName(folder) {
+  if (typeof folder !== 'string') return null;
+  const name = folder.split(/[\\/]+/).filter(Boolean).pop()?.replace(/[\u0000-\u001f\u007f]/g, '').slice(0, 100);
+  return name || null;
+}
+
+/** The first `cwd` a Claude Code transcript's head carries, or null. */
+function transcriptCwd(path) {
+  const head = headText(path, HEAD_BYTES);
+  if (head === null) return null;
+  for (const line of head.split('\n')) {
+    let o;
+    try {
+      o = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof o?.cwd === 'string' && o.cwd) return o.cwd;
+  }
+  return null;
+}
+
+/**
+ * A pending entry's project, kept on the entry: for Codex the rollout's session_meta cwd; for
+ * Claude Code the first cwd its transcript carries, else the cwd its hook gave, else its
+ * projects/<dir> name (lossy: a dash there may have been a separator). The entry's cwd becomes the
+ * transcript's own when it tells one, so its project folder's memory files can be found.
+ */
+function projectOf(harness, x) {
+  if (typeof x.project === 'string') return x.project;
+  let cwd = null;
+  if (harness === 'codex') {
+    try {
+      cwd = rolloutHead(x.path)?.cwd ?? null;
+    } catch {
+      cwd = null;
+    }
+  } else cwd = transcriptCwd(x.path);
+  if (cwd) x.cwd = cwd.slice(0, MAX_PATH_CHARS);
+  x.project = projectName(x.cwd) ?? (harness === 'codex' ? null : projectName(basename(dirname(x.path)).replace(/-/g, '/'))) ?? 'other';
+  return x.project;
+}
+
+const safeMemoryPath = (path) => path.length <= MAX_PATH_CHARS && !/[\u0000-\u001f\u007f]/.test(path);
+
+/**
+ * The person's memory files on this machine, each { path, shared }: for Claude Code the home's
+ * CLAUDE.md, every projects/<dir>/memory/**.md, and CLAUDE.md and .claude/CLAUDE.md in each of
+ * `cwds` still on disk; for Codex the home's AGENTS.md and AGENTS.md in each of `cwds`. `shared`
+ * (the home's own file) is the person's for every connection; a project's are claimed like an
+ * unpinned transcript (lib/claims.js).
+ */
+export function memoryFiles(harness, home, cwds) {
+  const out = [];
+  const seen = new Set();
+  const add = (path, shared = false) => {
+    const key = transcriptKey(path);
+    if (seen.has(key) || !safeMemoryPath(path)) return;
+    try {
+      if (!statSync(path).isFile()) return;
+    } catch {
+      return;
+    }
+    seen.add(key);
+    out.push({ path, shared });
+  };
+  const walk = (dir, depth) => {
+    let entries = [];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true }).sort((a, b) => (a.name < b.name ? -1 : 1));
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const path = join(dir, e.name);
+      if (e.isDirectory() && depth < 4) walk(path, depth + 1);
+      else if (e.isFile() && e.name.endsWith('.md')) add(path);
+    }
+  };
+  if (harness === 'codex') {
+    add(join(home, 'AGENTS.md'), true);
+    for (const cwd of cwds) add(join(cwd, 'AGENTS.md'));
+    return out;
+  }
+  add(join(home, 'CLAUDE.md'), true);
+  let dirs = [];
+  try {
+    dirs = readdirSync(join(home, 'projects'), { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name).sort();
+  } catch {
+    dirs = [];
+  }
+  for (const d of dirs) walk(join(home, 'projects', d, 'memory'), 0);
+  for (const cwd of cwds) {
+    add(join(cwd, 'CLAUDE.md'));
+    add(join(cwd, '.claude', 'CLAUDE.md'));
+  }
+  return out;
+}
+
+const cwdsOf = (entries) => [...new Set(entries.map((x) => x.cwd).filter((c) => typeof c === 'string' && c && (win32.isAbsolute(c) || posix.isAbsolute(c))))];
+
+/**
+ * The memory files a run reads, each { path, sha256 }: an import lists all of them, any other run
+ * those whose content changed since a run for this node last read them. Past MAX_RUN_MEMORY_FILES
+ * the rest wait, unmarked, for the next runs.
+ */
+function planMemory(p, s, node, harness, home, cwds, importing) {
+  let files = memoryFiles(harness, home, cwds);
+  if (p.connection) {
+    const mine = claim(p.root, p.connection, files.filter((f) => !f.shared).map((f) => f.path));
+    files = files.filter((f) => f.shared || mine.has(claimKey(f.path)));
+  }
+  const read = memoryMarksOf(s, node) ?? {};
+  const out = [];
+  for (const f of files) {
+    if (out.length >= MAX_RUN_MEMORY_FILES) break;
+    let sha256;
+    try {
+      sha256 = createHash('sha256').update(readFileSync(f.path)).digest('hex');
+    } catch {
+      continue;
+    }
+    if (!importing && read[f.path] === sha256) continue;
+    out.push({ path: f.path, sha256 });
+  }
+  return out;
 }
 
 /** Claude Code's home: CLAUDE_CONFIG_DIR when set, else ~/.claude. */
@@ -536,12 +711,12 @@ function isCodexDistilRollout(path) {
 }
 
 /**
- * The person's Codex rollouts changed in the import window, oldest first: <codexHome>/sessions/
- * YYYY/MM/DD/rollout-*.jsonl. A session resumed later keeps its first day's folder, so every
- * folder is looked at and the file's own time decides. Subagent and internal threads
- * (session_meta.source), distil runs' own threads and compressed rollouts are left out.
+ * Every Codex rollout of the person's still on disk, however old, oldest first (by the file's own
+ * time: a session resumed later keeps its first day's folder): <codexHome>/sessions/YYYY/MM/DD/
+ * rollout-*.jsonl. Subagent and internal threads (session_meta.source), distil runs' own threads
+ * and compressed rollouts are left out.
  */
-export function importRollouts(codexHome, now) {
+export function importRollouts(codexHome) {
   const out = [];
   const walk = (dir, depth) => {
     let entries = [];
@@ -563,7 +738,7 @@ export function importRollouts(codexHome, now) {
       } catch {
         continue;
       }
-      if (now - st.mtimeMs > IMPORT_DAYS * 24 * 60 * 60 * 1000 || !safeTranscriptPath(path)) continue;
+      if (!safeTranscriptPath(path)) continue;
       let head = null;
       try {
         head = rolloutHead(path);
@@ -597,8 +772,8 @@ function isDistilSession(path) {
   return false;
 }
 
-/** The person's Claude Code transcripts changed in the import window, oldest first, the distil runs' own left out. */
-export function importTranscripts(claudeHome, now) {
+/** Every Claude Code transcript of the person's still on disk, however old, oldest first, the distil runs' own left out. */
+export function importTranscripts(claudeHome) {
   const root = join(claudeHome, 'projects');
   const out = [];
   let dirs = [];
@@ -622,7 +797,7 @@ export function importTranscripts(claudeHome, now) {
       } catch {
         continue;
       }
-      if (!st.isFile() || now - st.mtimeMs > IMPORT_DAYS * 24 * 60 * 60 * 1000) continue;
+      if (!st.isFile()) continue;
       if (!safeTranscriptPath(path) || isDistilSession(path)) continue;
       out.push({ path, sessionId: f.slice(0, -'.jsonl'.length), mtimeMs: st.mtimeMs });
     }
@@ -644,16 +819,23 @@ function linesHere(p, sessionId) {
 }
 
 /**
- * The import: every transcript of the import window joins pending (by its time), so the plugin,
- * not the model, decides what the import reads, and each is read from its mark on like any other
- * run. Past MAX_PENDING the rest wait on disk as notes, folded as room frees.
+ * The import: every transcript still on disk joins pending (by its time), so the plugin, not the
+ * model, decides what the import reads, and each is read from its mark on like any other run.
+ * Past MAX_PENDING the rest wait on disk as notes, folded as room frees. With connections, a
+ * transcript pinned elsewhere is left out, and one no pin assigns is claimed for this connection
+ * unless another connection's import claimed it first (lib/claims.js).
  */
-function enqueueImport(p, s, harness, home, now) {
+function enqueueImport(p, s, harness, home) {
   const have = new Set([...s.pending, ...(s.running?.transcripts ?? [])].map((x) => transcriptKey(x.path)));
-  for (const t of harness === 'codex' ? importRollouts(home, now) : importTranscripts(home, now)) {
+  const found = (harness === 'codex' ? importRollouts(home) : importTranscripts(home)).filter((t) => !have.has(transcriptKey(t.path)));
+  const lines = new Map(found.map((t) => [t.path, p.connection ? linesHere(p, t.sessionId) : null]));
+  const mine = p.connection ? claim(p.root, p.connection, found.filter((t) => lines.get(t.path) === null).map((t) => t.path)) : null;
+  for (const t of found) {
     const key = transcriptKey(t.path);
     if (have.has(key)) continue;
-    if (p.connection && linesHere(p, t.sessionId)?.length === 0) continue;
+    const here = lines.get(t.path);
+    if (here?.length === 0) continue;
+    if (mine && here === null && !mine.has(key)) continue; // another connection's import took it
     have.add(key);
     if (s.pending.length + inFlight(s) < MAX_PENDING) s.pending.push({ path: t.path, sessionId: t.sessionId, cwd: null, notedAt: iso(t.mtimeMs) });
     else noteSession(p, { transcriptPath: t.path, sessionId: t.sessionId, now: t.mtimeMs });
@@ -766,15 +948,17 @@ function decide(p, s, now, node, harness, home) {
   const outbox = outboxFor(p, s, node);
   if (outbox) return { runId: outbox.runId, mode: 'deliver', importOf: outbox.importOf, node: outbox.node ?? node, ...of, transcripts: [] };
   if (s.importRequest && s.importRequest !== s.importHandled) {
-    enqueueImport(p, s, harness, home, now);
-    return { runId, mode: 'import', importOf: s.importRequest, node, ...of, ...(harness === 'codex' ? { codexHome: home } : { claudeHome: home }), transcripts: pick(p, s, node) };
+    enqueueImport(p, s, harness, home);
+    const transcripts = pick(p, s, node, { harness, grouped: true });
+    const memory = planMemory(p, s, node, harness, home, cwdsOf([...transcripts, ...s.pending]), true);
+    return { runId, mode: 'import', importOf: s.importRequest, node, ...of, ...(harness === 'codex' ? { codexHome: home } : { claudeHome: home }), transcripts, memory };
   }
   if (!s.pending.length) return null;
   const since = now - ms(s.lastSuccessAt);
   const due = !Number.isFinite(since) || since >= ONGOING_INTERVAL_MS || (s.pending.length > MAX_RUN_TRANSCRIPTS && since >= BACKLOG_INTERVAL_MS);
   if (!due) return null;
-  const transcripts = pick(p, s, node);
-  return transcripts.length ? { runId, mode: 'ongoing', importOf: null, node, ...of, transcripts } : null;
+  const transcripts = pick(p, s, node, { harness });
+  return transcripts.length ? { runId, mode: 'ongoing', importOf: null, node, ...of, transcripts, memory: planMemory(p, s, node, harness, home, cwdsOf(transcripts), false) } : null;
 }
 
 // ------------------------------------------------------------------ the outbox (written by the run's MCP server)
@@ -834,11 +1018,17 @@ const parseAnswer = (result) => {
   }
 };
 
+// The node's refusal when its daily budget or rate limit is reached: the record is fine, the timing is not.
+const isBusy = (out) => out.retry === true || /try again later/i.test(String(out.message ?? ''));
+
 /**
  * Sends every record of the outbox the node has not settled, in order (the record carrying
  * import_of last), and appends each answer to the acks file. An ack is a JSON-RPC result that is
- * not an error, says ok: true and has a numeric `stored`. A tool error is the node refusing that
- * record for good: it is recorded as refused, never re-sent, and delivery goes on. An outbox line
+ * not an error, says ok: true and has a numeric `stored`. A tool error that says the node is busy
+ * (retry: true, or "try again later") is noted as { busy: n } and stops delivery as class
+ * node-busy: the record is sent again after the backoff with the same key, and set aside as refused
+ * at its MAX_BUSY-th busy answer. Any other tool error is the node refusing that record for good:
+ * it is recorded as refused, never re-sent, and delivery goes on. An outbox line
  * that no longer checks out (damaged after distil_done, when the run was already judged whole) is
  * copied aside to <run>.torn and the intact records are delivered. Stops at the first other
  * failure. Returns { ok, class?, message?, importDone, sent, refused, torn }.
@@ -859,7 +1049,8 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
     if (!torn && records.filter((r) => r.kind === 'done').length !== 1) return { ok: false, class: 'distil-failed', message: 'the run did not finish (no distil_done)', importDone: false, sent: 0 };
     if (torn) writeFileSync(dp.torn(run.runId), `${tornLines.join('\n')}\n`, { mode: 0o600 });
     const acks = readRecords(dp.acks(run.runId)).records;
-    const acked = new Set(acks.map((a) => a.seq));
+    const acked = new Set(acks.filter((a) => a.refused === true || typeof a.stored === 'number').map((a) => a.seq));
+    const busyOf = (seq) => acks.reduce((n, a) => (a.seq === seq && typeof a.busy === 'number' ? Math.max(n, a.busy) : n), 0);
     let importDone = acks.some((a) => a.importDone === true);
     const settled = () => {
       const all = readRecords(dp.acks(run.runId)).records;
@@ -905,7 +1096,13 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
       }
       if (gone(p)) return changed(); // removed while the call ran: its files are gone, write none back
       if (!out.ok && out.toolError) {
-        appendRecord(dp.acks(run.runId), { seq: r.seq, key: r.key, refused: true, message: String(out.message).slice(0, 200), at: iso(now()) });
+        const message = String(out.message).slice(0, 200);
+        const busy = isBusy(out) ? busyOf(r.seq) + 1 : 0;
+        if (busy && busy < MAX_BUSY) {
+          appendRecord(dp.acks(run.runId), { seq: r.seq, key: r.key, busy, message, at: iso(now()) });
+          return { ok: false, class: 'node-busy', message, importDone, sent };
+        }
+        appendRecord(dp.acks(run.runId), { seq: r.seq, key: r.key, refused: true, ...(busy ? { busy } : {}), message, at: iso(now()) });
         sent += 1;
         continue;
       }
@@ -955,42 +1152,56 @@ export function resolveCodex(env = process.env, platform = process.platform) {
   return resolveCli({ override: env.WYBE_CONNECT_CODEX_BIN, name: 'codex', npmEntry: ['@openai', 'codex', 'bin', 'codex.js'] }, env, platform);
 }
 
+/** The plan's ranges by project, each project once, in the order its first range comes. */
+function rangesByProject(transcripts) {
+  const groups = new Map();
+  for (const t of transcripts) {
+    const name = typeof t.project === 'string' && t.project ? t.project : null;
+    if (!groups.has(name)) groups.set(name, []);
+    groups.get(name).push(t);
+  }
+  return groups;
+}
+
 export function buildPrompt(plan) {
   const codex = harnessOf(plan) === 'codex';
+  const harness = codex ? 'Codex' : 'Claude Code';
+  const importing = plan.mode === 'import';
+  const memory = Array.isArray(plan.memory) ? plan.memory.filter((f) => typeof f?.path === 'string') : [];
   const lines = [
     'wybe-connect distil run (started in the background by the wybe-connect plugin, not by a person).',
     `mode: ${plan.mode}`,
   ];
-  if (plan.mode === 'import') lines.push(`import_of: ${plan.importOf}`);
-  lines.push('', codex
-    ? 'Read these Codex rollout ranges (one JSON event per line) with a read-only shell command that prints only those lines, e.g. `sed -n \'<first>,<last>p\' <file>`, or in PowerShell `Get-Content -LiteralPath <file> | Select-Object -Skip <first - 1> -First <count>`:'
-    : 'Read these transcript ranges with the Read tool (offset = the first line, limit = the number of lines):');
-  for (const t of plan.transcripts) lines.push(`- ${t.path} lines ${t.fromLine + 1}-${t.toLine}`);
+  if (importing) lines.push(`import_of: ${plan.importOf}`);
+  lines.push('', (codex
+    ? 'Read these Codex rollout ranges (one JSON event per line) with a read-only shell command that prints only those lines, e.g. `sed -n \'<first>,<last>p\' <file>`, or in PowerShell `Get-Content -LiteralPath <file> | Select-Object -Skip <first - 1> -First <count>`'
+    : 'Read these transcript ranges with the Read tool (offset = the first line, limit = the number of lines)') + ', grouped by project:');
+  for (const [project, ranges] of rangesByProject(plan.transcripts)) {
+    if (project) lines.push(`Project ${project}:`);
+    for (const t of ranges) lines.push(`- ${t.path} lines ${t.fromLine + 1}-${t.toLine}`);
+  }
   if (!plan.transcripts.length) lines.push('- (none)');
   lines.push('Read only those ranges: never another transcript, nor other lines of these. What lies outside them was distilled already, and reading it again would store the same facts twice.');
   if (codex) {
     lines.push('In a rollout the person\'s own words are the event_msg user_message (or item_completed UserMessage) events and the answers are response_item messages with role assistant. Developer messages, AGENTS.md and <environment_context> blocks are the harness talking, not the person. Run nothing that writes or changes anything.');
   }
-  if (plan.mode === 'import' && codex) {
-    const home = plan.codexHome ?? '~/.codex';
-    lines.push(
-      '',
-      `This is the import the person asked for in Wybe. The ranges above are every Codex session of the last ${IMPORT_DAYS} days that is not distilled yet. Also read ${join(home, 'AGENTS.md')} and the AGENTS.md of the projects in those rollouts (their session_meta cwd).`,
-    );
-  } else if (plan.mode === 'import') {
-    const home = plan.claudeHome ?? '~/.claude';
-    lines.push(
-      '',
-      `This is the import the person asked for in Wybe. The ranges above are every Claude Code session of the last ${IMPORT_DAYS} days that is not distilled yet. Also read ${join(home, 'CLAUDE.md')}, the CLAUDE.md of the projects in those transcripts, and the auto memory under ${join(home, 'projects', '*', 'memory')}.`,
-    );
+  if (importing) {
+    lines.push('', `This is the import the person asked for in Wybe. The ranges above are every ${harness} session still on this machine that is not distilled yet, grouped by project; when there are many, the rest follow in later runs.`);
+  }
+  if (memory.length) {
+    lines.push('', importing
+      ? 'Also read these memory files whole: the person\'s standing instructions and notes about their work.'
+      : 'These memory files are new or changed since they were last read; read them whole too, and use only what is new in them:');
+    for (const f of memory) lines.push(`- ${f.path}`);
   }
   lines.push(
     '',
     'Then:',
     '1. Pick at most 40 durable facts about the person\'s WORK: projects, decisions and why, preferences, ways of working, tools, ideas. One short, self-contained statement per item, at most 400 characters. Work only: never secrets, credentials, code, file contents, anything personal, or anything about other people.',
-    '2. If pending_questions has open questions this material clearly answers, add the answer as an item and pass answers: [<question id>].',
-    `3. Send the items with the ${codex ? 'wybe_distil' : 'wybe'} server's remember tool, at most 50 items per call.` + (plan.mode === 'import' ? ` Pass import_of: ${plan.importOf} on the LAST remember call, and send at least one item.` : ''),
-    `4. Finally call distil_done exactly once. If nothing is durable, send nothing and call distil_done.${codex ? ' Use only the wybe_distil server: never the tools of another server named wybe.' : ''}`,
+    '2. For each project above, write one summary item: subject: <the project\'s name exactly as it follows "Project" above>, category: insight, content starting with "Project summary:": what the project is, the person\'s role in it, its current state, key decisions and open threads; at most 3000 characters; work only, as in step 1.' + (importing ? '' : ' In this run, write a project\'s summary only when its ranges changed something about it, and say only what changed.'),
+    '3. If pending_questions has open questions this material clearly answers, add the answer as an item and pass answers: [<question id>].',
+    `4. Send at most 40 facts plus one summary per project with the ${codex ? 'wybe_distil' : 'wybe'} server's remember tool, at most 50 items per call.` + (importing ? ` Pass import_of: ${plan.importOf} on the LAST remember call, and send at least one item.` : ''),
+    `5. Finally call distil_done exactly once. If nothing is durable, send nothing and call distil_done.${codex ? ' Use only the wybe_distil server: never the tools of another server named wybe.' : ''}`,
   );
   return lines.join('\n');
 }
@@ -1168,7 +1379,7 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
     }
     if (d.ok) {
       // An import the node did not confirm is still handled: its facts are stored, and running it
-      // again would only send them twice. The person is told and can press «Importer» again.
+      // again would only send them twice. The person is told.
       const unconfirmed = s.outbox.mode === 'import' && !d.importDone;
       if (s.outbox.mode === 'import') {
         s.importHandled = s.outbox.importOf;
@@ -1205,7 +1416,8 @@ const NOTICES = {
   'distil-failed': 'the background distil did not finish; it runs again in 30 minutes',
   'claude-missing': 'the background distil could not find the claude command on this machine',
   'codex-missing': 'the background distil could not find the codex command on this machine',
-  'import-unconfirmed': 'the import was sent, but the colleague did not confirm it; the person can press «Importer» again',
+  'import-unconfirmed': 'the import was sent, but the colleague did not confirm it',
+  'node-busy': 'the colleague could not take more work facts right now (its limit for the day, or too many at once), so they wait on this machine and are sent again later (every 30 minutes)',
 };
 
 const noticeOf = (cls, label) => {

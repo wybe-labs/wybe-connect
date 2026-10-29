@@ -355,7 +355,8 @@ test('first connect: the node\'s import request reaches the plugin\'s server, an
     assert.deepEqual(twice(node.stored), [], 'every fact once');
     assert.equal(factsOf(node.stored, a).length, 6, 'the connect session: once, by its Stop');
     assert.equal(factsOf(node.stored, b).length, 6, 'the earlier session: by the import');
-    for (const f of [old, sub, own]) assert.deepEqual(factsOf(node.stored, f), [], `${basename(f)} is not imported`);
+    assert.equal(factsOf(node.stored, old).length, 6, 'a session 40 days old: by the import, too');
+    for (const f of [sub, own]) assert.deepEqual(factsOf(node.stored, f), [], `${basename(f)} is not imported`);
     const runs = logLines(log);
     assert.equal(runs.length, 2, 'one ongoing run and one import run');
     assert.equal(runs[1].importOf, at);
