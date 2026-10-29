@@ -61,3 +61,48 @@ test('the ChatGPT card carries the developer-mode step first; both cards use the
   assert.equal(texts.mcp_address_example, 'https://dittfirma.wybe.me/mcp');
   for (const s of stepLists) for (const list of [s.nb, s.en]) assert.ok(list.some((x) => x.includes(texts.mcp_address_example)));
 });
+
+// The README, package.json and every marketplace and plugin manifest: what a person reads before
+// installing. The services are named by their own names, the import has no button, and the one
+// exception to "sends only" is said wherever "sends only" is.
+const MANIFESTS = [
+  '.claude-plugin/marketplace.json',
+  '.agents/plugins/marketplace.json',
+  '.cursor-plugin/marketplace.json',
+  'packages/claude-code/.claude-plugin/plugin.json',
+  'packages/codex/.codex-plugin/plugin.json',
+  'packages/cursor/.cursor-plugin/plugin.json',
+];
+const PUBLIC_TEXTS = ['README.md', 'package.json', ...MANIFESTS];
+const read = (f) => readFileSync(join(ROOT, f), 'utf8');
+
+test('no «KI-assistenter», «Andre KI» or «Importer» in the README, package.json or any manifest', () => {
+  for (const f of PUBLIC_TEXTS) {
+    const t = read(f);
+    for (const r of [/KI-assistent/i, /Andre KI/i, /«Importer»/]) assert.doesNotMatch(t, r, `${f}: ${r}`);
+  }
+  for (const f of MANIFESTS) JSON.parse(read(f));
+});
+
+test('the README keeps «Only sends» together with its one exception, the task', () => {
+  const promise = readme.slice(readme.indexOf('1. **Only sends.**'), readme.indexOf('2. **Redacts'));
+  assert.ok(promise.length > 0, 'the README states the «Only sends» promise first');
+  assert.match(promise, /The one thing that comes back is a\s+task/);
+  assert.match(readme, /sender bare\*\* — det eneste som kommer tilbake er en oppgave/);
+});
+
+test('no manifest says «write-only»: each says it sends only, and what comes back', () => {
+  for (const f of MANIFESTS) assert.doesNotMatch(read(f), /write-only/i, f);
+  for (const f of ['packages/claude-code/.claude-plugin/plugin.json', 'packages/codex/.codex-plugin/plugin.json', '.claude-plugin/marketplace.json']) {
+    assert.match(read(f), /Sends only; the one thing that comes back is a task for an open session, shown to you first/, f);
+  }
+});
+
+test('install lines are the two-step marketplace form, never the one-line --marketplace form', () => {
+  for (const f of ['README.md', 'packages/claude-code/README.md', 'packages/claude-code/skills/connect/SKILL.md']) {
+    const t = read(f);
+    assert.doesNotMatch(t, /--marketplace/, f);
+    assert.match(t, /\/plugin marketplace add wybe-labs\/wybe-connect\n\s*\/plugin install wybe-connect@wybe-connect/, f);
+  }
+  assert.match(readme, /codex plugin marketplace add wybe-labs\/wybe-connect\ncodex plugin add wybe-connect@wybe-connect/);
+});
