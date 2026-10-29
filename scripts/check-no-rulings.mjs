@@ -12,12 +12,14 @@
  *   ruling id      R + 2-3 digits (R183), a review-round label (R2-F1), I-<n> (I-24), N-R<n>, D-<x>-<n>;
  *                  not when the id is a whole quoted token ("R21", 'I-12') or a file name (I-5.json)
  *   citation       "ruling R.."/"rulings index|file|list|log", "QA #12", "QA round 3", "plan [track] B4.2"
- *   attribution    a capitalised name next to a calendar date ("Kari 10.17:", "(Ola, 2026-09-29)"),
- *                  a possessive decision word ("Kari's call"), "Ola decided|ruled", a quote "verbatim"
+ *   attribution    a capitalised name next to a calendar date ("Kari 10.17:", "(Ola, 2026-09-29)",
+ *                  "Ola, Oct 21", "Kari, 3. mai"), a name that wrote or said something on a date
+ *                  ("Kari wrote this (2026-10-29)"), a possessive decision word ("Kari's call"),
+ *                  "Ola decided|ruled", a quote "verbatim"
  *
  * Names are matched by shape, not from a list: this repository is public, and a list of the team's
- * names would be the very leak the scan exists to stop. Product and calendar words that look like
- * names (Node 20.11, Since 2026-01-01) are in NOT_NAMES.
+ * names would be the very leak the scan exists to stop. Product, platform and calendar words that
+ * look like names (Node 20.11, Ubuntu 22.04, Since 2026-01-01) are in NOT_NAMES.
  *
  *   node scripts/check-no-rulings.mjs                 # added since the base (as scripts/leak-scan.mjs)
  *   node scripts/check-no-rulings.mjs --base <ref>    # added since <ref>
@@ -29,19 +31,27 @@ import { pathToFileURL } from 'node:url';
 import { addedLines, baseArg, findBase } from './leak-scan.mjs';
 
 const NAME = String.raw`(?<![\p{L}\d'’.-])(\p{Lu}\p{Ll}+)`;
-// A real calendar date: dd.mm or mm.dd (10.17, 23.10), 2026-09-29, 10-17. Not a time range, a version
-// (2.1.292) or a timestamp (2026-10-01T08:00).
+// A real calendar date: dd.mm or mm.dd (10.17, 23.10), 2026-09-29, 10-17, a month by name (Oct 21,
+// 21 October, 3. mai). Not a time range, a version (2.1.292) or a timestamp (2026-10-01T08:00).
+// English month names count only capitalised, so "2 may retry" is not a date.
+const MONTH_EN = '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|June?|July?|Aug(?:ust)?|Sept?(?:ember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)';
+const MONTH_NB = '(?:januar|februar|mars|april|mai|juni|juli|august|september|oktober|november|desember)';
 const DATE = String.raw`(?:(?:0[1-9]|[12]\d|3[01])[./](?:0[1-9]|1[0-2])|(?:0[1-9]|1[0-2])[./](?:0[1-9]|[12]\d|3[01]))(?![\d.])(?![-–]\d{1,2}[.:]\d)` +
-  String.raw`|20\d\d-\d\d-\d\d(?![T\d])|(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?![\d-])`;
+  String.raw`|20\d\d-\d\d-\d\d(?![T\d])|(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?![\d-])` +
+  String.raw`|${MONTH_EN}\.?\s+(?:[1-9]|[12]\d|3[01])(?![\d:.])|(?:[1-9]|[12]\d|3[01])\.?\s+(?:${MONTH_EN}|${MONTH_NB})(?![A-Za-z])`;
 const DECISION_WORD = '(?:ruling|call|decision|verdict|word|words|brief|instruction|instructions|order|orders|requirement|ask|request)';
 const VERB = '(?:ruled|decided|insisted|approved|confirmed|wants|wanted)';
+const SAID = '(?:wrote|said|asked|noted|added|changed|reported|suggested|agreed|signed)';
 const NOT_QUOTED_BEFORE = String.raw`(?<![“"'«\`\w/-])`;
 const NOT_QUOTED_AFTER = String.raw`(?![”"'»\`\w.-])`;
 
 /** Capitalised words that are not people: products, platforms, sentence openers. */
 export const NOT_NAMES = new Set(['Node', 'Claude', 'Codex', 'Cursor', 'Code', 'Desktop', 'Version', 'Windows', 'Linux',
   'Chrome', 'Atlas', 'Wybe', 'Anthropic', 'OpenAI', 'Since', 'Until', 'From', 'After', 'Before', 'Then', 'Today', 'See',
-  'Updated', 'Verified', 'Released', 'Fixed', 'Added', 'Changed', 'Removed', 'Last', 'Next', 'The', 'This', 'That']);
+  'Updated', 'Verified', 'Released', 'Fixed', 'Added', 'Changed', 'Removed', 'Last', 'Next', 'The', 'This', 'That',
+  'Ubuntu', 'Debian', 'Fedora', 'Alpine', 'Mint', 'Rocky', 'Postgres', 'Redis', 'Nginx', 'Docker', 'Python', 'Ruby',
+  'Java', 'Kotlin', 'Swift', 'Rust', 'Go', 'Bun', 'Deno', 'Electron', 'Android', 'Xcode', 'Firefox', 'Safari', 'Edge',
+  'Git', 'Kernel', 'Release', 'Build', 'Patch']);
 
 /** [kind, pattern, does group 1 hold a name to check against NOT_NAMES?] */
 export const PATTERNS = [
@@ -52,8 +62,9 @@ export const PATTERNS = [
   ['ruling id', /\bD-[a-z][a-z0-9]*-(?:\d+|link)\b/, false],
   ['citation', /\brulings?\s+(?:R\d|I-\d|N-R\d|file|index|list|log)\b|\b(?:orchestrator|oracle|coordinator)\s+rulings?\b/i, false],
   ['citation', /\bQA\s*(?:#\s*\d+|round\s*\d+|r\d+)\b/i, false],
-  ['citation', /\bplan\s+(?:track\s+)?[A-Z]\d+(?:\.\d+)*\b/, false],
+  ['citation', /\b[Pp]lan\s+(?:[Tt]rack\s+)?[A-Z]\d+(?:\.\d+)*\b/, false],
   ['attribution', new RegExp(String.raw`${NAME}[ ,:(]{1,3}(?:${DATE})`, 'u'), true],
+  ['attribution', new RegExp(String.raw`${NAME}\s+${SAID}\b[^\n]{0,40}?(?:${DATE})`, 'u'), true],
   ['attribution', new RegExp(String.raw`${NAME}['’]s\s+${DECISION_WORD}\b`, 'u'), true],
   ['attribution', new RegExp(String.raw`${NAME}\s+${VERB}\b`, 'u'), true],
   ['attribution', new RegExp(String.raw`${NAME}\b[^\n]{0,24}\bverbatim\b`, 'u'), true],
