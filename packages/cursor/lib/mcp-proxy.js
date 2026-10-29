@@ -88,7 +88,8 @@ const declined = () => text('The person declined the task. Do not do it; the col
 // outside its list, an empty subject, an answer that is not a question id), and a refused record is
 // never sent again: so the run is offered exactly that schema, and what it sends is made to fit it.
 export const NODE_CATEGORIES = Object.freeze(['fact', 'preference', 'pattern', 'entity', 'insight', 'relation']);
-const QUESTION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// A question id as the node's z.uuid() (zod 4) takes it: version 1-8, variant 8/9/a/b, or the nil or max id.
+const QUESTION_ID = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 
 export const DISTIL_TOOLS = Object.freeze([
   Object.freeze({
@@ -98,7 +99,7 @@ export const DISTIL_TOOLS = Object.freeze([
       type: 'object',
       properties: {
         items: { type: 'array', minItems: 1, maxItems: 50, items: { type: 'object', properties: { content: { type: 'string', minLength: 1, maxLength: 4000 }, category: { type: 'string', enum: [...NODE_CATEGORIES] }, subject: { type: 'string', minLength: 1, maxLength: 200 } }, required: ['content'] } },
-        answers: { type: 'array', maxItems: 10, items: { type: 'string', format: 'uuid' }, description: 'ids of open_questions this send answers' },
+        answers: { type: 'array', maxItems: 10, items: { type: 'string', format: 'uuid', pattern: QUESTION_ID.source }, description: 'ids of open_questions this send answers' },
         import_of: { type: 'string', minLength: 1, maxLength: 64, description: 'the import_of value from the instructions, on the last call of an import' },
       },
       required: ['items'],

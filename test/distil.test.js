@@ -52,7 +52,8 @@ function sandbox(n = 3) {
  * arguments as the node's remember schema does and refuses the whole call (a tool error) on any mismatch.
  */
 const NODE_CATEGORIES = ['fact', 'preference', 'pattern', 'entity', 'insight', 'relation'];
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+// The node's z.uuid() (zod 4): a version digit 1-8 and a variant digit 8, 9, a or b, or the nil or max id.
+const UUID = /^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$/;
 const nodeSchemaError = (args) => {
   const items = args.items;
   if (!Array.isArray(items) || items.length < 1 || items.length > 50) return 'items';
@@ -747,15 +748,17 @@ test('the headless run is confined: read-only tools, only the plugin\'s own serv
   assert.equal(ran.flags.settings, join(D.distilPaths(p).runs, `${r.plan.runId}.settings.json`), 'the rules are a file of the run, so each path is on the command line once');
   const settings = JSON.parse(ran.settingsFile);
   assert.equal(settings.disableAllHooks, true);
-  assert.deepEqual([...settings.permissions.allow].sort(), files.flatMap(fileRules).sort(), 'it may read, glob and grep exactly the noted transcripts');
+  assert.deepEqual([...settings.permissions.allow].sort(), files.map(fileRules).sort(), 'it may read (and so glob and grep) exactly the noted transcripts');
   assert.equal(existsSync(ran.flags.settings), false, 'the file goes when the run ends');
   assert.equal(ran.cwd, join(p.state, 'distil'), 'it runs in the distil\'s own folder, never in a project of the person');
 });
 
 // The absolute form of a path in a permission rule: POSIX, `//` from the root, a drive as /c/.
 const ruleAbs = (path) => `/${path.replace(/^([A-Za-z]):\\/, (_, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/')}`;
-// Read, Glob and Grep each get the same path-scoped rule.
-const fileRules = (path) => ['Read', 'Glob', 'Grep'].map((tool) => `${tool}(${ruleAbs(path)})`);
+// Claude Code checks the path of every file-reading tool (Read, Glob, Grep) against Read(path) rules
+// only; a Glob(path) or Grep(path) rule is never matched. So each file gets one Read rule.
+const fileRules = (path) => `Read(${ruleAbs(path)})`;
+const noToolPathRules = (allow) => assert.ok(!allow.some((r) => /^(Glob|Grep)\(/.test(r)), 'no Glob(path) or Grep(path) rule: Claude Code never matches one');
 
 test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s POSIX form on Windows and elsewhere', () => {
   const plan = {
@@ -774,15 +777,10 @@ test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s PO
   assert.equal(settings.disableAllHooks, true);
   assert.deepEqual(settings.permissions.allow, [
     'Read(//c/Users/Ola Nordmann/.claude/projects/C--work-demo/a.jsonl)',
-    'Glob(//c/Users/Ola Nordmann/.claude/projects/C--work-demo/a.jsonl)',
-    'Grep(//c/Users/Ola Nordmann/.claude/projects/C--work-demo/a.jsonl)',
     'Read(//d/claude \\[work\\]/projects/x/b\\*\\?.jsonl)',
-    'Glob(//d/claude \\[work\\]/projects/x/b\\*\\?.jsonl)',
-    'Grep(//d/claude \\[work\\]/projects/x/b\\*\\?.jsonl)',
     'Read(//home/ola/.claude/projects/-home-ola-demo/c.jsonl)',
-    'Glob(//home/ola/.claude/projects/-home-ola-demo/c.jsonl)',
-    'Grep(//home/ola/.claude/projects/-home-ola-demo/c.jsonl)',
   ]);
+  noToolPathRules(settings.permissions.allow);
   const prompt = args[args.indexOf('-p') + 1];
   assert.match(prompt, /Grep a listed transcript by its own path/, 'the run is told how it may search a long range');
   assert.ok(!settings.permissions.allow.some((r) => /^(Read|Glob|Grep)$/.test(r)), 'never a rule for every path');
@@ -801,21 +799,14 @@ test('a run may also read exactly the memory files its plan lists, nothing more'
   const allow = D.claudeSettings(plan).permissions.allow;
   assert.deepEqual(allow, [
     'Read(//c/Users/Ola/.claude/projects/C--harbour/00000000-0000-4000-8000-0000000000aa.jsonl)',
-    'Glob(//c/Users/Ola/.claude/projects/C--harbour/00000000-0000-4000-8000-0000000000aa.jsonl)',
-    'Grep(//c/Users/Ola/.claude/projects/C--harbour/00000000-0000-4000-8000-0000000000aa.jsonl)',
     'Read(//c/Users/Ola/.claude/CLAUDE.md)',
-    'Glob(//c/Users/Ola/.claude/CLAUDE.md)',
-    'Grep(//c/Users/Ola/.claude/CLAUDE.md)',
     'Read(//c/Users/Ola/.claude/projects/C--harbour/memory/MEMORY.md)',
-    'Glob(//c/Users/Ola/.claude/projects/C--harbour/memory/MEMORY.md)',
-    'Grep(//c/Users/Ola/.claude/projects/C--harbour/memory/MEMORY.md)',
     'Read(//c/work/harbour/.claude/CLAUDE.md)',
-    'Glob(//c/work/harbour/.claude/CLAUDE.md)',
-    'Grep(//c/work/harbour/.claude/CLAUDE.md)',
   ]);
-  assert.ok(!allow.some((r) => /^(Glob|Grep)\(.*\/projects(\/\*\*)?\)$/.test(r)), 'never the projects folder itself');
+  noToolPathRules(allow);
+  assert.ok(!allow.some((r) => /\/projects(\/\*\*)?\)$/.test(r)), 'never the projects folder itself');
   const ongoing = { ...plan, mode: 'ongoing', importOf: null, memory: [] };
-  assert.deepEqual(D.claudeSettings(ongoing).permissions.allow, fileRules(t), 'a run without memory files reads only its transcripts');
+  assert.deepEqual(D.claudeSettings(ongoing).permissions.allow, [fileRules(t)], 'a run without memory files reads only its transcripts');
 });
 
 test('the run\'s whole command line stays within the Windows limit at the run\'s caps', () => {
@@ -891,10 +882,97 @@ test('Import: facts in the words a model picks (category, empty subject, a non-i
   assert.equal(D.loadState(p).lastError, null);
 });
 
+test('Import: an answer shaped like an id but with a version or variant digit the node does not take is left out, and the import is confirmed', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ strict: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  const r = await cycle(p, { now: T, env: { FAKE_CALLS: '1', FAKE_ANSWERS: JSON.stringify(['12345678-1234-1234-1234-123456789abc', '12345678-1234-4234-7234-123456789abc']) } });
+  node.close();
+  assert.equal(r.outcome.refused, 0, 'the node refused nothing');
+  assert.equal(r.outcome.importDone, true, 'the node confirmed the import');
+  assert.equal(node.sends[0].answers, undefined, 'neither is a question id the node takes');
+  assert.equal(D.loadState(p).lastError, null);
+});
+
+test('remember keeps exactly the answers the node takes as question ids', async () => {
+  const { cleanRememberArgs } = await lib('mcp-proxy.js');
+  const ok = ['0b6f3c6e-6a3e-4f1a-9c3e-2b1d4e5f6a7b', '0B6F3C6E-6A3E-1F1A-AC3E-2B1D4E5F6A7B', '00000000-0000-0000-0000-000000000000', 'ffffffff-ffff-ffff-ffff-ffffffffffff'];
+  const not = ['12345678-1234-1234-1234-123456789abc', '12345678-1234-0234-8234-123456789abc', '12345678-1234-9234-8234-123456789abc', '12345678-1234-4234-c234-123456789abc', 'q-1'];
+  for (const a of [...ok, ...not]) assert.equal(UUID.test(a), ok.includes(a), `the fake node agrees on ${a}`);
+  const { args } = cleanRememberArgs({ items: [{ content: 'A fact.' }], answers: [...not, ...ok] });
+  assert.deepEqual(args.answers, ok);
+});
+
 test('the distil run\'s remember offers exactly the node\'s categories', async () => {
   const { DISTIL_TOOLS } = await lib('mcp-proxy.js');
   const remember = DISTIL_TOOLS.find((t) => t.name === 'remember');
   assert.deepEqual(remember.inputSchema.properties.items.items.properties.category.enum, NODE_CATEGORIES);
+});
+
+test('Import: a "try again later" on the batch carrying import_of keeps the import open here; after the backoff the same batch goes again and the import is confirmed', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ answers: ['busy', 'ok'], dedupe: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  try {
+    const r1 = await cycle(p, { now: T });
+    assert.equal(r1.outcome.class, 'node-busy', 'not refused for good');
+    let s = D.loadState(p);
+    assert.notEqual(s.importHandled, at, 'the import is not handled while the node holds it open');
+    assert.equal(s.outbox?.importOf, at, 'its facts wait on this machine');
+    const r2 = await cycle(p, { now: T + D.BACKOFF_MS + MIN });
+    assert.equal(r2.outcome.ok, true);
+    assert.equal(r2.outcome.importDone, true, 'the node confirmed the import');
+    assert.deepEqual(node.sends.map((x) => x.import_of), [at, at]);
+    assert.equal(node.sends[1].idempotency_key, node.sends[0].idempotency_key);
+    s = D.loadState(p);
+    assert.equal(s.importHandled, at);
+    assert.equal(s.lastError, null);
+  } finally {
+    node.close();
+  }
+});
+
+test('Import: a batch carrying import_of that the node refuses for good leaves the import unconfirmed, with the node\'s own refusal in lastError and in the notice', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ answers: ['toolError'] });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  const at = '2026-10-21T10:00:00.000Z';
+  D.requestImport(p, at);
+  const r = await cycle(p, { now: T });
+  node.close();
+  assert.equal(r.outcome.ok, true);
+  assert.equal(r.outcome.refused, 1);
+  assert.equal(r.outcome.importDone, false);
+  const s = D.loadState(p);
+  assert.equal(s.lastError?.class, 'import-unconfirmed');
+  assert.match(s.lastError.message, /items\[0\]\.content: too long/, 'the node\'s refusal, not a generic line');
+  assert.match(D.distilNotice(p, { now: T + MIN }), /items\[0\]\.content: too long/);
+});
+
+test('Import: a run whose import batch was stored without import_done still says only that', async () => {
+  const { p, files } = sandbox();
+  const node = await httpNode({ importDone: false });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files.slice(0, 1), T - MIN);
+  D.requestImport(p, '2026-10-21T10:00:00.000Z');
+  const r = await cycle(p, { now: T });
+  node.close();
+  assert.equal(r.outcome.ok, true);
+  assert.equal(r.outcome.refused, 0);
+  const s = D.loadState(p);
+  assert.equal(s.lastError?.class, 'import-unconfirmed');
+  assert.equal(s.lastError.message, 'no import_done in the answer');
 });
 
 test('Import: a run that sent no import_of is a failed distil, retried after the back-off', async () => {
