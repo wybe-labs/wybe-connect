@@ -1,46 +1,20 @@
 #!/usr/bin/env node
-// node connect.js <node-url> [--scopes remember,conversations,sessions:light,sessions:full]
-// Runs the OAuth flow once and stores the grant in ~/.wybe-connect/credentials.json (0600).
-// Prints where it connected and which scopes were granted. Never prints a token.
+// node connect.js <node-url> [--scopes remember,conversations,sessions:light,sessions:full] [--name <name>]
+// node connect.js list | use <name> [--session <id>] | remove <name>
+// Runs the OAuth flow once and stores the grant as one connection under
+// ~/.wybe-connect/connections/<name>/ (0600), next to any others. Never prints a token. The
+// plugin's `connect` tool (lib/mcp-proxy.js) does the same from inside Claude Code.
 
-import { connect, ALL_SCOPES } from '../lib/oauth.js';
-import { paths, saveCredentials } from '../lib/home.js';
+import { runConnect } from '../lib/connect-cli.js';
+import { NODE_ENV } from '../lib/connections.js';
 
-function usage(code) {
-  process.stderr.write('usage: connect.js <node-url> [--scopes a,b,c]\n');
-  process.exit(code);
-}
-
-const args = process.argv.slice(2);
-let nodeUrl = null;
-let scopes = [...ALL_SCOPES];
-for (let i = 0; i < args.length; i++) {
-  if (args[i] === '--scopes') {
-    scopes = String(args[++i] ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-  } else if (args[i] === '--help' || args[i] === '-h') {
-    usage(0);
-  } else if (!nodeUrl) {
-    nodeUrl = args[i];
-  } else {
-    usage(2);
-  }
-}
-if (!nodeUrl) usage(2);
-const unknown = scopes.filter((s) => !ALL_SCOPES.includes(s));
-if (unknown.length) {
-  process.stderr.write(`unknown scope(s): ${unknown.join(', ')} (known: ${ALL_SCOPES.join(', ')})\n`);
-  process.exit(2);
-}
-
-try {
-  const credentials = await connect(nodeUrl, { scopes, log: (line) => process.stderr.write(`${line}\n`) });
-  const p = paths();
-  saveCredentials(credentials, p);
-  process.stdout.write(`Connected to ${credentials.nodeUrl}\n`);
-  process.stdout.write(`Granted scopes: ${credentials.scopes.join(', ') || '(none)'}\n`);
-  process.stdout.write(`Credential stored in ${p.credentials}\n`);
-  process.stdout.write('The plugin\'s `wybe` MCP server uses this same grant; restart Claude Code to load the tools.\n');
-} catch (err) {
-  process.stderr.write(`connect failed: ${err instanceof Error ? err.message : String(err)}\n`);
-  process.exit(1);
-}
+process.exitCode = await runConnect({
+  harness: 'claude-code',
+  clientName: 'wybe-connect (Claude Code)',
+  nextSteps: (_c, { key, others }) => [
+    others.length
+      ? `The plugin's \`wybe\` MCP server uses the default connection (now ${key}), or the one ${NODE_ENV}=<name> names when Claude Code starts; restart Claude Code to load the tools.`
+      : 'The plugin\'s `wybe` MCP server uses this same grant; restart Claude Code to load the tools.',
+    '',
+  ].join('\n'),
+});

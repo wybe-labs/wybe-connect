@@ -16,7 +16,7 @@ and run `node packages/cursor/bin/connect.js https://dittfirma.wybe.me` yourself
 |---|---|
 | `hooks/hooks.json` | seven Cursor hooks, all running `hooks/on-event.js` (it dispatches on `hook_event_name`) |
 | `hooks/on-event.js` | `sessionStart` -> standing line + cached open questions as `additional_context`; `beforeSubmitPrompt`, `afterFileEdit`, `afterAgentResponse`, `postToolUse` -> one redacted spool record; `stop` -> flush, then maybe a `followup_message`; `sessionEnd` -> flush into the local queue |
-| `bin/connect.js` | the one-time OAuth flow as client `wybe-connect (Cursor)`; stores the grant in `~/.wybe-connect/cursor/credentials.json` |
+| `bin/connect.js` | the one-time OAuth flow as client `wybe-connect (Cursor)`; stores the grant as a connection under `~/.wybe-connect/cursor/connections/<name>/`; also `list`, `use`, `remove` |
 | `mcp.json.snippet` | the `wybe` entry for `~/.cursor/mcp.json`, for the interactive tools |
 | `lib/` | a byte-identical copy of the repository's `lib/` (`npm run sync-lib`; a test guards it) |
 
@@ -25,7 +25,7 @@ and run `node packages/cursor/bin/connect.js https://dittfirma.wybe.me` yourself
 Cursor passes `transcript_path` only when transcripts are enabled, and does not document the
 file's format. The hook payloads are documented, so the adapter builds the session from them
 (`lib/cursor-spool.js`): each hook appends one record to
-`~/.wybe-connect/cursor/spool/<conversation>.jsonl`, **redacted before it is written**, and `stop`
+`~/.wybe-connect/cursor/connections/<name>/spool/<conversation>.jsonl` (the connection in use when it was written), **redacted before it is written**, and `stop`
 turns the spool into one `report_session`.
 
 | Hook | Recorded | Scope |

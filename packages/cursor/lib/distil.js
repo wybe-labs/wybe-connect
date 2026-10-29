@@ -13,7 +13,7 @@
 //            A retry sends only the records without an ack, with the same keys, from the same
 //            outbox; claude never runs again for them. Only every record acked is a success.
 //
-// Files under <home>/state (all owner-only):
+// Files under <home>/connections/<name>/ (one distil per connection; all owner-only):
 //   distil.json                the state: pending ranges, what is distilled, the run, the outbox
 //   distil/distil.lock         lib/lock.js; never taken over from a live holder
 //   distil/notes/<h>.json      one per noted transcript, written lock-free by the hooks, folded
@@ -31,7 +31,8 @@ import { delimiter, join, posix, win32 } from 'node:path';
 import { homedir } from 'node:os';
 import { withLock, acquire, isAlive as defaultAlive } from './lock.js';
 import { appendRecord, readRecords } from './ledger.js';
-import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
+import { paths as legacyPaths, loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
+import { connectionPaths, checkedName, connectionNames, recordTranscript, sessionLines, NODE_ENV } from './connections.js';
 import { callTool } from './post.js';
 import { refreshTokens } from './oauth.js';
 import { redactValue } from './redact.js';
@@ -61,13 +62,19 @@ const iso = (ms) => new Date(ms).toISOString();
 const ms = (at) => (at ? Date.parse(at) : NaN);
 const sleep = (n) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, n);
 
+/**
+ * Each connection (lib/connections.js) has a distil of its own, under connections/<name>/: its
+ * notes, state, outboxes and locks, so a session's facts reach only the node its session uses.
+ * Paths without a connection (the single layout) keep it under state/.
+ */
 export function distilPaths(p) {
-  const dir = join(p.state, 'distil');
+  const base = p.connection ? join(p.root, 'connections', p.connection) : p.state;
+  const dir = join(base, 'distil');
   const runs = join(dir, 'runs');
   return {
     dir,
     runs,
-    state: join(p.state, 'distil.json'),
+    state: join(base, 'distil.json'),
     lock: join(dir, 'distil.lock'),
     deliverLock: join(dir, 'deliver.lock'),
     notes: join(dir, 'notes'),
@@ -128,7 +135,14 @@ function saveState(p, s, stillHeld) {
   }
 }
 
+/**
+ * A connection removed (`connect remove`) while a hook, run or delivery of it was under way: its
+ * directory is gone, and nothing may write there again, so it does not come back half.
+ */
+const gone = (p) => Boolean(p.connection) && !existsSync(p.credentials);
+
 function locked(p, fn, opts = { tries: 40, waitMs: 50 }) {
+  if (gone(p)) throw Object.assign(new Error('the connection was removed'), { code: 'ECONNGONE' });
   return withLock(distilPaths(p).lock, ({ stillHeld }) => {
     const s = loadState(p);
     return fn(s, (next = s) => saveState(p, next, stillHeld));
@@ -184,6 +198,7 @@ const noteName = (path) => `${createHash('sha256').update(path).digest('hex').sl
 export function noteSession(p, { transcriptPath, sessionId = null, cwd = null, now = Date.now(), maxNoteFiles = MAX_NOTE_FILES }) {
   const path = safeTranscriptPath(transcriptPath);
   if (!path || !hasRemember(p)) return null;
+  if (p.root && typeof sessionId === 'string') recordTranscript(p.root, sessionId, path); // a move counts these lines
   const dp = distilPaths(p);
   mkdirSync(dp.notes, { recursive: true, mode: 0o700 });
   const file = join(dp.notes, noteName(path));
@@ -410,24 +425,40 @@ function countLines(path) {
 
 /**
  * The oldest pending ranges that have new lines for this node, within the run's caps: each
- * transcript from its mark on, and never twice in one run. Pending entries with nothing new, or
- * whose file is gone, leave pending.
+ * transcript from its mark on, and never twice in one run. A moved session's transcript gives this
+ * node only the lines written while the session was on it (lib/connections.js sessionLines), one
+ * stretch per run; one with a later stretch here stays pending. Pending entries with nothing new,
+ * whose file is gone, or with no lines here (moved away, or pinned to none) leave pending.
  */
-function pick(s, node) {
+function pick(p, s, node) {
   const take = [];
   const seen = new Set();
   let chars = 0;
   const keep = [];
   for (const x of s.pending) {
+    const here = p.connection ? linesHere(p, x.sessionId) : null;
+    if (here && !here.length) continue; // its lines belong to another connection, or to none
     const key = transcriptKey(x.path);
     if (seen.has(key)) continue; // the same transcript under another spelling: one range is enough
     if (take.length >= MAX_RUN_TRANSCRIPTS || chars + x.path.length > MAX_RUN_PATH_CHARS) {
       keep.push(x);
       continue;
     }
-    const toLine = countLines(x.path);
-    const fromLine = markOf(s, node, x.path) ?? 0;
-    if (toLine === null || toLine <= fromLine) continue; // deleted by Claude Code, or nothing new
+    const lines = countLines(x.path);
+    if (lines === null) continue; // deleted by Claude Code
+    const mark = markOf(s, node, x.path) ?? 0;
+    let fromLine = mark;
+    let toLine = lines;
+    let later = false;
+    if (here) {
+      const i = here.findIndex(([, end]) => end === null || end > mark);
+      if (i < 0) continue; // every stretch here is read
+      fromLine = Math.max(mark, here[i][0]);
+      if (here[i][1] !== null) toLine = Math.min(lines, here[i][1]);
+      later = here.slice(i + 1).some(([from]) => from < lines);
+    }
+    if (later) keep.push(x);
+    if (toLine <= fromLine) continue; // nothing new
     take.push({ ...x, fromLine, toLine });
     seen.add(key);
     chars += x.path.length;
@@ -504,6 +535,19 @@ export function importTranscripts(claudeHome, now) {
 }
 
 /**
+ * The lines of a session's transcript that may go into this connection's distil, an import's or an ongoing run's:
+ * the stretches the session spent on this connection, so its work on another (or on none) never reaches this
+ * node. Null for a session that was never fixed (older than the connections, or never hooked): the person's for any.
+ */
+function linesHere(p, sessionId) {
+  try {
+    return sessionLines(p.root, sessionId, p.connection);
+  } catch {
+    return []; // an unreadable pin: not provably ours
+  }
+}
+
+/**
  * The import: every transcript of the import window joins pending (by its time), so the plugin,
  * not the model, decides what the import reads, and each is read from its mark on like any other
  * run. Past MAX_PENDING the rest wait on disk as notes, folded as room frees.
@@ -513,6 +557,7 @@ function enqueueImport(p, s, claudeHome, now) {
   for (const t of importTranscripts(claudeHome, now)) {
     const key = transcriptKey(t.path);
     if (have.has(key)) continue;
+    if (p.connection && linesHere(p, t.sessionId)?.length === 0) continue;
     have.add(key);
     if (s.pending.length + inFlight(s) < MAX_PENDING) s.pending.push({ path: t.path, sessionId: t.sessionId, cwd: null, notedAt: iso(t.mtimeMs) });
     else noteSession(p, { transcriptPath: t.path, sessionId: t.sessionId, now: t.mtimeMs });
@@ -531,7 +576,7 @@ export function requestImport(p, requestedAt) {
       return true;
     });
   } catch (err) {
-    if (err?.code === 'ELOCKBUSY') return false;
+    if (err?.code === 'ELOCKBUSY' || err?.code === 'ECONNGONE') return false;
     throw err;
   }
 }
@@ -561,13 +606,13 @@ export function maybeRun({ paths: p, env = process.env, now = Date.now(), alive 
       return decided;
     });
   } catch (err) {
-    if (err?.code === 'ELOCKBUSY') return null;
+    if (err?.code === 'ELOCKBUSY' || err?.code === 'ECONNGONE') return null;
     throw err;
   }
   unlinkAll(folded);
   if (!plan) return null;
   const planFile = dp.plan(plan.runId);
-  writeJsonPrivate(planFile, { ...plan, root: p.root });
+  writeJsonPrivate(planFile, { ...plan, root: p.root, connection: p.connection ?? null });
   mkdirSync(dp.runs, { recursive: true, mode: 0o700 });
   let pid = null;
   try {
@@ -593,6 +638,25 @@ export function maybeRun({ paths: p, env = process.env, now = Date.now(), alive 
   return { ...plan, planFile };
 }
 
+/**
+ * A hook's tick for every connection of a harness home (lib/connections.js), each in its own
+ * paths: a connection's outbox or backlog must not wait for a session of its own, since new
+ * sessions may all use another one now. One connection's failure never stops the others.
+ * Returns the plans started.
+ */
+export function maybeRunAll(root, opts = {}) {
+  const started = [];
+  for (const key of connectionNames(root)) {
+    try {
+      const plan = maybeRun({ ...opts, paths: connectionPaths(root, key) });
+      if (plan) started.push(plan);
+    } catch {
+      // that connection's next tick
+    }
+  }
+  return started;
+}
+
 function decide(p, s, now, node, claudeHome) {
   if (s.running) return null;
   const backoff = Number.isFinite(ms(s.lastFailureAt)) && now - ms(s.lastFailureAt) < BACKOFF_MS;
@@ -604,13 +668,13 @@ function decide(p, s, now, node, claudeHome) {
   if (outbox) return { runId: outbox.runId, mode: 'deliver', importOf: outbox.importOf, node: outbox.node ?? node, transcripts: [] };
   if (s.importRequest && s.importRequest !== s.importHandled) {
     enqueueImport(p, s, claudeHome, now);
-    return { runId, mode: 'import', importOf: s.importRequest, node, claudeHome, transcripts: pick(s, node) };
+    return { runId, mode: 'import', importOf: s.importRequest, node, claudeHome, transcripts: pick(p, s, node) };
   }
   if (!s.pending.length) return null;
   const since = now - ms(s.lastSuccessAt);
   const due = !Number.isFinite(since) || since >= ONGOING_INTERVAL_MS || (s.pending.length > MAX_RUN_TRANSCRIPTS && since >= BACKLOG_INTERVAL_MS);
   if (!due) return null;
-  const transcripts = pick(s, node);
+  const transcripts = pick(p, s, node);
   return transcripts.length ? { runId, mode: 'ongoing', importOf: null, node, transcripts } : null;
 }
 
@@ -627,6 +691,7 @@ function outboxRecords(p, runId) {
 
 /** The run's `remember`: redacted, then appended, keyed for the run's node. Returns { seq } or { error }. */
 export function spoolRemember(p, runId, args) {
+  if (gone(p)) return { error: 'the connection this distil run is for was removed' };
   const { records } = outboxRecords(p, runId);
   if (records.some((r) => r.kind === 'done')) return { error: 'this distil run already called distil_done' };
   const seq = records.filter((r) => r.kind === 'remember').reduce((m, r) => Math.max(m, r.seq), 0) + 1;
@@ -638,6 +703,7 @@ export function spoolRemember(p, runId, args) {
 
 /** The run's `distil_done`: closes the outbox with the number of calls it holds. */
 export function spoolDone(p, runId) {
+  if (gone(p)) return { error: 'the connection this distil run is for was removed' };
   const { records } = outboxRecords(p, runId);
   if (records.some((r) => r.kind === 'done')) return { items: records.filter((r) => r.kind === 'remember').length, again: true };
   const items = records.filter((r) => r.kind === 'remember').length;
@@ -710,19 +776,35 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
     let sent = 0;
     // An outbox is sent only to the node it was distilled for, whatever the person connected since.
     if (c && run.node && nodeOf(c) !== run.node) return { ok: false, class: 'node-changed', message: 'this Claude Code is now connected to another colleague', importDone, sent };
+    // The connection's grant may be removed or replaced (a new sign-in gets a new grantId,
+    // lib/connections.js) while this delivery runs: then it stops, writes no tokens, and the next
+    // tick delivers what is left with the grant on disk by then.
+    const grantId = c?.grantId ?? null;
+    const replaced = () => {
+      try {
+        const onDisk = readJson(p.credentials);
+        return !onDisk || (onDisk.grantId ?? null) !== grantId;
+      } catch {
+        return true;
+      }
+    };
+    const changed = () => ({ ok: false, class: 'grant-changed', message: 'the connection was removed or signed in again while the facts were sent', importDone, sent });
     for (const r of order) {
       if (acked.has(r.seq)) continue;
       if (!c) return { ok: false, class: 'signed-out', message: 'not connected to a Wybe AI colleague', importDone, sent };
+      if (replaced()) return changed();
       const args = { ...r.args, idempotency_key: r.key };
       let out = await callTool({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, name: 'remember', args, fetchImpl, timeoutMs });
       if (!out.ok && out.kind === 'auth' && c.refreshToken) {
         const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now() });
         if (next) {
+          if (replaced()) return changed();
           c = { ...c, ...next };
           saveCredentials(c, p);
           out = await callTool({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, name: 'remember', args, fetchImpl, timeoutMs });
         }
       }
+      if (gone(p)) return changed(); // removed while the call ran: its files are gone, write none back
       if (!out.ok && out.toolError) {
         appendRecord(dp.acks(run.runId), { seq: r.seq, key: r.key, refused: true, message: String(out.message).slice(0, 200), at: iso(now()) });
         sent += 1;
@@ -790,8 +872,11 @@ export function buildPrompt(plan) {
   return lines.join('\n');
 }
 
+/** The environment of a run's claude and its MCP server: the run, the home, and the connection the run is for. */
+const runEnv = (plan, root) => ({ [DISTIL_ENV]: plan.runId, WYBE_CONNECT_HOME: root, [NODE_ENV]: typeof plan.connection === 'string' ? plan.connection : '' });
+
 export function claudeArgs(plan, { root, pluginRoot = PLUGIN_ROOT }) {
-  const mcp = { mcpServers: { wybe: { command: process.execPath, args: [join(pluginRoot, 'bin', 'mcp-proxy.js')], env: { [DISTIL_ENV]: plan.runId, WYBE_CONNECT_HOME: root } } } };
+  const mcp = { mcpServers: { wybe: { command: process.execPath, args: [join(pluginRoot, 'bin', 'mcp-proxy.js')], env: runEnv(plan, root) } } };
   return [
     '-p', buildPrompt(plan),
     '--tools', 'Read,Glob,Grep',
@@ -827,7 +912,7 @@ function runClaude(plan, { root, resolve, spawnImpl, runTimeoutMs, logFile }) {
     const io = fd === null ? 'ignore' : fd;
     let child;
     try {
-      child = spawnImpl(how.cmd, [...how.pre, ...claudeArgs(plan, { root })], { stdio: ['ignore', io, io], windowsHide: true, detached: process.platform !== 'win32', env: { ...process.env, [DISTIL_ENV]: plan.runId, WYBE_CONNECT_HOME: root } });
+      child = spawnImpl(how.cmd, [...how.pre, ...claudeArgs(plan, { root })], { stdio: ['ignore', io, io], windowsHide: true, detached: process.platform !== 'win32', env: { ...process.env, ...runEnv(plan, root) } });
     } catch (err) {
       if (fd !== null) closeSync(fd);
       done({ code: null, error: `could not start claude: ${err?.code ?? err}` });
@@ -854,6 +939,19 @@ function pruneLogs(p, now) {
     } catch {
       // best effort
     }
+  }
+}
+
+/**
+ * The paths a plan's run works in: those of the connection it was planned for (lib/connections.js),
+ * or the single-connection layout for a plan made without one. Null when the plan names no valid connection.
+ */
+export function planPaths(plan, root) {
+  if (plan?.connection === null || plan?.connection === undefined) return legacyPaths(root);
+  try {
+    return connectionPaths(root, checkedName(plan.connection));
+  } catch {
+    return null;
   }
 }
 
@@ -931,7 +1029,7 @@ export async function runWatchdog(planFile, { paths: p, now = Date.now, resolve 
     if (d.class === 'node-changed') {
       park(p, s, s.outbox); // not a failure: it waits for its own node
       s.outbox = null;
-    } else if (d.class !== 'busy') fail(s, d.class, d.message, now());
+    } else if (d.class !== 'busy' && d.class !== 'grant-changed') fail(s, d.class, d.message, now());
     save();
     return { ok: false, class: d.class, message: d.message };
   });
@@ -995,7 +1093,7 @@ export function distilNotice(p, { now = Date.now() } = {}) {
       return `wybe-connect: ${parts.join('; ')}. Tell the person once, briefly.`;
     }, { tries: 5, waitMs: 20 });
   } catch (err) {
-    if (err?.code === 'ELOCKBUSY') return null;
+    if (err?.code === 'ELOCKBUSY' || err?.code === 'ECONNGONE') return null;
     throw err;
   } finally {
     if (saved) unlinkAll(folded);

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 // node connect.js <node-url> [--scopes remember,conversations,sessions:light,sessions:full]
-// Runs the OAuth flow once as "wybe-connect (Cursor)" and stores the grant in
-// ~/.wybe-connect/cursor/credentials.json (0600). Never prints a token.
+// node connect.js list | use <name> [--session <id>] | remove <name>
+// Runs the OAuth flow once as "wybe-connect (Cursor)" and stores the grant as one connection in
+// ~/.wybe-connect/cursor/connections/<name>/ (0600), next to any others. Never prints a token.
 
 import { runConnect } from '../lib/connect-cli.js';
 

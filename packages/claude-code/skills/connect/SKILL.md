@@ -35,8 +35,14 @@ start; the person is granting access to their work context and should hear what 
    (`remember`, `conversations`, `sessions:light`, `sessions:full`). If the answer carries a link
    because no browser appeared, show the link. When the person says they are done, call
    `connect` again: it answers `Connected to ...` with the granted scopes. That one sign-in
-   serves the hooks and the tools; there is nothing else to add or copy.
-   Never paste, read or echo `~/.wybe-connect/credentials.json`.
+   serves the hooks and the tools; there is nothing else to add or copy. The grant is stored
+   owner-only in `~/.wybe-connect/connections/<node>/credentials.json`.
+   Never paste, read or echo the contents of `credentials.json`.
+   Connecting a second node keeps the first: each is its own connection, and the newest becomes
+   the default for new sessions. From a terminal, `node "${CLAUDE_PLUGIN_ROOT}/bin/connect.js" list`
+   shows them, `connect.js use <name>` changes the default, `connect.js use <name> --session <id>`
+   moves one session's hooks, `connect.js remove <name>` deletes one locally, and
+   `connect.js https://<slug>.wybe.me --name <name>` adds a second account on the same node.
 
 4. **Confirm** in one paragraph: connected to which node, and which scopes. Say that the first
    sync now runs by itself in the background: the node asked for an import, and the plugin
@@ -48,7 +54,7 @@ start; the person is granting access to their work context and should hear what 
 
 ## Never
 
-- Never read or print `~/.wybe-connect/credentials.json`, a `wat_`/`wrt_` token, or an
+- Never read or print a `credentials.json` under `~/.wybe-connect/`, a `wat_`/`wrt_` token, or an
   `Authorization` header.
 - Never send anything personal, about other people, or any credential through `remember`.
   Work only ("kun jobb").

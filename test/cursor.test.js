@@ -47,9 +47,12 @@ function sandbox() {
   return { home, cursorHome: join(home, 'cursor'), project, events };
 }
 
+/** The one connection these tests use, in the layout of lib/connections.js. */
+const conn = (dir) => join(dir, 'connections', 'node');
+
 function writeCredentials(dir, endpointBase, scopes) {
-  mkdirSync(dir, { recursive: true });
-  writeFileSync(join(dir, 'credentials.json'), JSON.stringify({
+  mkdirSync(conn(dir), { recursive: true });
+  writeFileSync(join(conn(dir), 'credentials.json'), JSON.stringify({
     version: 1, nodeUrl: endpointBase, mcpEndpoint: `${endpointBase}/mcp`, issuer: REFUSED, tokenEndpoint: `${REFUSED}/oauth/token`,
     clientId: 'c-cursor', accessToken: TOKEN, refreshToken: null, expiresAt: null, scopes,
   }));
@@ -88,7 +91,7 @@ test('cursor LIGHT: every hook answers in its documented shape; the spool on dis
   for (const [name, out] of outputs.slice(1)) {
     assert.deepEqual(out, name === 'beforeSubmitPrompt' ? { continue: true } : {}, name);
   }
-  const spoolText = readFileSync(join(cursorHome, 'spool', `${CONV}.jsonl`), 'utf8');
+  const spoolText = readFileSync(join(conn(cursorHome), 'spool', `${CONV}.jsonl`), 'utf8');
   for (const needle of [...NEVER, ...FULL_ONLY]) assert.ok(!spoolText.includes(needle), `${needle} was written to the light spool`);
   assert.ok(spoolText.includes('[REDACTED:url-userinfo]'), 'the spool is redacted before it is written');
 
@@ -97,12 +100,12 @@ test('cursor LIGHT: every hook answers in its documented shape; the spool on dis
   assert.deepEqual(JSON.parse(stop.stdout), {}, 'no questions cached, so no followup');
   assert.match(stop.stderr, /node not reachable \(network\); 1 delta\(s\) queued locally/);
   assert.ok(!stop.stderr.includes(TOKEN));
-  assert.equal(existsSync(join(cursorHome, 'spool', `${CONV}.jsonl`)), false, 'the spool was consumed');
-  assert.equal(existsSync(join(home, 'queue')), false, 'Claude Code\'s queue is not touched');
+  assert.equal(existsSync(join(conn(cursorHome), 'spool', `${CONV}.jsonl`)), false, 'the spool was consumed');
+  assert.equal(existsSync(join(conn(home), 'queue')), false, 'Claude Code\'s queue is not touched');
 
-  const queued = readdirSync(join(cursorHome, 'queue'));
+  const queued = readdirSync(join(conn(cursorHome), 'queue'));
   assert.equal(queued.length, 1);
-  const payload = JSON.parse(readFileSync(join(cursorHome, 'queue', queued[0]), 'utf8'));
+  const payload = JSON.parse(readFileSync(join(conn(cursorHome), 'queue', queued[0]), 'utf8'));
   assert.deepEqual(Object.keys(payload), ['scope', 'harness', 'session_id', 'transcript_id', 'project', 'started_at', 'ended_at', 'duration_s', 'files_touched', 'prompts', 'counts', 'delta', 'redaction']);
   assert.equal(payload.harness, 'cursor');
   assert.equal(payload.scope, 'sessions:light');
@@ -162,7 +165,7 @@ test('cursor sessionEnd: the spool goes to the local queue without a single requ
     const end = await run({ conversation_id: CONV, session_id: CONV, hook_event_name: 'sessionEnd', reason: 'window_close', duration_ms: 1000, is_background_agent: false, final_status: 'completed' }, home);
     assert.deepEqual(end, { code: 0, stdout: '{}\n', stderr: '' });
     assert.equal(node.seen.length, 0);
-    assert.equal(readdirSync(join(cursorHome, 'queue')).length, 1);
+    assert.equal(readdirSync(join(conn(cursorHome), 'queue')).length, 1);
   } finally {
     node.server.close();
   }
@@ -173,10 +176,11 @@ test('cursor without a credential or a sessions scope: prompts are never blocked
   const r = await run(events[1], home);
   assert.deepEqual(r, { code: 0, stdout: '{"continue":true}\n', stderr: '' });
   assert.equal(existsSync(join(cursorHome, 'spool')), false);
-  assert.deepEqual(await run(events[0], home), { code: 0, stdout: '{}\n', stderr: '' });
+  // Not connected yet, the session is still told its id (a connection made from inside it needs it later).
+  assert.deepEqual(await run(events[0], home), { code: 0, stdout: `${JSON.stringify({ additional_context: `This session is not connected yet; its session_id is ${CONV}.` })}\n`, stderr: '' });
   writeCredentials(cursorHome, REFUSED, ['remember', 'conversations']);
   assert.deepEqual(await run(events[1], home), { code: 0, stdout: '{"continue":true}\n', stderr: '' });
-  assert.equal(existsSync(join(cursorHome, 'spool')), false);
+  assert.equal(existsSync(join(conn(cursorHome), 'spool')), false);
   const stop = await run(events.at(-1), home);
   assert.deepEqual(stop, { code: 0, stdout: '{}\n', stderr: '' });
   const bad = await run('{not json', home);

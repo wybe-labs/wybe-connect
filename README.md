@@ -115,6 +115,22 @@ sends. Details: `packages/cursor/README.md`.
 Each harness is its own pairing with its own grant: Claude Code keeps `~/.wybe-connect/`, Codex
 and Cursor use `~/.wybe-connect/codex/` and `~/.wybe-connect/cursor/`.
 
+**Several nodes or accounts.** Within a harness, each connect is its own connection
+(`connections/<name>/`: grant, queue, question cache), keyed by the node host or by `--name`, so
+a second node never replaces the first and one node's queue is never sent to another. A session
+uses the connection its first hook found: one it was moved to (`connect.js use <name> --session
+<id>`), else `WYBE_CONNECT_NODE=<name>` in the harness's environment, else the default (the one
+connected or `use`d last, or the only one). `connect.js list` and `connect.js remove <name>`
+manage them. A 0.1 `credentials.json` moves under its node on the first hook, queue included.
+A session is the harness's `session_id`: `/clear` starts a new one (where any new session goes),
+`/resume` keeps it. A move sends the session's later transcript lines to the new connection; the
+lines written before it stay with the one it left, and a removed connection's lines go nowhere.
+In Claude Code the background distil is kept per connection too. The plugin's `wybe` MCP server
+remembers no session: with one connection, and every session on it, its tools go there. With two
+or more, or a session sent elsewhere (a removed connection pins its sessions to none until
+`connect.js use`), every call passes the `session_id` the SessionStart note gives, and a call
+without it is refused. Its `connect` tool stores a new connection and makes it the default.
+
 ## Claude Desktop, claude.ai and ChatGPT (no hooks)
 
 These assistants call the node from their vendor's cloud, through a custom connector at
@@ -211,6 +227,13 @@ only the facts the run chose, redacted again by `lib/redact.js`. What makes it e
   The import does not let the model look for transcripts: the plugin lists every session of
   the last 30 days that is not distilled yet (the distil runs' own left out), and the model
   reads only those ranges.
+- **One distil per connection.** Each connection keeps its own notes, state, outboxes and locks
+  under `connections/<name>/`. A session's Stop hook notes it for the connection that session
+  uses, and a run reads only those sessions and delivers only to that connection's node, with
+  its grant. Every Stop hook ticks every connection, so an outbox never waits for a session of
+  its own. An import takes only sessions fixed to its connection, or never fixed to any. A
+  delivery whose grant is removed or replaced meanwhile stops and writes nothing back; the next
+  tick sends the rest with the grant on disk then.
 - **An outbox belongs to one node.** Its keys are made with the node's address in them, and it
   is sent only to that node. After connecting to another colleague it waits on this machine,
   and is sent if this Claude Code connects to that node again.
@@ -240,9 +263,9 @@ Codex / Cursor ──hook stdin (transcript)──▶ hooks/flush.js
                                                 │ redaction (lib/redact.js)
                                                 ▼
                                     lib/post.js ── JSON-RPC tools/call report_session ──▶ https://<slug>.wybe.me/mcp
-                                                │ Bearer wat_… from ~/.wybe-connect/credentials.json
+                                                │ Bearer wat_… from ~/.wybe-connect/connections/<node>/credentials.json
                                                 │ 401 → one refresh → else queue
-                                                │ unreachable → ~/.wybe-connect/queue/ (7 days / 50 MB, oldest dropped)
+                                                │ unreachable → ~/.wybe-connect/connections/<node>/queue/ (7 days / 50 MB, oldest dropped)
                                                 ▼
                                     next flush drains the queue, oldest first
 ```
@@ -251,7 +274,7 @@ Codex / Cursor ──hook stdin (transcript)──▶ hooks/flush.js
 and no access to Claude Code's own OAuth session. So the plugin obtains its **own** grant once
 (`bin/connect.js` runs the OAuth 2.1 authorization-code flow with PKCE against `auth.wybe.me`:
 discovery, dynamic client registration with a loopback `redirect_uri`, browser, code exchange)
-and stores it in `~/.wybe-connect/credentials.json` (owner-only). The hooks then speak MCP's
+and stores it in `~/.wybe-connect/connections/<node>/credentials.json` (owner-only). The hooks then speak MCP's
 Streamable HTTP transport directly (`initialize`, `notifications/initialized`, `tools/call`)
 with `fetch`. The interactive tools (`remember`, `import_conversation`, `pending_questions`)
 go through the plugin's own MCP server (`.mcp.json` → `bin/mcp-proxy.js`, a stdio server):
