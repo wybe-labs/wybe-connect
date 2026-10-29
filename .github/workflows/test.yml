@@ -1,0 +1,74 @@
+# The whole suite on Linux and Windows, on the engines floor and the current LTS. Windows matters
+# here: atomic renames retry on EPERM, the harness CLIs resolve differently on win32, and transcript
+# paths are spelled with backslashes. The checks job keeps the repository dependency-free and
+# free of personal data and decision ids.
+name: test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a pull request cancels its older run. Main is keyed by commit, so every merged
+# commit gets its own run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: node --test (${{ matrix.os }}, node ${{ matrix.node }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        node: ['20.11', '22']
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+      - name: node --test
+        run: node --test
+
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Full history: the scans read the lines added since the merge base with the target branch
+      # (a pull request) or since the commit main pointed at before the push.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Zero dependencies
+        run: |
+          node -e "
+            const fs = require('node:fs');
+            const { execFileSync } = require('node:child_process');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            for (const k of ['dependencies', 'devDependencies', 'optionalDependencies', 'peerDependencies', 'bundleDependencies']) {
+              const v = pkg[k];
+              if (v && (Array.isArray(v) ? v.length : Object.keys(v).length)) { console.error('package.json ' + k + ' must be empty'); process.exit(1); }
+            }
+            const committed = execFileSync('git', ['ls-files'], { encoding: 'utf8' }).split('\n').filter((f) => /(^|\/)node_modules\//.test(f));
+            if (committed.length) { console.error('node_modules is committed: ' + committed[0]); process.exit(1); }
+            console.log('zero dependencies');
+          "
+      - name: No personal data in added lines
+        if: ${{ !cancelled() }}
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: node scripts/leak-scan.mjs
+      - name: No ruling ids or dated attributions in added lines
+        if: ${{ !cancelled() }}
+        env:
+          PUSH_BEFORE: ${{ github.event.before }}
+        run: node scripts/check-no-rulings.mjs

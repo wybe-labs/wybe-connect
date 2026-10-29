@@ -299,6 +299,11 @@ npm ls                       # must print nothing under the package: zero depend
 
 Node 20.11 or newer. No dependencies, ever: the code runs inside people's editors.
 
+CI is GitHub Actions (`.github/workflows/test.yml`), on every pull request and every push to
+main: `node --test` on Linux and Windows with Node 20.11 and 22, plus the zero-dependency check
+and two scans of the added lines (`scripts/leak-scan.mjs` for e-mail addresses and phone numbers,
+`scripts/check-no-rulings.mjs` for decision ids and dated attributions).
+
 ## Not yet
 
 - **Live proof against `auth.wybe.me` and a real node** (plan track D3). The OAuth client and the
