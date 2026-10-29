@@ -672,13 +672,16 @@ test('the headless run is confined: read-only tools, only the plugin\'s own serv
   assert.equal(ran.flags.settings, join(D.distilPaths(p).runs, `${r.plan.runId}.settings.json`), 'the rules are a file of the run, so each path is on the command line once');
   const settings = JSON.parse(ran.settingsFile);
   assert.equal(settings.disableAllHooks, true);
-  assert.deepEqual([...settings.permissions.allow].sort(), files.map(readRule).sort(), 'it may read exactly the noted transcripts');
+  assert.deepEqual([...settings.permissions.allow].sort(), files.flatMap(fileRules).sort(), 'it may read, glob and grep exactly the noted transcripts');
   assert.equal(existsSync(ran.flags.settings), false, 'the file goes when the run ends');
   assert.equal(ran.cwd, join(p.state, 'distil'), 'it runs in the distil\'s own folder, never in a project of the person');
 });
 
 // The absolute form of a path in a permission rule: POSIX, `//` from the root, a drive as /c/.
-const readRule = (path) => `Read(/${path.replace(/^([A-Za-z]):\\/, (_, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/')})`;
+const ruleAbs = (path) => `/${path.replace(/^([A-Za-z]):\\/, (_, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/')}`;
+// Read, Glob and Grep each get the same path-scoped rule: a file, or a folder and what lies in it.
+const fileRules = (path) => ['Read', 'Glob', 'Grep'].map((tool) => `${tool}(${ruleAbs(path)})`);
+const folderRules = (path) => [...fileRules(path), ...['Read', 'Glob', 'Grep'].map((tool) => `${tool}(${ruleAbs(path)}/**)`)];
 
 test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s POSIX form on Windows and elsewhere', () => {
   const plan = {
@@ -697,9 +700,17 @@ test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s PO
   assert.equal(settings.disableAllHooks, true);
   assert.deepEqual(settings.permissions.allow, [
     'Read(//c/Users/Ola Nordmann/.claude/projects/C--work-demo/a.jsonl)',
+    'Glob(//c/Users/Ola Nordmann/.claude/projects/C--work-demo/a.jsonl)',
+    'Grep(//c/Users/Ola Nordmann/.claude/projects/C--work-demo/a.jsonl)',
     'Read(//d/claude \\[work\\]/projects/x/b\\*\\?.jsonl)',
+    'Glob(//d/claude \\[work\\]/projects/x/b\\*\\?.jsonl)',
+    'Grep(//d/claude \\[work\\]/projects/x/b\\*\\?.jsonl)',
     'Read(//home/ola/.claude/projects/-home-ola-demo/c.jsonl)',
+    'Glob(//home/ola/.claude/projects/-home-ola-demo/c.jsonl)',
+    'Grep(//home/ola/.claude/projects/-home-ola-demo/c.jsonl)',
   ]);
+  const prompt = args[args.indexOf('-p') + 1];
+  assert.match(prompt, /Grep a listed transcript by its own path/, 'the run is told how it may search a long range');
   assert.ok(!settings.permissions.allow.some((r) => /^(Read|Glob|Grep)$/.test(r)), 'never a rule for every path');
   assert.deepEqual(args[args.indexOf('--allowedTools') + 1].split(',').sort(), ['mcp__wybe__distil_done', 'mcp__wybe__pending_questions', 'mcp__wybe__remember']);
 });
@@ -721,15 +732,14 @@ test('an import may also read the Claude home\'s CLAUDE.md and, of the projects 
   const plan = { runId: 'r-i', mode: 'import', importOf: '2026-10-21T10:00:00.000Z', connection: null, claudeHome: home, transcripts: [{ path: t, sessionId: 's', cwd: null, fromLine: 0, toLine: 1 }] };
   const args = D.claudeArgs(plan, { root: '/h', settingsFile: '/h/run.settings.json' });
   const allow = D.claudeSettings(plan).permissions.allow;
-  const mem = readRule(join(folder, 'memory'));
   assert.deepEqual([...allow].sort(), [
-    readRule(t),
-    readRule(join(home, 'CLAUDE.md')),
-    readRule(join(project, 'CLAUDE.md')),
-    readRule(join(project, '.claude', 'CLAUDE.md')),
-    mem,
-    `${mem.slice(0, -1)}/**)`,
+    ...fileRules(t),
+    ...fileRules(join(home, 'CLAUDE.md')),
+    ...fileRules(join(project, 'CLAUDE.md')),
+    ...fileRules(join(project, '.claude', 'CLAUDE.md')),
+    ...folderRules(join(folder, 'memory')),
   ].sort());
+  assert.ok(!allow.some((r) => /^(Glob|Grep)\(.*\/projects(\/\*\*)?\)$/.test(r)), 'never the projects folder itself');
   assert.ok(!allow.some((r) => r.includes('C--other')), 'another project\'s memory is not in this import');
   const prompt = args[args.indexOf('-p') + 1];
   assert.ok(prompt.includes(join(folder, 'memory')), 'the prompt names the memory folder it may read');
