@@ -281,3 +281,90 @@ test('one scan at a time per connection: a second process finds the lock held an
     await node.close();
   }
 });
+
+// A pid no process has: what a killed terminal leaves behind in a marker or a poller record.
+const DEAD_PID = 2147483000;
+
+test('a hooked session whose harness died without SessionEnd is closed and cannot take tasks', async () => {
+  const node = await startFakeNode();
+  try {
+    const h = home(node);
+    const crashed = transcript(h.claude, { project: 'atlas-demo', prompt: 'Refactor the export job', ageMs: 2 * 60 * 60 * 1000 });
+    touchSession(h.p, crashed.id, { harness: 'claude-code', cwd: '/home/eier/work/atlas-demo', transcriptPath: crashed.path });
+    claimPoller(h.p, crashed.id, { pid: DEAD_PID });
+    mkdirSync(join(h.claude, 'sessions'), { recursive: true });
+    writeFileSync(join(h.claude, 'sessions', `${DEAD_PID}.json`), JSON.stringify({ pid: DEAD_PID, sessionId: crashed.id }));
+    await scan(h);
+    const got = byId(node).get(crashed.id);
+    assert.deepEqual([got.state, got.can_take_tasks], ['closed', false]);
+  } finally {
+    await node.close();
+  }
+});
+
+test('a hooked session whose poller process is gone cannot take tasks, and with nothing else running it is closed', async () => {
+  const node = await startFakeNode();
+  try {
+    const h = home(node);
+    const gone = transcript(h.claude, { project: 'atlas-demo', prompt: 'Tidy the migrations', ageMs: 2 * 60 * 60 * 1000 });
+    touchSession(h.p, gone.id, { harness: 'claude-code', cwd: '/home/eier/work/atlas-demo', transcriptPath: gone.path });
+    claimPoller(h.p, gone.id, { pid: DEAD_PID });
+    // still running (Claude Code's own mark is live), but its poller is gone: open, no tasks
+    const idle = transcript(h.claude, { project: 'crm-demo', prompt: 'Map the stage names', ageMs: 2 * 60 * 60 * 1000 });
+    touchSession(h.p, idle.id, { harness: 'claude-code', cwd: '/home/eier/work/crm-demo', transcriptPath: idle.path });
+    claimPoller(h.p, idle.id, { pid: DEAD_PID });
+    mkdirSync(join(h.claude, 'sessions'), { recursive: true });
+    writeFileSync(join(h.claude, 'sessions', `${process.pid}.json`), JSON.stringify({ pid: process.pid, sessionId: idle.id }));
+    await scan(h);
+    const got = byId(node);
+    assert.deepEqual([got.get(gone.id).state, got.get(gone.id).can_take_tasks], ['closed', false]);
+    assert.deepEqual([got.get(idle.id).state, got.get(idle.id).can_take_tasks], ['open', false]);
+  } finally {
+    await node.close();
+  }
+});
+
+test('a poller paused for the person\'s own turn: able to take a task while the turn runs, closed once nothing writes and nothing runs', async () => {
+  const node = await startFakeNode();
+  try {
+    const h = home(node);
+    const busy = transcript(h.claude, { project: 'atlas-demo', prompt: 'Run the full suite' });
+    touchSession(h.p, busy.id, { harness: 'claude-code', cwd: '/home/eier/work/atlas-demo', transcriptPath: busy.path });
+    claimPoller(h.p, busy.id, { pid: null });
+    const stuck = transcript(h.claude, { project: 'crm-demo', prompt: 'Clean the import', ageMs: 2 * 60 * 60 * 1000 });
+    touchSession(h.p, stuck.id, { harness: 'claude-code', cwd: '/home/eier/work/crm-demo', transcriptPath: stuck.path });
+    claimPoller(h.p, stuck.id, { pid: null });
+    await scan(h);
+    const got = byId(node);
+    assert.deepEqual([got.get(busy.id).state, got.get(busy.id).can_take_tasks], ['open', true]);
+    assert.deepEqual([got.get(stuck.id).state, got.get(stuck.id).can_take_tasks], ['closed', false]);
+  } finally {
+    await node.close();
+  }
+});
+
+test('Codex: can_take_tasks follows the detached poller\'s process, not only its record', async () => {
+  const node = await startFakeNode();
+  try {
+    const h = home(node);
+    const day = join(h.codex, 'sessions', '2026', '09', '22');
+    mkdirSync(day, { recursive: true });
+    const ids = ['0190c0de-0000-7000-8000-0000000000d1', '0190c0de-0000-7000-8000-0000000000d2'];
+    const src = readFileSync(join(FIX, 'codex-rollout.jsonl'), 'utf8');
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    for (const id of ids) {
+      const path = join(day, `rollout-2026-09-22T09-00-00-${id}.jsonl`);
+      writeFileSync(path, src.replaceAll('0190c0de-0000-7000-8000-00000000c0de', id));
+      utimesSync(path, old, old);
+      touchSession(h.p, id, { harness: 'codex', cwd: '/home/eier/work/atlas-demo', transcriptPath: path });
+    }
+    claimPoller(h.p, ids[0]);
+    claimPoller(h.p, ids[1], { pid: DEAD_PID });
+    await scanSessions(h.p, { harness: 'codex', env: h.env });
+    const got = byId(node);
+    assert.deepEqual([got.get(ids[0]).state, got.get(ids[0]).can_take_tasks], ['open', true]);
+    assert.deepEqual([got.get(ids[1]).state, got.get(ids[1]).can_take_tasks], ['closed', false]);
+  } finally {
+    await node.close();
+  }
+});
