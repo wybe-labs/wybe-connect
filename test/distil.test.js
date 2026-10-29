@@ -46,7 +46,7 @@ function sandbox(n = 3) {
 
 /**
  * An MCP node over real HTTP. `answers[i]` is the reply to the i-th remember: 'ok', a status code
- * (NOT stored), 'toolError' (refused, NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is the node's idempotency store:
+ * (NOT stored), 'toolError' (refused, NOT stored), 'busy' / 'busyRetry' (a transient refusal by text / by retry: true, NOT stored) or { delayMs } (stored at once, answered late). With `dedupe` it is the node's idempotency store:
  * a repeat of an idempotency_key on the connection stores nothing and replays the WHOLE first
  * answer (import_done included). `sends` lists every remember it saw.
  */
@@ -71,6 +71,8 @@ async function httpNode({ answers = [], dedupe = false, importDone = true } = {}
       const a = answers[n++] ?? 'ok';
       if (typeof a === 'number') { res.writeHead(a); return res.end('upstream error'); }
       if (a === 'toolError') return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text: 'Invalid arguments: items[0].content: too long' }] } });
+      if (a === 'busy') return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, content: [{ type: 'text', text: 'The Wybe AI colleague could not store this right now. Try again later.' }] } });
+      if (a === 'busyRetry') return json({ jsonrpc: '2.0', id: msg.id, result: { isError: true, structuredContent: { retry: true }, content: [{ type: 'text', text: 'Daily limit reached.' }] } });
       const key = dedupe ? args.idempotency_key : undefined;
       let answer = key !== undefined ? first.get(key) : undefined;
       if (!answer) {
@@ -470,6 +472,79 @@ test('a record the node refuses for good (a tool error) is set aside and counted
   assert.equal(node.sends.length, 2, 'the refused record was sent once, never again');
   s = D.loadState(p);
   assert.equal(s.setAside.refused, 1);
+});
+
+// ------------------------------------------------------------------ a busy node: sent again later, never dropped
+const busyRun = async (answers) => {
+  const { p, files } = sandbox(1);
+  const node = await httpNode({ answers, dedupe: true });
+  saveCredentials(creds(node.url), p);
+  const T = Date.now();
+  note(p, files, T - 7 * H);
+  return { p, node, T };
+};
+
+test('the node\'s "try again later" refusal is not a refusal: delivery stops as node-busy and, after the backoff, sends the same record with the same key', async () => {
+  const { p, node, T } = await busyRun(['busy', 'ok']);
+  try {
+    const r1 = await cycle(p, { now: T });
+    assert.equal(r1.outcome.ok, false);
+    assert.equal(r1.outcome.class, 'node-busy');
+    let s = D.loadState(p);
+    assert.ok(s.outbox, 'the facts wait on this machine');
+    assert.equal(s.lastError?.class, 'node-busy');
+    const acks = readRecords(D.distilPaths(p).acks(s.outbox.runId)).records;
+    assert.equal(acks.filter((a) => a.refused === true).length, 0, 'never set aside as refused');
+    assert.equal((await cycle(p, { now: T + 10 * MIN })).plan, null, 'nothing is sent again inside the backoff');
+    const r2 = await cycle(p, { now: T + D.BACKOFF_MS + MIN });
+    assert.equal(r2.plan.mode, 'deliver');
+    assert.equal(r2.outcome.ok, true);
+    assert.equal(r2.outcome.refused, 0);
+    assert.deepEqual(node.stored, ['Fact 1 of 1.']);
+    assert.equal(node.sends.length, 2);
+    assert.equal(node.sends[1].idempotency_key, node.sends[0].idempotency_key, 'the same key, so the node stores it once');
+    s = D.loadState(p);
+    assert.equal(s.setAside.refused, 0);
+    assert.ok(s.lastSuccessAt);
+  } finally {
+    node.close();
+  }
+});
+
+test('retry: true in the refusal is honoured without the text', async () => {
+  const { p, node, T } = await busyRun(['busyRetry', 'ok']);
+  try {
+    const r1 = await cycle(p, { now: T });
+    assert.equal(r1.outcome.class, 'node-busy');
+    const r2 = await cycle(p, { now: T + D.BACKOFF_MS + MIN });
+    assert.equal(r2.outcome.ok, true);
+    assert.deepEqual(node.stored, ['Fact 1 of 1.']);
+    assert.equal(node.sends[1].idempotency_key, node.sends[0].idempotency_key);
+  } finally {
+    node.close();
+  }
+});
+
+test('after 5 busy answers the record is set aside and counted, and the pipeline goes on', async () => {
+  const { p, node, T } = await busyRun(['busy', 'busy', 'busy', 'busy', 'busy']);
+  try {
+    let r;
+    for (let i = 0; i < 4; i++) {
+      r = await cycle(p, { now: T + i * (D.BACKOFF_MS + MIN) });
+      assert.equal(r.outcome.class, 'node-busy', `answer ${i + 1} holds the record`);
+    }
+    r = await cycle(p, { now: T + 4 * (D.BACKOFF_MS + MIN) });
+    assert.equal(r.outcome.ok, true, 'the fifth busy answer sets it aside');
+    assert.equal(r.outcome.refused, 1);
+    assert.equal(node.sends.length, 5);
+    assert.equal(new Set(node.sends.map((x) => x.idempotency_key)).size, 1, 'one key for every attempt');
+    const s = D.loadState(p);
+    assert.equal(s.outbox, null);
+    assert.equal(s.setAside.refused, 1);
+    assert.deepEqual(node.stored, []);
+  } finally {
+    node.close();
+  }
 });
 
 test('an outbox line damaged after distil_done is set aside; the intact records are still delivered and the pipeline goes on', async () => {
