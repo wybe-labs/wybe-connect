@@ -22,7 +22,7 @@ import { connect as defaultConnect, refreshTokens, ALL_SCOPES } from './oauth.js
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, writeJsonPrivate } from './home.js';
 import { spoolRemember, spoolDone } from './distil.js';
-import { redactValue } from './redact.js';
+import { redactToolArguments } from './tool-args.js';
 
 export const SERVER_INFO = Object.freeze({ name: 'wybe', version: '0.2.0' });
 
@@ -255,10 +255,11 @@ export function createProxy({ paths, clientName = 'wybe-connect (Claude Code)', 
         if (name === CONNECT_TOOL.name) return reply(await callConnect(params?.arguments));
         if (!credentials()) return reply(text('Not connected to a Wybe AI colleague yet. Call `connect` with the colleague\'s address first.', true));
         // Every argument passes through redactValue before it leaves the machine; one the walker
-        // cannot read is refused rather than forwarded.
+        // cannot read is refused rather than forwarded. send_file's file is redacted as a file
+        // (lib/tool-args.js): a text file line by line, a binary file unchanged.
         let args;
         try {
-          args = redactValue(params?.arguments ?? {}).value;
+          args = redactToolArguments(name, params?.arguments ?? {}).value;
         } catch {
           return reply(text('Not delivered: the arguments could not be checked for secrets, so nothing was sent.', true));
         }
