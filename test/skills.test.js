@@ -16,7 +16,7 @@ const PACKAGES = ['claude-code', 'codex', 'cursor'];
 
 const STEPS = {
   'claude-code': ['Take the node URL from the sentence.', 'Make sure the plugin is installed.', 'Sign in once:', 'Confirm'],
-  codex: ['Take the address from the sentence.', 'Run the OAuth flow', 'Add the MCP server for the interactive tools', 'Offer the standing line for `~/.codex/AGENTS.md`', 'Confirm'],
+  codex: ['Take the address from the sentence.', 'Run the OAuth flow', 'Offer the standing line for `~/.codex/AGENTS.md`', 'Confirm'],
   cursor: ['Take the address from the sentence.', 'Run the OAuth flow', 'Add the MCP server for the interactive tools', 'Confirm'],
 };
 

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "wybe": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/bin/mcp-proxy.js"]
+    }
+  }
+}

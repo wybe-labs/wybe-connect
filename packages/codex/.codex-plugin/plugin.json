@@ -1,7 +1,7 @@
 {
   "name": "wybe-connect",
-  "version": "0.1.0",
-  "description": "Feeds your Wybe AI colleague from Codex. Hooks send redacted session deltas per the OAuth scopes you granted (sessions:light = your own prompts and metadata; sessions:full = also assistant output and tool I/O); the connect skill pairs this machine once. Write-only: nothing is ever read back.",
+  "version": "0.2.0",
+  "description": "Feeds your Wybe AI colleague from Codex with the essence of your work: a background distil on your machine (codex exec) turns your sessions into short, redacted work facts and delivers each exactly once; on first connect it imports your last 30 days of Codex sessions by itself. Nothing raw leaves the machine. The plugin's own MCP server and the connect skill pair this machine once. Write-only: nothing is ever read back.",
   "author": {
     "name": "Wybe Labs AS"
   },

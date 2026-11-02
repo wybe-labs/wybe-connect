@@ -6,8 +6,9 @@
 //
 // Outcomes are values, not exceptions:
 //   { ok: true,  result, openQuestions }
-//   { ok: false, kind: 'auth' | 'network' | 'server' | 'protocol', status?, message, toolError? }
+//   { ok: false, kind: 'auth' | 'network' | 'server' | 'protocol', status?, message, toolError?, retry? }
 // toolError: true when the node answered the call with isError: it refused this call, it was not down.
+// retry: true when that refusal says so (structuredContent.retry): the call may succeed later as it is.
 
 export const PROTOCOL_VERSION = '2025-06-18';
 const CLIENT_INFO = { name: 'wybe-connect', version: '0.1.0' };
@@ -125,7 +126,7 @@ export async function callTool({ endpoint, accessToken, name, args, fetchImpl = 
   const result = call.result ?? {};
   if (result.isError === true) {
     const text = Array.isArray(result.content) ? result.content.map((c) => c?.text ?? '').join(' ') : '';
-    return { ok: false, kind: 'server', toolError: true, message: `tool error: ${text.slice(0, 200)}` };
+    return { ok: false, kind: 'server', toolError: true, ...(result.structuredContent?.retry === true ? { retry: true } : {}), message: `tool error: ${text.slice(0, 200)}` };
   }
   return { ok: true, result, openQuestions: openQuestionsOf(result) };
 }

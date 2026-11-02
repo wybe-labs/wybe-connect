@@ -1,20 +1,30 @@
 #!/usr/bin/env node
 // SessionStart hook. A hook has no MCP client, so it cannot call pending_questions itself; it
 // reads the open questions the last tool response carried (the plugin's MCP server stores them)
-// and hands them to Claude as additionalContext together with the standing instruction. A
-// background distil problem is told once per kind (lib/distil.js distilNotice). Exit 0 always.
+// and hands them to Claude as additionalContext together with the standing instruction. It also
+// fixes which connection this session uses (lib/connections.js) and, when there are several, says
+// so. A background distil problem of that connection is told once per kind (lib/distil.js
+// distilNotice). Exit 0 always.
 
+import { fileURLToPath } from 'node:url';
 import { readHookInput, failOpen } from '../lib/hook-io.js';
-import { paths, harnessHome, loadCredentials, readJson } from '../lib/home.js';
+import { homePath, loadCredentials, readJson } from '../lib/home.js';
+import { prunePins, sessionPaths, sessionNote } from '../lib/connections.js';
 import { buildContext } from '../lib/session-context.js';
 import { DISTIL_ENV, distilNotice } from '../lib/distil.js';
 
 try {
-  await readHookInput();
+  const input = await readHookInput();
   if (!process.env[DISTIL_ENV]) {
-    const p = paths(harnessHome('claude-code'));
+    const sessionId = typeof input.session_id === 'string' ? input.session_id : null;
+    const root = homePath();
+    // this session first, so pruning the others can never reset it
+    const p = sessionPaths(root, { sessionId, transcriptPath: typeof input.transcript_path === 'string' ? input.transcript_path : null });
+    prunePins(root, { exceptSessionId: sessionId });
     const credentials = loadCredentials(p);
-    const context = buildContext({ credentials, cached: readJson(p.openQuestions) });
+    let context = buildContext({ credentials, cached: readJson(p.openQuestions) });
+    const note = sessionNote(root, p.connection, { sessionId, command: `node "${fileURLToPath(new URL('../bin/connect.js', import.meta.url))}"` });
+    context = [context, note].filter(Boolean).join('\n');
     const notice = credentials ? distilNotice(p) : null;
     const all = [context, notice].filter(Boolean).join('\n');
     if (all) {
