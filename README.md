@@ -5,10 +5,12 @@ ChatGPT (Codex) and Cursor: it lets a person's coding harness (Claude Code, Code
 their Wybe AI colleague (their Wybe node), and carries the standing texts for assistants without
 hooks (Claude Desktop / claude.ai, ChatGPT). Three promises, in order of importance:
 
-1. **Only sends.** There is no tool, scope or code path by which the harness reads anything
-   from the node. The node retrieves and acts on its own. The one thing that comes back is a
-   task the person gave their colleague for an open session; one that needs their yes is shown
-   to them first. For how, see "Tasks from the colleague".
+1. **Only sends.** The node never reads this machine, and there is no tool, scope or code path
+   by which the harness reads the node's memory or context. The node retrieves and acts on its
+   own. Two things come back: a task the person gave their colleague for an open session (Claude
+   Code and Codex), and one that needs their yes is shown to them first; and the colleague's open
+   questions, shown at session start, which the person may answer or not. For how, see "Tasks
+   from the colleague" and "How it works".
 2. **Redacts on your machine first.** Credentials, connection strings, private keys, Norwegian
    national identity numbers and (by default) e-mail addresses are replaced with
    `[REDACTED:<family>]` before anything leaves the laptop. Pattern-based and deterministic; no
@@ -202,8 +204,9 @@ generated from `texts/standing.json`, the file the node's connect cards pin agai
 ## Tasks from the colleague
 
 The person's Wybe AI colleague knows every Claude Code and Codex session on the machine, open or
-closed. The person can ask it to hand a task to one of the open ones, and to read the result. This is the only thing that ever comes from the node:
-the person's own words for a task, never anything the colleague knows.
+closed. The person can ask it to hand a task to one of the open ones, and to read the result.
+Besides the colleague's open questions (see "How it works"), this is the only thing that comes
+from the node: the person's own words for a task, never anything the colleague knows.
 
 - **Which sessions are open.** Each session's hooks send `sessions_report`: the session id,
   harness, project (the last segment of the working directory, never the path), a title (the
@@ -379,9 +382,14 @@ the node's `/mcp` with that grant (one refresh on 401). One grant, one sign-in; 
 never in `.mcp.json`, so a marketplace install works for everyone. (`bin/connect.js` still runs
 the flow from a terminal.)
 
-**Open questions.** A hook cannot call `pending_questions`. Every tool response carries
-`open_questions[]`; `flush.js` caches the last set and `session-start.js` hands it to Claude
-at the next session start, together with the standing instruction.
+**Open questions.** The second thing that comes back from the node, besides a task. A hook
+cannot call `pending_questions`. Every tool response carries `open_questions[]`; the plugin
+caches the last set (Claude Code and Codex: from its MCP server's answers; Cursor: from the
+`stop` hook's sends), and the SessionStart hook hands up to three, each cleaned to one line of
+at most 300 characters, to the model at the next session start, together with the standing
+instruction: ask one when it fits. The person answers (sent with `remember` and its `answers`)
+or not. Cursor also puts at most one as a `stop` follow-up after a completed turn, never the
+same one twice within 14 days (`packages/cursor/README.md`, "The followup guard").
 
 **Failure posture.** Every hook exits 0 whatever happens, writes at most one line to stderr,
 and never prints a token or a payload. An unreachable node queues the delta locally; the next
@@ -447,10 +455,11 @@ and two scans of the added lines (`scripts/leak-scan.mjs` for e-mail addresses a
 ## Kort på norsk
 
 `wybe-connect` er den åpne (MIT) klientsiden som lar kodeassistenten din (Claude Code, Codex,
-Cursor) mate KI-kollegaen din i Wybe. Den **sender bare** — det eneste som kommer tilbake er en oppgave
-du selv har gitt KI-kollegaen til en åpen økt, og en oppgave som trenger ditt ja, vises deg først.
-Alt **sladdes på din
-maskin først** (nøkler, passord i tilkoblingsstrenger, private nøkler, fødselsnummer,
+Cursor) mate KI-kollegaen din i Wybe. Den **sender bare** og leser aldri det KI-kollegaen vet.
+To ting kommer tilbake: en oppgave du selv har gitt KI-kollegaen til en åpen økt (en oppgave som
+trenger ditt ja, vises deg først), og KI-kollegaens åpne spørsmål, som vises når en økt starter,
+og som du svarer på eller lar være. Alt **sladdes på din maskin først** (nøkler, passord i
+tilkoblingsstrenger, private nøkler, fødselsnummer,
 e-postadresser). Hvor mye som deles velger du én gang, på samtykkeskjermen på `auth.wybe.me`:
 
 - **Fakta og prosjekter** (`remember`): varige fakta om jobben din som Claude velger å lagre.

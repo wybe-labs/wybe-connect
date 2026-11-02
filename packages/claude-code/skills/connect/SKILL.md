@@ -14,10 +14,12 @@ The person pasted (or said) one of these, with their own node URL:
 Your job: pair this machine with that node once. The first sync is not yours to run: the node
 asks for it by itself when the connection is made (an import), and the plugin runs it in the
 background. Everything the
-plugin sends afterwards is **redacted on this machine first**, and the plugin **only sends** (the
-node never reads this machine): the one thing that comes back is a task the person gave their
-colleague for an open session, and one that needs their yes is shown to them first. Say that in
-one sentence before you start; the person is granting access to their work context and should
+plugin sends afterwards is **redacted on this machine first**, and the plugin **only sends**: the
+node never reads this machine, and the plugin never reads what the colleague knows.
+Two things come back: a task the person gave their colleague for an open session, and one that
+needs their yes is shown to them first; and the colleague's open questions, shown at session
+start, which the person may answer or not. Say that briefly before you start; the person is
+granting access to their work context and should
 hear what it means.
 
 ## Steps
@@ -62,8 +64,8 @@ hear what it means.
   `Authorization` header.
 - Never send anything personal, about other people, or any credential through `remember`.
   Work only ("kun jobb").
-- Never claim the node can be asked for anything back: the only thing that comes from it is a
-  task the person gave their colleague.
+- Never claim the colleague's memory or context can be read: the only things that come from it
+  are a task the person gave their colleague and the colleague's open questions.
 
 ## Tasks from the colleague (after pairing)
 

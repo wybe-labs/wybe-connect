@@ -79,7 +79,8 @@ const SKILLS = ['claude-code', 'codex', 'cursor'].map((h) => `packages/${h}/skil
 const PLUGIN_TEXTS = [...['claude-code', 'codex', 'cursor'].map((h) => `packages/${h}/README.md`), ...SKILLS];
 const read = (f) => readFileSync(join(ROOT, f), 'utf8');
 const flat = (t) => t.replace(/\s+/g, ' ');
-const TASK_EXCEPTION = 'Sends only; the one thing that comes back is a task you gave your colleague for an open session, and one that needs your yes is shown to you first';
+const TASK_EXCEPTION = "Sends only, and never reads what your colleague knows; two things come back: a task you gave your colleague for an open session (one that needs your yes is shown to you first), and your colleague's open questions, shown at session start for you to answer or not";
+const CURSOR_EXCEPTION = "Sends only, and never reads what your colleague knows; the one thing that comes back is your colleague's open questions, shown at session start and at most one after a turn as a follow-up, for you to answer or not";
 
 test('no «KI-assistenter», «Andre KI» or «Importer» in the README, package.json or any manifest', () => {
   for (const f of PUBLIC_TEXTS) {
@@ -89,11 +90,12 @@ test('no «KI-assistenter», «Andre KI» or «Importer» in the README, package
   for (const f of MANIFESTS) JSON.parse(read(f));
 });
 
-test('the README keeps «Only sends» together with its one exception, the task', () => {
+test('the README keeps «Only sends» together with the two things that come back: the task and the open questions', () => {
   const promise = flat(readme.slice(readme.indexOf('1. **Only sends.**'), readme.indexOf('2. **Redacts')));
   assert.ok(promise.length > 0, 'the README states the «Only sends» promise first');
-  assert.match(promise, /The one thing that comes back is a task the person gave their colleague for an open session; one that needs their yes is shown to them first\./);
-  assert.match(flat(readme), /sender bare\*\* — det eneste som kommer tilbake er en oppgave du selv har gitt KI-kollegaen til en åpen økt, og en oppgave som trenger ditt ja, vises deg først\./);
+  assert.match(promise, /The node never reads this machine, and there is no tool, scope or code path by which the harness reads the node's memory or context\./);
+  assert.match(promise, /Two things come back: a task the person gave their colleague for an open session \(Claude Code and Codex\), and one that needs their yes is shown to them first; and the colleague's open questions, shown at session start, which the person may answer or not\./);
+  assert.match(flat(readme), /sender bare\*\* og leser aldri det KI-kollegaen vet\. To ting kommer tilbake: en oppgave du selv har gitt KI-kollegaen til en åpen økt \(en oppgave som trenger ditt ja, vises deg først\), og KI-kollegaens åpne spørsmål, som vises når en økt starter, og som du svarer på eller lar være\./);
 });
 
 test('every «see "…"» in the README names a heading the README has', () => {
@@ -108,21 +110,26 @@ test('no manifest says «write-only»: each says it sends only, and what comes b
   for (const f of ['packages/claude-code/.claude-plugin/plugin.json', 'packages/codex/.codex-plugin/plugin.json', '.claude-plugin/marketplace.json']) {
     assert.ok(read(f).includes(TASK_EXCEPTION), f);
   }
-  assert.match(read('package.json'), /the one thing that comes back is a task you gave your colleague for an open session, and one that needs your yes is shown to you first/);
+  for (const f of ['packages/cursor/.cursor-plugin/plugin.json', '.cursor-plugin/marketplace.json']) assert.ok(read(f).includes(CURSOR_EXCEPTION), f);
+  assert.match(read('package.json'), /never reads what the colleague knows; two things come back: a task you gave your colleague for an open session \(one that needs your yes is shown to you first\), and your colleague's open questions, shown at session start for you to answer or not/);
   // A task in mode run carries its text at once (the person said yes to the colleague); only a
   // task that needs the person's yes is shown first. No text may say every task is.
   for (const f of [...PUBLIC_TEXTS, ...PLUGIN_TEXTS]) assert.doesNotMatch(flat(read(f)), /open session, shown to you first/, f);
+  // The open questions come back too (every SessionStart hook shows them; Cursor's stop may ask one), so no text
+  // may say a task is the only thing, or that nothing comes back.
+  for (const f of [...PUBLIC_TEXTS, ...PLUGIN_TEXTS]) assert.doesNotMatch(flat(read(f)), /the one thing that comes back is a task|nothing comes back|the flow is one way|only thing that (?:ever )?comes from (?:it|the node) is a task/i, f);
 });
 
-test('the connect skills say the plugin only sends, with the same exception, and never «write-only»', () => {
+test('the connect skills say the plugin only sends, with what comes back, and never «write-only»', () => {
   for (const f of SKILLS) assert.doesNotMatch(read(f), /write-only/i, f);
   for (const h of ['claude-code', 'codex']) {
     const t = flat(read(`packages/${h}/skills/connect/SKILL.md`));
     assert.match(t, /\*\*only sends\*\*/, h);
-    assert.ok(t.includes('the one thing that comes back is a task the person gave their colleague for an open session, and one that needs their yes is shown to them first'), h);
+    assert.ok(t.includes('the node never reads this machine, and the plugin never reads what the colleague knows'), h);
+    assert.ok(t.includes("Two things come back: a task the person gave their colleague for an open session, and one that needs their yes is shown to them first; and the colleague's open questions, shown at session start, which the person may answer or not"), h);
     assert.doesNotMatch(t, /the flow is one way/, h);
   }
-  assert.match(flat(read('packages/cursor/skills/connect/SKILL.md')), /\*\*only sends\*\* \(nothing comes back into Cursor\)/);
+  assert.match(flat(read('packages/cursor/skills/connect/SKILL.md')), /\*\*only sends\*\*: the node never reads this machine, and the plugin never reads what the colleague knows\. The one thing that comes back is the colleague's open questions, shown at session start and at most one after a turn as a follow-up, which the person may answer or not\./);
 });
 
 test('no «Importer» button in the plugin READMEs or the connect skills', () => {

@@ -14,8 +14,10 @@ The person pasted (or said) one of these, with their own address:
 Your job: pair this machine with that address once. The first sync is not a step here: the
 colleague asks for it by itself when the connection is made (an import request in its tool
 answers), and its own instructions say how to answer it. Everything the
-plugin sends afterwards is **redacted on this machine first**, and the plugin **only sends**
-(nothing comes back into Cursor). Say that in one sentence before you start.
+plugin sends afterwards is **redacted on this machine first**, and the plugin **only sends**: the
+node never reads this machine, and the plugin never reads what the colleague knows. The one thing
+that comes back is the colleague's open questions, shown at session start and at most one after a
+turn as a follow-up, which the person may answer or not. Say that briefly before you start.
 
 The plugin root is the directory two levels above this `SKILL.md` (it holds `bin/` and `hooks/`).
 
@@ -53,4 +55,5 @@ The plugin root is the directory two levels above this `SKILL.md` (it holds `bin
 - Never read or print a credential file, a `wat_`/`wrt_` token, or an `Authorization` header.
 - Never send anything personal, about other people, or any credential through `remember`.
   Work only ("kun jobb").
-- Never claim anything can be read back from Wybe: the flow is one way.
+- Never claim the colleague's memory or context can be read: the only thing that comes from it is
+  the colleague's open questions.

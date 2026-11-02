@@ -1,7 +1,7 @@
 {
   "name": "@wybe-labs/wybe-connect",
   "version": "0.1.0",
-  "description": "Lets a coding harness (Claude Code, Codex, Cursor) feed a person's Wybe node: redacts on the laptop, sends only what the granted OAuth scopes allow; the one thing that comes back is a task you gave your colleague for an open session, and one that needs your yes is shown to you first.",
+  "description": "Lets a coding harness (Claude Code, Codex, Cursor) feed a person's Wybe node: redacts on the laptop, sends only what the granted OAuth scopes allow and never reads what the colleague knows; two things come back: a task you gave your colleague for an open session (one that needs your yes is shown to you first), and your colleague's open questions, shown at session start for you to answer or not.",
   "private": false,
   "type": "module",
   "license": "MIT",

@@ -1,7 +1,7 @@
 {
   "name": "wybe-connect",
   "version": "0.2.0",
-  "description": "Feeds your Wybe AI colleague from Codex with the essence of your work: a background distil on your machine (codex exec) turns your sessions into short, redacted work facts and delivers each exactly once; on first connect it imports every Codex session still on your machine by itself. Nothing raw leaves the machine. The plugin's own MCP server and the connect skill pair this machine once. Sends only; the one thing that comes back is a task you gave your colleague for an open session, and one that needs your yes is shown to you first.",
+  "description": "Feeds your Wybe AI colleague from Codex with the essence of your work: a background distil on your machine (codex exec) turns your sessions into short, redacted work facts and delivers each exactly once; on first connect it imports every Codex session still on your machine by itself. Nothing raw leaves the machine. The plugin's own MCP server and the connect skill pair this machine once. Sends only, and never reads what your colleague knows; two things come back: a task you gave your colleague for an open session (one that needs your yes is shown to you first), and your colleague's open questions, shown at session start for you to answer or not.",
   "author": {
     "name": "Wybe Labs AS"
   },
