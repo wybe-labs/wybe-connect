@@ -335,6 +335,12 @@ export function finishOnStop(p, sessionId, { lastMessage = '', failed = false, t
   });
 }
 
+/**
+ * A refusal that says the node is busy for now (its budget or rate limit): `retry: true` on the answer, or failing
+ * that, the words "try again later". The call may succeed later exactly as it is.
+ */
+export const busyRefusal = (out) => !out.ok && out.toolError === true && (out.retry === true || /try again later/i.test(String(out.message ?? '')));
+
 /** A send claim nobody will finish: its process is gone, or it is older than any send can take (a reused pid). */
 const claimStale = (c, t) => !c || typeof c.token !== 'string' || !isAlive(c.pid) || !(t - Date.parse(c.at) < SEND_CLAIM_MAX_MS);
 
@@ -342,8 +348,8 @@ const claimStale = (c, t) => !c || typeof c.token !== 'string' || !isAlive(c.pid
  * Sends every finished result, each exactly once whoever flushes (the Stop hook, the poller, take_task):
  * under the tasks lock a sender first claims a finished task (task.sending, with its own token), and
  * only the claim's holder sends it. The node's answer settles it as reported (a refusal too: already
- * has one, not this session's); a call that did not reach the node gives the claim back for the next
- * round. A claim whose sender died is taken over.
+ * has one, not this session's); a call that did not reach the node, or one the node is too busy to
+ * take now (busyRefusal), gives the claim back for the next round. A claim whose sender died is taken over.
  */
 export async function flushResults(p, sessionId, { fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   if (!bridgeDir(p) || !existsSync(sessionFiles(p, sessionId).tasks)) return 0;
@@ -361,7 +367,7 @@ export async function flushResults(p, sessionId, { fetchImpl = globalThis.fetch,
   let sent = 0;
   for (const task of mine) {
     const out = await nodeCall(p, 'task_result', { task_id: task.id, session_id: sessionId, status: task.result.status, text: task.result.text }, { fetchImpl, now });
-    const settled = out.ok || Boolean(out.toolError);
+    const settled = (out.ok || Boolean(out.toolError)) && !busyRefusal(out);
     withTasks(p, sessionId, (st) => {
       const t = st.tasks[task.id];
       if (!t || t.status !== 'finished' || t.sending?.token !== token) return;

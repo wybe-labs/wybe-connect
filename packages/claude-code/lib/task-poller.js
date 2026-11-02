@@ -20,6 +20,7 @@ import { existsSync, openSync, readSync, closeSync, fstatSync } from 'node:fs';
 import { join, delimiter } from 'node:path';
 import { harnessHome } from './home.js';
 import { sessionPaths } from './connections.js';
+import { accountOf } from './session-info.js';
 import { parseRollout } from './codex-rollout.js';
 import { DISTIL_ENV } from './distil.js';
 import {
@@ -112,7 +113,7 @@ export function lastPromptOf(path) {
 function sessionOf(harness, input, env) {
   const sessionId = str(input?.session_id);
   if (!sessionId || env[DISTIL_ENV]) return null;
-  const p = sessionPaths(harnessHome(harness), { sessionId, env });
+  const p = sessionPaths(harnessHome(harness), { sessionId, env, account: () => accountOf(harness, env) });
   return p.connection ? { p, sessionId } : null;
 }
 

@@ -2,8 +2,11 @@
 //   discover   the node's protected-resource metadata names the authorization server, whose
 //              RFC 8414 document names the endpoints (S256 required)
 //   loopback   a one-shot http server on 127.0.0.1:<random port> receives the code
-//   client     Claude Code and Codex use a fixed public client (STATIC_CLIENTS); others register
-//              (RFC 7591) with exactly that loopback redirect_uri
+//   client     each harness uses a fixed public client (STATIC_CLIENTS); a caller without one
+//              registers (RFC 7591) with exactly that loopback redirect_uri
+//   account    the harness account the sign-in is for goes to /authorize as `account_hint`, so the
+//              consent screen keeps a second account apart from the first; only the URL the browser
+//              opens carries it, never the one shown or logged
 //   resource   asked for the node's /mcp endpoint; a token answer naming another resource is refused
 //   browser    opened by spawning the platform opener with the URL as an argument (never a shell)
 //   exchange   code + verifier -> access + refresh tokens (RFC 8707 `resource` = the node's /mcp endpoint)
@@ -22,10 +25,14 @@ const REQUIRED_METADATA = ['issuer', 'authorization_endpoint', 'token_endpoint',
 /**
  * The fixed public clients the authorization server knows (no dynamic registration): PKCE, no
  * secret, a loopback redirect on any port. A fixed id lets the node tell which harness a grant is
- * for, and a second sign-in from the same harness is the same client, not a new one. Cursor has
- * none and still registers.
+ * for, and a second sign-in from the same harness is the same client, not a new one.
  */
-export const STATIC_CLIENTS = Object.freeze({ 'claude-code': 'wybe-connect-claude-code', codex: 'wybe-connect-codex' });
+export const STATIC_CLIENTS = Object.freeze({ 'claude-code': 'wybe-connect-claude-code', codex: 'wybe-connect-codex', cursor: 'wybe-connect-cursor' });
+
+/** The harness a fixed client id stands for, or null. */
+export function harnessOf(clientId) {
+  return Object.keys(STATIC_CLIENTS).find((h) => STATIC_CLIENTS[h] === clientId) ?? null;
+}
 
 /** true / false when both are URLs (a trailing slash is the same endpoint), null when one is not. */
 function sameResource(a, b) {
@@ -142,7 +149,7 @@ export async function register({ metadata, redirectUri, scopes, fetchImpl = glob
   return { clientId: body.client_id };
 }
 
-export function authorizeUrl({ metadata, clientId, redirectUri, scopes, state, challenge, resource }) {
+export function authorizeUrl({ metadata, clientId, redirectUri, scopes, state, challenge, resource, accountHint = null }) {
   const u = new URL(metadata.authorization_endpoint);
   u.searchParams.set('response_type', 'code');
   u.searchParams.set('client_id', clientId);
@@ -152,6 +159,7 @@ export function authorizeUrl({ metadata, clientId, redirectUri, scopes, state, c
   u.searchParams.set('code_challenge', challenge);
   u.searchParams.set('code_challenge_method', 'S256');
   u.searchParams.set('resource', resource);
+  if (accountHint) u.searchParams.set('account_hint', accountHint);
   return u.toString();
 }
 
@@ -319,9 +327,11 @@ export function openBrowser(url, { platform = process.platform, spawnImpl = spaw
  * `onUrl(url)` receives the authorization URL (public challenge and state only) as soon as it is
  * known, for a caller that shows it itself (lib/mcp-proxy.js).
  * `clientId` is a fixed client (STATIC_CLIENTS): no registration. Without it, `clientName` names
- * the harness for a dynamic registration (Cursor).
+ * the harness for a dynamic registration.
+ * `harnessAccount` (the harness's own sign-in, lib/session-info.js accountOf) is sent as
+ * `account_hint` in the URL the browser opens only, and kept on the credentials.
  */
-export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientId: fixedClientId = null, clientName = 'wybe-connect (Claude Code)', fetchImpl = globalThis.fetch, spawnImpl = spawn, platform = process.platform, timeoutMs = 5 * 60_000, log = () => {}, onUrl = () => {}, now = Date.now } = {}) {
+export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientId: fixedClientId = null, clientName = 'wybe-connect (Claude Code)', harnessAccount = null, fetchImpl = globalThis.fetch, spawnImpl = spawn, platform = process.platform, timeoutMs = 5 * 60_000, log = () => {}, onUrl = () => {}, now = Date.now } = {}) {
   const d = await discover(nodeUrl, { fetchImpl });
   log(`authorization server: ${d.issuer}`);
   const state = randomBytes(16).toString('base64url');
@@ -337,9 +347,10 @@ export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientId: fixedCli
       throw err;
     }
   }
-  const url = authorizeUrl({ metadata: d.metadata, clientId, redirectUri, scopes, state, challenge, resource: d.resource });
+  const request = { metadata: d.metadata, clientId, redirectUri, scopes, state, challenge, resource: d.resource };
+  const url = authorizeUrl(request); // shown and logged: without the account
   onUrl(url);
-  const opened = openBrowser(url, { platform, spawnImpl });
+  const opened = openBrowser(authorizeUrl({ ...request, accountHint: harnessAccount }), { platform, spawnImpl });
   log(opened ? `browser opened; if nothing appeared, open this URL yourself:\n${url}` : `open this URL in your browser:\n${url}`);
   const { code } = await loop.result;
   const tokens = await exchangeCode({ metadata: d.metadata, clientId, code, verifier, redirectUri, resource: d.resource, requestedScopes: scopes, fetchImpl, now: now() });
@@ -351,6 +362,7 @@ export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientId: fixedCli
     tokenEndpoint: d.metadata.token_endpoint,
     clientId,
     connectedAt: new Date(now()).toISOString(),
+    ...(harnessAccount ? { harnessAccount } : {}),
     ...tokens,
   };
 }
