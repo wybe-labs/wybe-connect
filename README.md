@@ -200,8 +200,8 @@ generated from `texts/standing.json`, the file the node's connect cards pin agai
 
 ## Tasks from the colleague
 
-The person can ask their Wybe AI colleague to hand a task to one of their open Claude Code or
-Codex sessions, and to read the result. This is the only thing that ever comes from the node:
+The person's Wybe AI colleague knows every Claude Code and Codex session on the machine, open or
+closed. The person can ask it to hand a task to one of the open ones, and to read the result. This is the only thing that ever comes from the node:
 the person's own words for a task, never anything the colleague knows.
 
 - **Which sessions are open.** Each session's hooks send `sessions_report`: the session id,
@@ -211,6 +211,20 @@ the person's own words for a task, never anything the colleague knows.
   `auth.json`'s id token, decoded on the machine; no token is ever read out or sent), when it
   started, when it was last active, and open or closed. At start, every 5 minutes while open,
   and at the end.
+- **Every other session on the machine.** The colleague sees all of the person's sessions, not
+  only the ones the plugin ran in: each session's poller also scans every Claude Code
+  transcript (`projects/<dir>/<session>.jsonl`) or Codex rollout (`sessions/`,
+  `archived_sessions/`) still on disk and reports the ones that changed (an open one also
+  hourly, so the node keeps it open), at most 25 per call,
+  open first (`lib/session-scan.js`). A session is open while Claude Code's own mark of a
+  running session has a live process, while its hooks say it has not ended, or while its
+  transcript was written in the last 10 minutes; else closed. `can_take_tasks` is true only for
+  an open session the plugin's hooks run in, the only ones a task can reach. With
+  `sessions:full`, each carries the short summary the background distil wrote for it,
+  redacted, at most 600 characters; never transcript text. A session goes only to the
+  connection its harness account uses: a pinned session to its pin, any other to the
+  connection a new session of the signed-in account would use. Subagent threads and the
+  distil's own runs are left out. Only one process scans a connection at a time.
 - **Delivery into the live session.** A poller per session asks the node's `inbox` for that
   session's tasks about every 20 s (backing off while the node is down).
   - Claude Code: `hooks/task-wait.js` is an `asyncRewake` hook on SessionStart, Stop and

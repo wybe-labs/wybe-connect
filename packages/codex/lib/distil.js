@@ -1309,6 +1309,14 @@ export function buildPrompt(plan) {
       : 'These memory files are new or changed since they were last read; read them whole too, and use only what is new in them:');
     for (const f of memory) lines.push(`- ${f.path}`);
   }
+  const sessions = new Map(plan.transcripts.filter((t) => t.sessionId).map((t) => [t.sessionId, t.path]));
+  if (sessions.size) {
+    lines.push(
+      '',
+      `Also write one short summary of each session above: what the person is working on there and where it stands, at most 400 characters, work only (no secrets, code, file contents or anything personal). Send them in one ${codex ? 'wybe_distil' : 'wybe'} remember call of their own, before the facts: one item per session, with session_id set to the session's id and category session-summary. They stay on this machine for the colleague's list of the person's sessions and are never sent as a fact. The sessions (id: transcript):`,
+      ...[...sessions].map(([id, path]) => `- ${id}: ${path}`),
+    );
+  }
   lines.push(
     '',
     'Then:',

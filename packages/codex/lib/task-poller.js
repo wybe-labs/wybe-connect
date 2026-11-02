@@ -144,7 +144,7 @@ export async function claudeHook(input, { env = process.env, stderr = process.st
     finishOnStop(s.p, s.sessionId, { failed: true, lastMessage: str(input.last_assistant_message) ?? `The turn stopped on an error${why ? `: ${why.slice(0, 200)}` : ''}.` });
   }
   touch(s, 'claude-code', input);
-  const out = await runPoller({ paths: s.p, sessionId: s.sessionId, runStatus: 'running', env, fetchImpl, onTasks: async () => 'stop' });
+  const out = await runPoller({ paths: s.p, sessionId: s.sessionId, harness: 'claude-code', runStatus: 'running', env, fetchImpl, onTasks: async () => 'stop' });
   if (out.exit !== 'stop') return 0;
   stderr.write(`${out.tasks.map(noticeFor).join('\n\n')}\n`);
   return 2;
@@ -200,7 +200,7 @@ export async function binMain(argv, { env = process.env, fetchImpl = globalThis.
   }
   if (cmd === 'poll' && harness === 'codex') {
     await runPoller({
-      paths: p, sessionId, runStatus: 'delivered', env, fetchImpl,
+      paths: p, sessionId, harness: 'codex', runStatus: 'delivered', env, fetchImpl,
       onTasks: async (tasks) => {
         for (const task of tasks) {
           if (!(await queueIntoCodex(sessionId, noticeFor(task), { env, spawnImpl }))) leaveNotice(p, sessionId, task.id);
