@@ -23,7 +23,7 @@ export function sessionScopeOf(scopes) {
 }
 
 export function transcriptIdOf(transcriptPath) {
-  return basename(transcriptPath).replace(/\.jsonl$/, '').replace(/[^A-Za-z0-9._-]/g, '_');
+  return basename(transcriptPath.replaceAll('\\', '/')).replace(/\.jsonl$/, '').replace(/[^A-Za-z0-9._-]/g, '_');
 }
 
 /** Whole lines before byte `offset` (a cursor written before it kept its line count). */
