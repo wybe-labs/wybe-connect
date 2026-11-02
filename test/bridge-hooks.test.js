@@ -237,6 +237,9 @@ const CXSID = '0190c0de-0000-7000-8000-00000000c0de';
 const cxInput = (s, event, extra = {}) => ({ session_id: CXSID, transcript_path: s.transcript, cwd: s.project, hook_event_name: event, model: 'gpt-5.5-codex', turn_id: 'turn-9', ...extra });
 const userTurn = (s, text) => appendFileSync(s.transcript, `${JSON.stringify({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'user_message', message: text } })}\n`);
 const lines = (f) => (existsSync(f) ? readFileSync(f, 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)) : []);
+// The Stop hook and the detached poller may both flush; whichever claims the result sends it, so the
+// result can land just after the hook exits. Once the task is reported, no sender may send it again.
+const reported = (cp, id) => { try { return JSON.parse(readFileSync(B.sessionFiles(cp, CXSID).tasks, 'utf8')).tasks[id]?.status === 'reported'; } catch { return false; } };
 
 test('Codex: SessionStart starts a detached poller that queues the task with codex queue (argv, no shell); the Stop of that turn sends the result', async () => {
   const node = await startFakeNode();
@@ -265,6 +268,7 @@ test('Codex: SessionStart starts a detached poller that queues the task with cod
     userTurn(s, argv[4]);
     const stop = await hook(CX, 'bridge.js', cxInput(s, 'Stop', { last_assistant_message: 'Changelog skrevet i CHANGELOG.md.' }), s.env).done;
     assert.deepEqual(stop, { code: 0, stdout: '', stderr: '' });
+    assert.ok(await waitFor(() => reported(cp, t.id)), 'the result is settled');
     assert.deepEqual(node.tool('task_result').map((c) => [c.args.task_id, c.args.session_id, c.args.status, c.args.text]), [[t.id, CXSID, 'done', 'Changelog skrevet i CHANGELOG.md.']]);
 
     const pid = JSON.parse(readFileSync(B.sessionFiles(cp, CXSID).poller, 'utf8')).pid;
@@ -296,6 +300,7 @@ test('Codex: when codex queue is not possible, the next Stop hands the notice ov
     assert.equal(node.tool('task_result').length, 0, 'the turn that got the block is not the task\'s');
     const second = await hook(CX, 'bridge.js', cxInput(s, 'Stop', { last_assistant_message: 'Testene kjørt: to feil.', stop_hook_active: true }), s.env).done;
     assert.equal(second.stdout, '', 'no second block');
+    assert.ok(await waitFor(() => reported(cp, t.id)), 'the result is settled');
     assert.deepEqual(node.tool('task_result').map((c) => [c.args.task_id, c.args.status, c.args.text]), [[t.id, 'done', 'Testene kjørt: to feil.']]);
   } finally {
     B.pausePoller(cp, CXSID);

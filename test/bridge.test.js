@@ -6,11 +6,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { randomUUID } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { connectionPaths } from '../lib/connections.js';
 import { saveCredentials, loadCredentials } from '../lib/home.js';
 import {
   pollOnce, noticeFor, taskMark, touchSession, reportSession, finishOnStop, flushResults, runPoller, findTask,
-  decideTask, leaveNotice, takeNotices, claimPoller, pausePoller, readSession, RESULT_MAX,
+  decideTask, leaveNotice, takeNotices, claimPoller, pausePoller, readSession, sessionFiles, RESULT_MAX,
 } from '../lib/bridge.js';
 import { startFakeNode, grantFor, TOKEN, REFRESH, NEW_TOKEN } from './fixtures/fake-node.mjs';
 
@@ -190,6 +191,71 @@ test('a result the node refuses for now (retry: true, else the words try again l
     node.results.set(u.id, {});
     assert.equal(await flushResults(p, SID), 0);
     assert.equal(findTask(p, u.id).task.status, 'reported', 'a refusal that does not say later is settled, not resent forever');
+  } finally {
+    await node.close();
+  }
+});
+
+/** A fetch that holds the first task_result call until release(); entered resolves when it is held. */
+function heldResultFetch() {
+  let enter;
+  let release;
+  const entered = new Promise((r) => { enter = r; });
+  const gate = new Promise((r) => { release = r; });
+  let held = false;
+  const fetchImpl = async (url, opts) => {
+    if (!held && typeof opts?.body === 'string' && opts.body.includes('"tools/call"') && opts.body.includes('"task_result"')) {
+      held = true;
+      enter();
+      await gate;
+    }
+    return fetch(url, opts);
+  };
+  return { fetchImpl, entered, release };
+}
+
+test('two senders at once (the Stop hook and the detached poller): a finished result reaches the node exactly once', async () => {
+  const node = await startFakeNode();
+  try {
+    const { p } = setup(node);
+    const t = task();
+    node.tasks.push(t);
+    await pollOnce(p, SID);
+    assert.equal(finishOnStop(p, SID, { lastMessage: 'Testene kjørt: to feil.' }), 1);
+    // The first sender has read the finished task and its task_result is in flight ...
+    const held = heldResultFetch();
+    const first = flushResults(p, SID, { fetchImpl: held.fetchImpl });
+    await held.entered;
+    // ... when the second sender looks at the same task.
+    const second = await flushResults(p, SID);
+    held.release();
+    const sent = (await first) + second;
+    assert.deepEqual(node.tool('task_result').map((c) => [c.args.task_id, c.args.text]), [[t.id, 'Testene kjørt: to feil.']]);
+    assert.equal(sent, 1);
+    assert.equal(findTask(p, t.id).task.status, 'reported');
+    assert.equal(await flushResults(p, SID), 0);
+    assert.equal(node.tool('task_result').length, 1);
+  } finally {
+    await node.close();
+  }
+});
+
+test('a sender that died mid-send leaves a claim no live process holds: the next flush takes it over and sends once', async () => {
+  const node = await startFakeNode();
+  try {
+    const { p } = setup(node);
+    const t = task();
+    node.tasks.push(t);
+    await pollOnce(p, SID);
+    finishOnStop(p, SID, { lastMessage: 'ferdig' });
+    const dead = spawnSync(process.execPath, ['-e', '']).pid;
+    const f = sessionFiles(p, SID);
+    const st = JSON.parse(readFileSync(f.tasks, 'utf8'));
+    st.tasks[t.id].sending = { token: 'gone', pid: dead, at: new Date().toISOString() };
+    writeFileSync(f.tasks, JSON.stringify(st));
+    assert.equal(await flushResults(p, SID), 1);
+    assert.deepEqual(node.tool('task_result').map((c) => c.args.task_id), [t.id]);
+    assert.equal(findTask(p, t.id).task.status, 'reported');
   } finally {
     await node.close();
   }
