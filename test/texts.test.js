@@ -61,3 +61,91 @@ test('the ChatGPT card carries the developer-mode step first; both cards use the
   assert.equal(texts.mcp_address_example, 'https://dittfirma.wybe.me/mcp');
   for (const s of stepLists) for (const list of [s.nb, s.en]) assert.ok(list.some((x) => x.includes(texts.mcp_address_example)));
 });
+
+// The README, package.json and every marketplace and plugin manifest: what a person reads before
+// installing. The services are named by their own names, the import has no button, and the one
+// exception to "sends only" is said wherever "sends only" is.
+const MANIFESTS = [
+  '.claude-plugin/marketplace.json',
+  '.agents/plugins/marketplace.json',
+  '.cursor-plugin/marketplace.json',
+  'packages/claude-code/.claude-plugin/plugin.json',
+  'packages/codex/.codex-plugin/plugin.json',
+  'packages/cursor/.cursor-plugin/plugin.json',
+];
+const PUBLIC_TEXTS = ['README.md', 'package.json', ...MANIFESTS];
+// What the plugin itself says: its READMEs, and the connect skills the model reads aloud.
+const SKILLS = ['claude-code', 'codex', 'cursor'].map((h) => `packages/${h}/skills/connect/SKILL.md`);
+const PLUGIN_TEXTS = [...['claude-code', 'codex', 'cursor'].map((h) => `packages/${h}/README.md`), ...SKILLS];
+const read = (f) => readFileSync(join(ROOT, f), 'utf8');
+const flat = (t) => t.replace(/\s+/g, ' ');
+const TASK_EXCEPTION = "Sends only, and never reads what your colleague knows; two things come back: a task you gave your colleague for an open session (one that needs your yes is shown to you first), and your colleague's open questions, shown at session start for you to answer or not";
+const CURSOR_EXCEPTION = "Sends only, and never reads what your colleague knows; the one thing that comes back is your colleague's open questions, shown at session start and at most one after a turn as a follow-up, for you to answer or not";
+
+test('no «KI-assistenter», «Andre KI» or «Importer» in the README, package.json or any manifest', () => {
+  for (const f of PUBLIC_TEXTS) {
+    const t = read(f);
+    for (const r of [/KI-assistent/i, /Andre KI/i, /«Importer»/]) assert.doesNotMatch(t, r, `${f}: ${r}`);
+  }
+  for (const f of MANIFESTS) JSON.parse(read(f));
+});
+
+test('the README keeps «Only sends» together with the two things that come back: the task and the open questions', () => {
+  const promise = flat(readme.slice(readme.indexOf('1. **Only sends.**'), readme.indexOf('2. **Redacts')));
+  assert.ok(promise.length > 0, 'the README states the «Only sends» promise first');
+  assert.match(promise, /The node never reads this machine, and there is no tool, scope or code path by which the harness reads the node's memory or context\./);
+  assert.match(promise, /Two things come back: a task the person gave their colleague for an open session \(Claude Code and Codex\), and one that needs their yes is shown to them first; and the colleague's open questions, shown at session start, which the person may answer or not\./);
+  assert.match(flat(readme), /sender bare\*\* og leser aldri det KI-kollegaen vet\. To ting kommer tilbake: en oppgave du selv har gitt KI-kollegaen til en åpen økt \(en oppgave som trenger ditt ja, vises deg først\), og KI-kollegaens åpne spørsmål, som vises når en økt starter, og som du svarer på eller lar være\./);
+});
+
+test('every «see "…"» in the README names a heading the README has', () => {
+  const headings = readme.split('\n').filter((l) => /^#{1,4} /.test(l)).map((l) => l.replace(/^#+ /, ''));
+  const refs = [...flat(readme).matchAll(/see "([^"]+)"/g)].map((m) => m[1]);
+  assert.ok(refs.length > 0);
+  for (const r of refs) assert.ok(headings.some((h) => h.startsWith(r)), `no heading «${r}»`);
+});
+
+test('no manifest says «write-only»: each says it sends only, and what comes back', () => {
+  for (const f of MANIFESTS) assert.doesNotMatch(read(f), /write-only/i, f);
+  for (const f of ['packages/claude-code/.claude-plugin/plugin.json', 'packages/codex/.codex-plugin/plugin.json', '.claude-plugin/marketplace.json']) {
+    assert.ok(read(f).includes(TASK_EXCEPTION), f);
+  }
+  for (const f of ['packages/cursor/.cursor-plugin/plugin.json', '.cursor-plugin/marketplace.json']) assert.ok(read(f).includes(CURSOR_EXCEPTION), f);
+  assert.match(read('package.json'), /never reads what the colleague knows; two things come back: a task you gave your colleague for an open session \(one that needs your yes is shown to you first\), and your colleague's open questions, shown at session start for you to answer or not/);
+  // A task in mode run carries its text at once (the person said yes to the colleague); only a
+  // task that needs the person's yes is shown first. No text may say every task is.
+  for (const f of [...PUBLIC_TEXTS, ...PLUGIN_TEXTS]) assert.doesNotMatch(flat(read(f)), /open session, shown to you first/, f);
+  // The open questions come back too (every SessionStart hook shows them; Cursor's stop may ask one), so no text
+  // may say a task is the only thing, or that nothing comes back.
+  for (const f of [...PUBLIC_TEXTS, ...PLUGIN_TEXTS]) assert.doesNotMatch(flat(read(f)), /the one thing that comes back is a task|nothing comes back|the flow is one way|only thing that (?:ever )?comes from (?:it|the node) is a task/i, f);
+});
+
+test('the connect skills say the plugin only sends, with what comes back, and never «write-only»', () => {
+  for (const f of SKILLS) assert.doesNotMatch(read(f), /write-only/i, f);
+  for (const h of ['claude-code', 'codex']) {
+    const t = flat(read(`packages/${h}/skills/connect/SKILL.md`));
+    assert.match(t, /\*\*only sends\*\*/, h);
+    assert.ok(t.includes('the node never reads this machine, and the plugin never reads what the colleague knows'), h);
+    assert.ok(t.includes("Two things come back: a task the person gave their colleague for an open session, and one that needs their yes is shown to them first; and the colleague's open questions, shown at session start, which the person may answer or not"), h);
+    assert.doesNotMatch(t, /the flow is one way/, h);
+  }
+  assert.match(flat(read('packages/cursor/skills/connect/SKILL.md')), /\*\*only sends\*\*: the node never reads this machine, and the plugin never reads what the colleague knows\. The one thing that comes back is the colleague's open questions, shown at session start and at most one after a turn as a follow-up, which the person may answer or not\./);
+});
+
+test('no «Importer» button in the plugin READMEs or the connect skills', () => {
+  for (const f of PLUGIN_TEXTS) assert.doesNotMatch(read(f), /Importer/, f);
+});
+
+test('install lines are the two-step marketplace form, never the one-line --marketplace form', () => {
+  for (const f of ['README.md', 'packages/claude-code/README.md', 'packages/claude-code/skills/connect/SKILL.md']) {
+    const t = read(f);
+    assert.doesNotMatch(t, /--marketplace/, f);
+    assert.match(t, /\/plugin marketplace add wybe-labs\/wybe-connect\n\s*\/plugin install wybe-connect@wybe-connect/, f);
+  }
+  assert.match(readme, /codex plugin marketplace add wybe-labs\/wybe-connect\ncodex plugin add wybe-connect@wybe-connect/);
+});
+
+test('the README, the manifests and the Claude Code plugin README give the import no age window', () => {
+  const windowed = /\b(?:last|past) \d+ days\b|\b\d+ days of (?:Codex |Claude Code )?sessions\b|\bsiste \d+ dagene?\b/i;
+  for (const f of [...PUBLIC_TEXTS, 'packages/claude-code/README.md']) assert.equal(flat(read(f)).match(windowed)?.[0] ?? null, null, f);
+});

@@ -1,13 +1,16 @@
 # wybe-connect
 
-The public, MIT-licensed, dependency-free client side of **Andre KI-assistenter**: it lets a
-person's coding harness (Claude Code, Codex, Cursor) feed their Wybe AI colleague (their Wybe
-node), and carries the standing texts for assistants without hooks (Claude Desktop / claude.ai,
-ChatGPT). Three promises, in order of importance:
+The public, MIT-licensed, dependency-free client side of the Wybe integrations for Claude,
+ChatGPT (Codex) and Cursor: it lets a person's coding harness (Claude Code, Codex, Cursor) feed
+their Wybe AI colleague (their Wybe node), and carries the standing texts for assistants without
+hooks (Claude Desktop / claude.ai, ChatGPT). Three promises, in order of importance:
 
-1. **Only sends.** There is no tool, scope or code path by which the harness reads anything
-   from the node. The node retrieves and acts on its own. The one thing that comes back is a
-   task the person gave their colleague for an open session (see "Tasks from the colleague").
+1. **Only sends.** The node never reads this machine, and there is no tool, scope or code path
+   by which the harness reads the node's memory or context. The node retrieves and acts on its
+   own. Two things come back: a task the person gave their colleague for an open session (Claude
+   Code and Codex), and one that needs their yes is shown to them first; and the colleague's open
+   questions, shown at session start, which the person may answer or not. For how, see "Tasks
+   from the colleague" and "How it works".
 2. **Redacts on your machine first.** Credentials, connection strings, private keys, Norwegian
    national identity numbers and (by default) e-mail addresses are replaced with
    `[REDACTED:<family>]` before anything leaves the laptop. Pattern-based and deterministic; no
@@ -15,13 +18,13 @@ ChatGPT). Three promises, in order of importance:
 3. **You choose how much, once, on the consent screen.** The sharing degree is the set of OAuth
    scopes you tick at `auth.wybe.me`. A scope you did not tick never flows.
 
-Install and pairing take one pasted sentence; see "Getting started".
+Install takes two commands and pairing one pasted sentence; see "Getting started".
 
 ## What leaves your machine, per scope
 
 | Scope | Consent label (nb) | What flows | When |
 |---|---|---|---|
-| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session; and (Claude Code, Codex) from the background distil: at most every 6 hours, and when you press «Importer» |
+| `remember` | Fakta og prosjekter | durable facts about your **work** that Claude decides to store: projects, decisions, preferences, tools. Claude is told "work only" every session. | when Claude calls the `remember` tool, typically at the end of a session; and (Claude Code, Codex) from the background distil: every 6 hours, or every 30 minutes while more waits than one run takes, and once by itself on first connect (the import) |
 | `conversations` | Samtalesammendrag | a title and a summary of a past chat, and its messages only if you ask for them | only when you explicitly ask Claude to import a conversation |
 | `sessions:light` | Arbeidsøkter — hva du ba om | per session: project name (the folder name), the **names** of your git remotes (never their URLs), branch, files Claude wrote or edited, start/end time, and **your own prompts**. Zero assistant text, zero tool output, zero thinking. Prompts written by Claude to its own subagents are excluded; text a hook injected into your prompt is stripped. | automatically at every stop, before every context compaction, and at session end |
 | `sessions:full` | Arbeidsøkter — alt innhold | everything in `sessions:light` plus Claude's replies and every tool call's input and output (each clipped to 4000 characters). Thinking blocks still never leave. | same as above |
@@ -67,13 +70,13 @@ itself (it is sent as a header to your node, and to nothing else).
 
 ## Getting started (Claude Code)
 
-One command in a terminal (Claude Code 2.1.292 or newer):
+Two commands inside Claude Code (2.1.292 or newer):
 
 ```
-claude plugin install wybe-connect --marketplace wybe-labs/wybe-connect
+/plugin marketplace add wybe-labs/wybe-connect
+/plugin install wybe-connect@wybe-connect
 ```
 
-(or, inside Claude Code: `/plugin install wybe-connect --marketplace wybe-labs/wybe-connect`).
 Then paste one of these with your own node address:
 
 > Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
@@ -84,8 +87,8 @@ Claude runs the `connect` skill, which calls the plugin's own `wybe` MCP server:
 opens on `auth.wybe.me`, you log in with your passkey and tick the scopes. That one sign-in
 serves both the hooks and the `remember` tool; nothing to copy, no `claude mcp add`. The first
 sync then runs by itself: the node asks for an import when the connection is made, and the
-plugin distils your recent sessions and memory in the background. There is no step for you.
-From then on the hooks do the rest.
+plugin distils every session still on this machine, and your memory files, in the background.
+There is no step for you. From then on the hooks do the rest.
 
 Revoking the pairing (under "Mine koblinger" on your node) stops the flow. Erasing what the
 node learned from this assistant is a separate, explicit action there. Both are stated on the
@@ -104,8 +107,8 @@ the plugin's `connect` skill runs the OAuth flow as its own client and offers th
 for `~/.codex/AGENTS.md`. That one grant serves the hooks and the plugin's own MCP server
 (`packages/codex/mcp.json`), so there is no MCP server to add and no second sign-in. Like Claude
 Code, Codex then sends the essence only: a background distil (`codex exec`) turns your sessions
-into short `remember` facts, and on first connect it imports your Codex sessions of the last 30
-days by itself. Codex runs a plugin's hooks only after you have trusted them once. Details and
+into short `remember` facts, and on first connect it imports every Codex session still on this
+machine by itself. Codex runs a plugin's hooks only after you have trusted them once. Details and
 what was verified where: `packages/codex/README.md`.
 
 ## Getting started (Cursor)
@@ -201,8 +204,9 @@ generated from `texts/standing.json`, the file the node's connect cards pin agai
 ## Tasks from the colleague
 
 The person's Wybe AI colleague knows every Claude Code and Codex session on the machine, open or
-closed. The person can ask it to hand a task to one of the open ones, and to read the result. This is the only thing that ever comes from the node:
-the person's own words for a task, never anything the colleague knows.
+closed. The person can ask it to hand a task to one of the open ones, and to read the result.
+Besides the colleague's open questions (see "How it works"), this is the only thing that comes
+from the node: the person's own words for a task, never anything the colleague knows.
 
 - **Which sessions are open.** Each session's hooks send `sessions_report`: the session id,
   harness, project (the last segment of the working directory, never the path), a title (the
@@ -288,8 +292,8 @@ only the facts the run chose, redacted again by `lib/redact.js`. What makes it e
 - **Each line is distilled at most once per node.** The "distilled up to" mark is kept per
   node and per transcript file, and lasts as long as the file does. Every run reads a transcript
   from its mark on, whatever started it: a hook, the import, or a session resumed months later.
-  The import does not let the model look for transcripts: the plugin lists every session of
-  the last 30 days that is not distilled yet (the distil runs' own left out), and the model
+  The import does not let the model look for transcripts: the plugin lists every session still
+  on disk, however old, that is not distilled yet (the distil runs' own left out), and the model
   reads only those ranges.
 - **One distil per connection.** Each connection keeps its own notes, state, outboxes and locks
   under `connections/<name>/`. A session's Stop hook notes it for the connection that session
@@ -338,8 +342,8 @@ The same pipeline, the same files and the same guarantees, with Codex's pieces:
   environment, so the distil mode travels in the server's `env` table. `--ephemeral` keeps the
   run from writing a rollout, so it never becomes a session to import (a rollout whose first
   prompt is the distil prompt is left out as well).
-- **The import** lists `<CODEX_HOME or ~/.codex>/sessions/YYYY/MM/DD/rollout-*.jsonl` changed in
-  the last 30 days, the person's threads only, and also reads `~/.codex/AGENTS.md` and the
+- **The import** lists every `<CODEX_HOME or ~/.codex>/sessions/YYYY/MM/DD/rollout-*.jsonl` still
+  on disk, however old, the person's threads only, and also reads `~/.codex/AGENTS.md` and the
   projects' `AGENTS.md`.
 - **First connect.** The node asks for the first sync by itself (an `import_request` in its
   answers). The plugin's MCP server (`mcp.json` → `bin/mcp-proxy.js`) asks the node for it
@@ -378,9 +382,14 @@ the node's `/mcp` with that grant (one refresh on 401). One grant, one sign-in; 
 never in `.mcp.json`, so a marketplace install works for everyone. (`bin/connect.js` still runs
 the flow from a terminal.)
 
-**Open questions.** A hook cannot call `pending_questions`. Every tool response carries
-`open_questions[]`; `flush.js` caches the last set and `session-start.js` hands it to Claude
-at the next session start, together with the standing instruction.
+**Open questions.** The second thing that comes back from the node, besides a task. A hook
+cannot call `pending_questions`. Every tool response carries `open_questions[]`; the plugin
+caches the last set (Claude Code and Codex: from its MCP server's answers; Cursor: from the
+`stop` hook's sends), and the SessionStart hook hands up to three, each cleaned to one line of
+at most 300 characters, to the model at the next session start, together with the standing
+instruction: ask one when it fits. The person answers (sent with `remember` and its `answers`)
+or not. Cursor also puts at most one as a `stop` follow-up after a completed turn, never the
+same one twice within 14 days (`packages/cursor/README.md`, "The followup guard").
 
 **Failure posture.** Every hook exits 0 whatever happens, writes at most one line to stderr,
 and never prints a token or a payload. An unreachable node queues the delta locally; the next
@@ -446,8 +455,11 @@ and two scans of the added lines (`scripts/leak-scan.mjs` for e-mail addresses a
 ## Kort på norsk
 
 `wybe-connect` er den åpne (MIT) klientsiden som lar kodeassistenten din (Claude Code, Codex,
-Cursor) mate KI-kollegaen din i Wybe. Den **sender bare** — ingenting leses tilbake. Alt **sladdes på din
-maskin først** (nøkler, passord i tilkoblingsstrenger, private nøkler, fødselsnummer,
+Cursor) mate KI-kollegaen din i Wybe. Den **sender bare** og leser aldri det KI-kollegaen vet.
+To ting kommer tilbake: en oppgave du selv har gitt KI-kollegaen til en åpen økt (en oppgave som
+trenger ditt ja, vises deg først), og KI-kollegaens åpne spørsmål, som vises når en økt starter,
+og som du svarer på eller lar være. Alt **sladdes på din maskin først** (nøkler, passord i
+tilkoblingsstrenger, private nøkler, fødselsnummer,
 e-postadresser). Hvor mye som deles velger du én gang, på samtykkeskjermen på `auth.wybe.me`:
 
 - **Fakta og prosjekter** (`remember`): varige fakta om jobben din som Claude velger å lagre.

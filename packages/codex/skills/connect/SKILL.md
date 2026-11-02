@@ -14,8 +14,11 @@ The person pasted (or said) one of these, with their own address:
 Your job: pair this machine with that address once. The first sync is not a step here: the
 colleague asks for it by itself when the connection is made (an import request in its tool
 answers), and its own instructions say how to answer it. Everything the
-plugin sends afterwards is **write-only** (nothing is ever read back into Codex) and is
-**redacted on this machine first**. Say that in one sentence before you start.
+plugin sends afterwards is **redacted on this machine first**, and the plugin **only sends**: the
+node never reads this machine, and the plugin never reads what the colleague knows.
+Two things come back: a task the person gave their colleague for an open session, and one that
+needs their yes is shown to them first; and the colleague's open questions, shown at session
+start, which the person may answer or not. Say that briefly before you start.
 
 The plugin root is the directory two levels above this `SKILL.md` (it holds `bin/` and `hooks/`).
 
@@ -49,17 +52,18 @@ The plugin root is the directory two levels above this `SKILL.md` (it holds `bin
    first sync is the colleague's import and starts by itself in the background: the plugin
    distils every Codex session still on this machine into short work facts and one summary per
    project with a headless `codex exec`, and nothing raw leaves the machine. There is no step
-   for the person. From then on, the hooks note each session at every stop and the same distil runs at most every
-   6 hours. The colleague's tools appear after Codex is restarted, Codex asks once to trust the
-   hooks, and the pairing can be revoked under "Mine koblinger" (revoking stops the flow; erasing
-   what was learned is a separate action).
+   for the person. From then on, the hooks note each session at every stop and the same distil
+   runs every 6 hours (every 30 minutes while more waits). The colleague's tools appear after
+   Codex is restarted, Codex asks once to trust the hooks, and the pairing can be revoked under
+   "Mine koblinger" (revoking stops the flow; erasing what was learned is a separate action).
 
 ## Never
 
 - Never read or print a credential file, a `wat_`/`wrt_` token, or an `Authorization` header.
 - Never send anything personal, about other people, or any credential through `remember`.
   Work only ("kun jobb").
-- Never claim anything can be read back from Wybe: the flow is one way.
+- Never claim the colleague's memory or context can be read: the only things that come from it
+  are a task the person gave their colleague and the colleague's open questions.
 
 ## Tasks from the colleague (after pairing)
 

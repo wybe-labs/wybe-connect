@@ -14,9 +14,13 @@ The person pasted (or said) one of these, with their own node URL:
 Your job: pair this machine with that node once. The first sync is not yours to run: the node
 asks for it by itself when the connection is made (an import), and the plugin runs it in the
 background. Everything the
-plugin sends afterwards is **write-only** (the node never reads this machine, Claude Code never
-reads the node) and is **redacted on this machine first**. Say that in one sentence before you
-start; the person is granting access to their work context and should hear what it means.
+plugin sends afterwards is **redacted on this machine first**, and the plugin **only sends**: the
+node never reads this machine, and the plugin never reads what the colleague knows.
+Two things come back: a task the person gave their colleague for an open session, and one that
+needs their yes is shown to them first; and the colleague's open questions, shown at session
+start, which the person may answer or not. Say that briefly before you start; the person is
+granting access to their work context and should
+hear what it means.
 
 ## Steps
 
@@ -24,9 +28,10 @@ start; the person is granting access to their work context and should hear what 
    is no URL, ask for it: "Hvilken adresse har KI-kollegaen din i Wybe? (https://dittfirma.wybe.me)".
 
 2. **Make sure the plugin is installed.** Its `wybe` MCP server offers a `connect` tool. If you
-   do not have it, tell the person to run, in a terminal:
+   do not have it, tell the person to run, inside Claude Code:
    ```
-   claude plugin install wybe-connect --marketplace wybe-labs/wybe-connect
+   /plugin marketplace add wybe-labs/wybe-connect
+   /plugin install wybe-connect@wybe-connect
    ```
    and to start Claude Code again and paste the sentence once more.
 
@@ -48,9 +53,9 @@ start; the person is granting access to their work context and should hear what 
    sync now runs by itself in the background: the node asked for an import, and the plugin
    distils every Claude Code session still on this machine, and its memory, into short work facts
    and one summary per project. There is no step for the person.
-   From then on, the same distil runs at most every 6 hours. Pairing can be revoked under
-   "Mine koblinger" on the node (revoking stops the flow; erasing what was learned is a separate
-   action there). Do not interview the person or send facts yourself now:
+   From then on, the same distil runs every 6 hours (every 30 minutes while more waits).
+   Pairing can be revoked under "Mine koblinger" on the node (revoking stops the flow; erasing
+   what was learned is a separate action there). Do not interview the person or send facts yourself now:
    the import already covers it, and a second first sync would store everything twice.
 
 ## Never
@@ -59,7 +64,8 @@ start; the person is granting access to their work context and should hear what 
   `Authorization` header.
 - Never send anything personal, about other people, or any credential through `remember`.
   Work only ("kun jobb").
-- Never claim the node can be asked for anything back: the flow is one way.
+- Never claim the colleague's memory or context can be read: the only things that come from it
+  are a task the person gave their colleague and the colleague's open questions.
 
 ## Tasks from the colleague (after pairing)
 
