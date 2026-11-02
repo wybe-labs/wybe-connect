@@ -756,10 +756,8 @@ test('the headless run is confined: read-only tools, only the plugin\'s own serv
 // The absolute form of a path in a permission rule: POSIX, `//` from the root, a drive as /c/.
 const ruleAbs = (path) => `/${path.replace(/^([A-Za-z]):\\/, (_, d) => `/${d.toLowerCase()}/`).replace(/\\/g, '/')}`;
 // Claude Code checks the path of every file-reading tool (Read, Glob, Grep) against Read(path) rules
-// only; a Glob(path) or Grep(path) rule is never matched. So each path gets one Read rule: a file, or
-// a folder and what lies in it.
+// only; a Glob(path) or Grep(path) rule is never matched. So each file gets one Read rule.
 const fileRules = (path) => `Read(${ruleAbs(path)})`;
-const folderRules = (path) => [fileRules(path), `Read(${ruleAbs(path)}/**)`];
 const noToolPathRules = (allow) => assert.ok(!allow.some((r) => /^(Glob|Grep)\(/.test(r)), 'no Glob(path) or Grep(path) rule: Claude Code never matches one');
 
 test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s POSIX form on Windows and elsewhere', () => {
@@ -789,36 +787,26 @@ test('the run\'s read rules are path-scoped per transcript, in Claude Code\'s PO
   assert.deepEqual(args[args.indexOf('--allowedTools') + 1].split(',').sort(), ['mcp__wybe__distil_done', 'mcp__wybe__pending_questions', 'mcp__wybe__remember']);
 });
 
-test('an import may also read the Claude home\'s CLAUDE.md and, of the projects in its transcripts, their CLAUDE.md and auto memory, nothing more', () => {
-  const root = mkdtempSync(join(tmpdir(), 'wybe-connect-import-reads-'));
-  const home = join(root, 'claude-home');
-  const project = join(root, 'harbour');
-  const folder = join(home, 'projects', 'C--harbour');
-  const other = join(home, 'projects', 'C--other');
-  mkdirSync(join(folder, 'memory'), { recursive: true });
-  mkdirSync(join(other, 'memory'), { recursive: true });
-  mkdirSync(join(project, '.claude'), { recursive: true });
-  writeFileSync(join(project, 'CLAUDE.md'), '# harbour\n');
-  writeFileSync(join(project, '.claude', 'CLAUDE.md'), '# harbour, local\n');
-  writeFileSync(join(home, 'CLAUDE.md'), '# me\n');
-  const t = join(folder, '00000000-0000-4000-8000-0000000000aa.jsonl');
-  writeFileSync(t, `${JSON.stringify({ type: 'user', cwd: project, message: { role: 'user', content: 'hi' } })}\n`);
-  const plan = { runId: 'r-i', mode: 'import', importOf: '2026-10-21T10:00:00.000Z', connection: null, claudeHome: home, transcripts: [{ path: t, sessionId: 's', cwd: null, fromLine: 0, toLine: 1 }] };
-  const args = D.claudeArgs(plan, { root: '/h', settingsFile: '/h/run.settings.json' });
+test('a run may also read exactly the memory files its plan lists, nothing more', () => {
+  const home = 'C:\\Users\\Ola\\.claude';
+  const t = `${home}\\projects\\C--harbour\\00000000-0000-4000-8000-0000000000aa.jsonl`;
+  const memory = [
+    { path: `${home}\\CLAUDE.md`, sha256: 'a'.repeat(64) },
+    { path: `${home}\\projects\\C--harbour\\memory\\MEMORY.md`, sha256: 'b'.repeat(64) },
+    { path: 'C:\\work\\harbour\\.claude\\CLAUDE.md', sha256: 'c'.repeat(64) },
+  ];
+  const plan = { runId: 'r-i', mode: 'import', importOf: '2026-10-21T10:00:00.000Z', connection: null, claudeHome: home, transcripts: [{ path: t, sessionId: 's', cwd: null, project: 'harbour', fromLine: 0, toLine: 1 }], memory };
   const allow = D.claudeSettings(plan).permissions.allow;
-  assert.deepEqual([...allow].sort(), [
-    fileRules(t),
-    fileRules(join(home, 'CLAUDE.md')),
-    fileRules(join(project, 'CLAUDE.md')),
-    fileRules(join(project, '.claude', 'CLAUDE.md')),
-    ...folderRules(join(folder, 'memory')),
-  ].sort());
+  assert.deepEqual(allow, [
+    'Read(//c/Users/Ola/.claude/projects/C--harbour/00000000-0000-4000-8000-0000000000aa.jsonl)',
+    'Read(//c/Users/Ola/.claude/CLAUDE.md)',
+    'Read(//c/Users/Ola/.claude/projects/C--harbour/memory/MEMORY.md)',
+    'Read(//c/work/harbour/.claude/CLAUDE.md)',
+  ]);
   noToolPathRules(allow);
   assert.ok(!allow.some((r) => /\/projects(\/\*\*)?\)$/.test(r)), 'never the projects folder itself');
-  assert.ok(!allow.some((r) => r.includes('C--other')), 'another project\'s memory is not in this import');
-  const prompt = args[args.indexOf('-p') + 1];
-  assert.ok(prompt.includes(join(folder, 'memory')), 'the prompt names the memory folder it may read');
-  assert.ok(prompt.includes(join(project, 'CLAUDE.md')), 'the prompt names the project\'s CLAUDE.md');
+  const ongoing = { ...plan, mode: 'ongoing', importOf: null, memory: [] };
+  assert.deepEqual(D.claudeSettings(ongoing).permissions.allow, [fileRules(t)], 'a run without memory files reads only its transcripts');
 });
 
 test('the run\'s whole command line stays within the Windows limit at the run\'s caps', () => {
@@ -829,7 +817,8 @@ test('the run\'s whole command line stays within the Windows limit at the run\'s
     transcripts.push({ path: long(i), cwd: `C:\\${'w'.repeat(120)}-${i}`, fromLine: 1000, toLine: 99999 });
     chars += long(i).length;
   }
-  const plan = { runId: 'r-max', mode: 'import', importOf: '2026-10-21T10:00:00.000Z', connection: 'node', claudeHome: `C:\\Users\\${'p'.repeat(30)}\\.claude`, transcripts };
+  const memory = Array.from({ length: D.MAX_RUN_MEMORY_FILES }, (_, i) => ({ path: `C:\\Users\\${'p'.repeat(30)}\\.claude\\projects\\C--${'w'.repeat(120)}-${i}\\memory\\${'m'.repeat(40)}.md`, sha256: '0'.repeat(64) }));
+  const plan = { runId: 'r-max', mode: 'import', importOf: '2026-10-21T10:00:00.000Z', connection: 'node', claudeHome: `C:\\Users\\${'p'.repeat(30)}\\.claude`, transcripts, memory };
   const args = D.claudeArgs(plan, { root: `C:\\Users\\${'p'.repeat(30)}\\.wybe-connect`, settingsFile: `C:\\Users\\${'p'.repeat(30)}\\.wybe-connect\\connections\\node\\distil\\runs\\${'r'.repeat(80)}.settings.json`, pluginRoot: `C:\\Users\\${'p'.repeat(30)}\\.claude\\plugins\\cache\\wybe-connect\\wybe-connect\\0.3.0` });
   const line = [process.execPath, ...args].map((a) => `"${a.replace(/(\\*)"/g, '$1$1\\"')}"`).join(' ');
   assert.ok(line.length < 32767, `${line.length} chars`);
@@ -1140,4 +1129,14 @@ test('connections: an import takes only the sessions of its own connection and t
   const plan = D.maybeRun({ paths: p, env: {}, now: Date.now(), spawnImpl: recorder().spawnImpl, claudeHome: root });
   assert.equal(plan.mode, 'import');
   assert.deepEqual(plan.transcripts.map((t) => t.path).sort(), [files[0], files[2]].sort());
+});
+
+test('no notice or comment in the plugin code sends the person to an «Importer» button: the import starts by itself', () => {
+  const REPO = join(import.meta.dirname, '..');
+  const dirs = ['lib', ...['claude-code', 'codex', 'cursor'].flatMap((h) => [`packages/${h}/lib`, `packages/${h}/bin`, `packages/${h}/hooks`])];
+  for (const d of dirs) {
+    for (const f of readdirSync(join(REPO, d)).filter((x) => x.endsWith('.js'))) {
+      assert.doesNotMatch(readFileSync(join(REPO, d, f), 'utf8'), /Importer/, `${d}/${f}`);
+    }
+  }
 });

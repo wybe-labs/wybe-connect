@@ -163,7 +163,7 @@ test('resolveCodex: an override, codex(.exe) on PATH, or the npm shim\'s codex.j
   assert.deepEqual(D.resolveCodex({ PATH: dir }, 'linux'), { cmd: join(dir, 'codex'), pre: [] });
 });
 
-test('the import lists the person\'s rollouts of the last 30 days: no subagent, no distil run, no compressed or other file', () => {
+test('the import lists every rollout of the person\'s still on disk, however old: no subagent, no distil run, no compressed or other file', () => {
   const m = machine();
   const T = Date.now();
   const recent = m.rollout('0190c0de-0000-7000-8000-000000000001');
@@ -171,19 +171,23 @@ test('the import lists the person\'s rollouts of the last 30 days: no subagent, 
   utimesSync(resumed, new Date(T - DAY), new Date(T - DAY));
   const old = m.rollout('0190c0de-0000-7000-8000-000000000003');
   utimesSync(old, new Date(T - 40 * DAY), new Date(T - 40 * DAY));
+  const ancient = m.rollout('0190c0de-0000-7000-8000-000000000007', { day: '02' });
+  utimesSync(ancient, new Date(T - 400 * DAY), new Date(T - 400 * DAY));
   m.rollout('0190c0de-0000-7000-8000-000000000004', { source: { subagent: { thread_spawn: { parent_thread_id: 'p' } } } });
   m.rollout('0190c0de-0000-7000-8000-000000000005', { source: 'exec', prompt: 'wybe-connect distil run (started in the background by the wybe-connect plugin, not by a person).\nmode: ongoing' });
   m.rollout('0190c0de-0000-7000-8000-000000000006', { ext: '.jsonl.zst' });
   writeFileSync(join(m.codexHome, 'sessions', '2026', '10', '20', 'notes.jsonl'), '{}\n');
   const list = D.importRollouts(m.codexHome, T);
-  assert.deepEqual(list.map((t) => t.path).sort(), [recent, resumed].sort());
-  assert.deepEqual(list.map((t) => t.sessionId).sort(), ['0190c0de-0000-7000-8000-000000000001', '0190c0de-0000-7000-8000-000000000002']);
+  assert.deepEqual(list.map((t) => t.path), [ancient, old, resumed, recent], 'oldest first');
+  assert.deepEqual(list.map((t) => t.sessionId).sort(), ['0190c0de-0000-7000-8000-000000000001', '0190c0de-0000-7000-8000-000000000002', '0190c0de-0000-7000-8000-000000000003', '0190c0de-0000-7000-8000-000000000007']);
 });
 
 test('a Codex import plan: the rollouts are the ranges, the prompt names Codex\'s own AGENTS.md, and the run is planned for codex', () => {
   const m = machine();
   const p = connect(m, 'http://127.0.0.1:9');
   const a = m.rollout('0190c0de-0000-7000-8000-00000000000a');
+  writeFileSync(join(m.codexHome, 'AGENTS.md'), 'house rules\n');
+  writeFileSync(join(m.project, 'AGENTS.md'), 'project rules\n');
   assert.equal(D.requestImport(p, '2026-10-26T10:00:00.000Z'), true);
   const rec = recorder();
   const plan = D.maybeRun({ paths: p, env: {}, now: Date.now(), spawnImpl: rec.spawnImpl, harness: 'codex', codexHome: m.codexHome });
@@ -192,6 +196,8 @@ test('a Codex import plan: the rollouts are the ranges, the prompt names Codex\'
   assert.deepEqual(plan.transcripts.map((t) => [t.path, t.fromLine, t.toLine]), [[a, 0, 6]]);
   const prompt = D.buildPrompt(plan);
   assert.ok(prompt.includes(join(m.codexHome, 'AGENTS.md')));
+  assert.ok(prompt.includes(join(m.project, 'AGENTS.md')), 'the AGENTS.md of the rollout\'s project, by its path');
+  assert.deepEqual(plan.transcripts.map((t) => t.project), ['atlas-demo'], 'the project is the last part of the session_meta cwd');
   assert.match(prompt, /Codex session/);
   assert.equal(rec.spawns[0].opts.env.WYBE_CONNECT_HOME, m.home, 'the watchdog gets the wybe-connect home, not the Codex one inside it');
   assert.match(rec.spawns[0].args[0], /packages[\\/]codex[\\/]bin[\\/]distil-run\.js$/);
@@ -350,7 +356,8 @@ test('first connect: the node\'s import request reaches the plugin\'s server, an
     assert.deepEqual(twice(node.stored), [], 'every fact once');
     assert.equal(factsOf(node.stored, a).length, 6, 'the connect session: once, by its Stop');
     assert.equal(factsOf(node.stored, b).length, 6, 'the earlier session: by the import');
-    for (const f of [old, sub, own]) assert.deepEqual(factsOf(node.stored, f), [], `${basename(f)} is not imported`);
+    assert.equal(factsOf(node.stored, old).length, 6, 'a session 40 days old: by the import, too');
+    for (const f of [sub, own]) assert.deepEqual(factsOf(node.stored, f), [], `${basename(f)} is not imported`);
     const runs = logLines(log);
     assert.equal(runs.length, 2, 'one ongoing run and one import run');
     assert.equal(runs[1].importOf, at);

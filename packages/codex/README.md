@@ -17,8 +17,9 @@ only after you have reviewed and trusted them once.
 
 Like the Claude Code plugin, this one sends the **essence** of your work, never raw sessions: a
 background distil on your machine (a headless `codex exec`) turns your sessions into short,
-redacted `remember` facts and delivers each exactly once. On first connect it imports your Codex
-sessions of the last 30 days by itself. The pipeline and its guarantees are described in the
+redacted `remember` facts and delivers each exactly once. On first connect it imports every Codex
+session still on this machine by itself, with your `AGENTS.md` files, and sends one summary per
+project besides the facts. The pipeline and its guarantees are described in the
 repository README ("The background distil"); this page lists what is Codex's own.
 
 | Piece | What it does |
@@ -80,8 +81,9 @@ codex exec --sandbox read-only --json --ephemeral --skip-git-repo-check
 
 The run reads only the line ranges of the rollouts the plugin lists: noted by the hooks, or for
 the import every rollout under `<CODEX_HOME or ~/.codex>/sessions/YYYY/MM/DD/rollout-*.jsonl`
-changed in the last 30 days, each from where the last run for that node stopped. The import also
-reads `~/.codex/AGENTS.md` and the projects' `AGENTS.md`. A rollout whose `session_meta.source`
+still on disk, however old, grouped by project (the last part of its `session_meta` cwd), each
+from where the last run for that node stopped. The import also reads `~/.codex/AGENTS.md` and the
+projects' `AGENTS.md`; a later run reads one again only when its content changed. A rollout whose `session_meta.source`
 is a subagent or an internal job is not the person's thread and is never read; nor is a
 distil run's own thread, nor a compressed (`.zst`) rollout. What leaves is only the facts the
 model chose, redacted again on this machine by `lib/redact.js`.

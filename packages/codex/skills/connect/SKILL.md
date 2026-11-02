@@ -47,9 +47,9 @@ The plugin root is the directory two levels above this `SKILL.md` (it holds `bin
 
 4. **Confirm** in one paragraph: connected to which address, and which scopes. Say that the
    first sync is the colleague's import and starts by itself in the background: the plugin
-   distils this machine's Codex sessions of the last 30 days into short work facts with a
-   headless `codex exec`, and nothing raw leaves the machine. There is no step for the person.
-   From then on, the hooks note each session at every stop and the same distil runs at most every
+   distils every Codex session still on this machine into short work facts and one summary per
+   project with a headless `codex exec`, and nothing raw leaves the machine. There is no step
+   for the person. From then on, the hooks note each session at every stop and the same distil runs at most every
    6 hours. The colleague's tools appear after Codex is restarted, Codex asks once to trust the
    hooks, and the pairing can be revoked under "Mine koblinger" (revoking stops the flow; erasing
    what was learned is a separate action).
