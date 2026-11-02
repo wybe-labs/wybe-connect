@@ -15,7 +15,8 @@
 // `take_task` tool shows the text to the person before anything happens (lib/mcp-proxy.js).
 // A task's life here: offered (confirm, waiting for take_task) | delivered (the notice is on its way
 // to the session) | running (the session works on it) -> finished (the result is written, waiting to
-// be sent) -> reported. Everything sent passes through lib/redact.js; tokens stay in the headers.
+// be sent; the one sender that claims it under the tasks lock sends it) -> reported. A result goes to
+// the node once. Everything sent passes through lib/redact.js; tokens stay in the headers.
 
 import { join, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
@@ -37,6 +38,8 @@ export const KEEP_TASKS_MS = 7 * 24 * 60 * 60_000;
 export const TASK_TEXT_MAX = 8000;
 export const POLL_ENV = 'WYBE_CONNECT_POLL_MS';
 const CALL_TIMEOUT_MS = 15_000;
+// A task_result send is at most a call, a refresh and a call again; a claim older than this is no one's.
+const SEND_CLAIM_MAX_MS = 10 * 60_000;
 const TASK_ID = /^[A-Za-z0-9-]{1,64}$/;
 const SEPARATORS = String.fromCharCode(0x2028, 0x2029);
 const CONTROL = new RegExp(`[\\x00-\\x08\\x0b-\\x1f\\x7f-\\x9f${SEPARATORS}]+`, 'g');
@@ -338,25 +341,42 @@ export function finishOnStop(p, sessionId, { lastMessage = '', failed = false, t
  */
 export const busyRefusal = (out) => !out.ok && out.toolError === true && (out.retry === true || /try again later/i.test(String(out.message ?? '')));
 
+/** A send claim nobody will finish: its process is gone, or it is older than any send can take (a reused pid). */
+const claimStale = (c, t) => !c || typeof c.token !== 'string' || !isAlive(c.pid) || !(t - Date.parse(c.at) < SEND_CLAIM_MAX_MS);
+
 /**
- * Sends every finished result; one the node refuses (already has one, not this session's) is settled too. One the
- * node is too busy to take now (busyRefusal) waits for the next round.
+ * Sends every finished result, each exactly once whoever flushes (the Stop hook, the poller, take_task):
+ * under the tasks lock a sender first claims a finished task (task.sending, with its own token), and
+ * only the claim's holder sends it. The node's answer settles it as reported (a refusal too: already
+ * has one, not this session's); a call that did not reach the node, or one the node is too busy to
+ * take now (busyRefusal), gives the claim back for the next round. A claim whose sender died is taken over.
  */
 export async function flushResults(p, sessionId, { fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   if (!bridgeDir(p) || !existsSync(sessionFiles(p, sessionId).tasks)) return 0;
-  const waiting = Object.values(readTasks(sessionFiles(p, sessionId)).tasks).filter((t) => t.status === 'finished' && t.result);
+  const token = randomBytes(12).toString('hex');
+  const mine = withTasks(p, sessionId, (st) => {
+    const t = now();
+    const claimed = [];
+    for (const task of Object.values(st.tasks)) {
+      if (task.status !== 'finished' || !task.result || !claimStale(task.sending, t)) continue;
+      task.sending = { token, pid: process.pid, at: iso(t) };
+      claimed.push({ id: task.id, result: task.result });
+    }
+    return claimed;
+  });
   let sent = 0;
-  for (const task of waiting) {
+  for (const task of mine) {
     const out = await nodeCall(p, 'task_result', { task_id: task.id, session_id: sessionId, status: task.result.status, text: task.result.text }, { fetchImpl, now });
-    if ((!out.ok && !out.toolError) || busyRefusal(out)) continue;
+    const settled = (out.ok || Boolean(out.toolError)) && !busyRefusal(out);
     withTasks(p, sessionId, (st) => {
       const t = st.tasks[task.id];
-      if (t && t.status === 'finished') {
-        t.status = 'reported';
-        t.reportedAt = iso(now());
-        delete t.result;
-        delete t.text;
-      }
+      if (!t || t.status !== 'finished' || t.sending?.token !== token) return;
+      delete t.sending;
+      if (!settled) return;
+      t.status = 'reported';
+      t.reportedAt = iso(now());
+      delete t.result;
+      delete t.text;
     });
     if (out.ok) sent += 1;
   }
