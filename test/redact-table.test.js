@@ -286,7 +286,7 @@ const TABLE = [
   ['prose: password is <password-shaped>', j('my pass', 'word is ', 'Hunter2026!'), j('my pass', 'word is ', '[REDACTED:keyed-secret]')],
   ['prose: Norwegian passordet er <password-shaped>', j('Det nye pass', 'ordet er ', 'Sommer2026!', ' fra i dag'), j('Det nye pass', 'ordet er ', '[REDACTED:keyed-secret]', ' fra i dag')],
   ['ordinary: password is required', j('pass', 'word is required'), SAME],
-  // A few words may stand between the key word and «er/is» (QA round 1 on the one-sign-in PR).
+  // A few words may stand between the key word and «er/is».
   ['prose: Norwegian passordet mitt er <password-shaped>', j('pass', 'ordet mitt er ', 'Sommer2024!'), j('pass', 'ordet mitt er ', '[REDACTED:keyed-secret]')],
   ['prose: Norwegian Passordet til databasen er <password-shaped>', j('Pass', 'ordet til databasen er ', 'Sommer2024!'), j('Pass', 'ordet til databasen er ', '[REDACTED:keyed-secret]')],
   ['prose: Norwegian mitt passord er <password-shaped>', j('mitt pass', 'ord er ', 'Sommer2024!'), j('mitt pass', 'ord er ', '[REDACTED:keyed-secret]')],

@@ -40,7 +40,8 @@
 //   file-change     one per path touched (FileChange, patch_apply_end, apply_patch input)
 //   other           everything else, including the model-side copy of user input
 
-import { openSync, readSync, closeSync } from 'node:fs';
+import { openSync, readSync, closeSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 
 export const KNOWN_TYPES = new Set([
   // observed in real rollouts (census above)
@@ -274,4 +275,35 @@ function absolutise(path, cwd) {
   if (!cwd || /^([A-Za-z]:[\\/]|[\\/])/.test(path)) return path;
   const sep = cwd.includes('\\') && !cwd.includes('/') ? '\\' : '/';
   return `${cwd.replace(/[\\/]+$/, '')}${sep}${path.replace(/^\.[\\/]/, '')}`;
+}
+
+// A rollout's file name ends in its session id: rollout-<timestamp>-<uuid>.jsonl, or .jsonl.zst once compressed.
+const ROLLOUT_NAME = /^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(?:\.zst)?$/i;
+
+/**
+ * The session ids of every rollout under <codexHome>/sessions (YYYY/MM/DD) and <codexHome>/archived_sessions, read
+ * from file names only (no file is opened), lowercased. A directory that cannot be read adds nothing.
+ */
+export function rolloutSessionIds(codexHome) {
+  const ids = new Set();
+  if (typeof codexHome !== 'string' || !codexHome) return ids;
+  const walk = (dir, depth) => {
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (e.isDirectory()) {
+        if (depth > 0) walk(join(dir, e.name), depth - 1);
+        continue;
+      }
+      const m = ROLLOUT_NAME.exec(e.name);
+      if (m) ids.add(m[1].toLowerCase());
+    }
+  };
+  walk(join(codexHome, 'sessions'), 3);
+  walk(join(codexHome, 'archived_sessions'), 3);
+  return ids;
 }

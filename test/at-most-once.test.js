@@ -169,7 +169,7 @@ test('a session resumed long after it was distilled, with other runs in between,
   }
 });
 
-test('the import lists the last 30 days only, and never the distil runs\' own sessions', async () => {
+test('the import lists every transcript still on disk, however old, and never the distil runs\' own sessions', async () => {
   const m = machine();
   const node = await httpNode();
   try {
@@ -178,12 +178,16 @@ test('the import lists the last 30 days only, and never the distil runs\' own se
     const recent = m.transcript('66666666-6666-4666-8666-666666666666', 2);
     const old = m.transcript('77777777-7777-4777-8777-777777777777', 2);
     utimesSync(old, new Date(T - 40 * DAY), new Date(T - 40 * DAY));
+    const ancient = m.transcript('77777777-7777-4777-8777-777777777778', 2);
+    utimesSync(ancient, new Date(T - 400 * DAY), new Date(T - 400 * DAY));
     const own = m.transcript('88888888-8888-4888-8888-888888888888', 2, JSON.stringify({ type: 'user', message: { role: 'user', content: 'wybe-connect distil run (started in the background by the wybe-connect plugin, not by a person).\nmode: ongoing' } }));
     importNow(m, node, new Date(T).toISOString());
     const r = await cycle(m, T);
-    assert.deepEqual(r.plan.transcripts.map((t) => t.path), [recent]);
-    assert.ok(!r.plan.transcripts.some((t) => t.path === old || t.path === own));
-    assert.doesNotMatch(D.buildPrompt(r.plan), /transcripts from the last \d+ days under/, 'the model is not sent to find transcripts itself');
+    assert.deepEqual(r.plan.transcripts.map((t) => t.path), [ancient, old, recent], 'oldest first, none left out for its age');
+    assert.ok(!r.plan.transcripts.some((t) => t.path === own));
+    assert.equal(r.outcome.ok, true);
+    assert.deepEqual(twice(node.stored), [], 'every fact once');
+    assert.doesNotMatch(D.buildPrompt(r.plan), /last \d+ days/, 'no age window is named');
     assert.match(D.buildPrompt(r.plan), /read only those ranges/i);
   } finally {
     node.close();

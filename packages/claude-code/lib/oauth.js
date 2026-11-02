@@ -2,7 +2,12 @@
 //   discover   the node's protected-resource metadata names the authorization server, whose
 //              RFC 8414 document names the endpoints (S256 required)
 //   loopback   a one-shot http server on 127.0.0.1:<random port> receives the code
-//   register   RFC 7591 dynamic registration with exactly that loopback redirect_uri
+//   client     each harness uses a fixed public client (STATIC_CLIENTS); a caller without one
+//              registers (RFC 7591) with exactly that loopback redirect_uri
+//   account    the harness account the sign-in is for goes to /authorize as `account_hint`, so the
+//              consent screen keeps a second account apart from the first; only the URL the browser
+//              opens carries it, never the one shown or logged
+//   resource   asked for the node's /mcp endpoint; a token answer naming another resource is refused
 //   browser    opened by spawning the platform opener with the URL as an argument (never a shell)
 //   exchange   code + verifier -> access + refresh tokens (RFC 8707 `resource` = the node's /mcp endpoint)
 //   refresh    rotating refresh token
@@ -16,6 +21,57 @@ import { spawn } from 'node:child_process';
 export const DEFAULT_ISSUER = 'https://auth.wybe.me';
 export const ALL_SCOPES = Object.freeze(['remember', 'conversations', 'sessions:light', 'sessions:full']);
 const REQUIRED_METADATA = ['issuer', 'authorization_endpoint', 'token_endpoint', 'code_challenge_methods_supported'];
+
+/**
+ * The fixed public clients the authorization server knows (no dynamic registration): PKCE, no
+ * secret, a loopback redirect on any port. A fixed id lets the node tell which harness a grant is
+ * for, and a second sign-in from the same harness is the same client, not a new one.
+ */
+export const STATIC_CLIENTS = Object.freeze({ 'claude-code': 'wybe-connect-claude-code', codex: 'wybe-connect-codex', cursor: 'wybe-connect-cursor' });
+
+/** The harness a fixed client id stands for, or null. */
+export function harnessOf(clientId) {
+  return Object.keys(STATIC_CLIENTS).find((h) => STATIC_CLIENTS[h] === clientId) ?? null;
+}
+
+/** true / false when both are URLs (a trailing slash is the same endpoint), null when one is not. */
+function sameResource(a, b) {
+  try {
+    const norm = (s) => { const u = new URL(s); return `${u.origin}${u.pathname.replace(/\/+$/, '')}`; };
+    return norm(a) === norm(b);
+  } catch {
+    return null;
+  }
+}
+
+function jwtAudience(token) {
+  const parts = typeof token === 'string' ? token.split('.') : [];
+  if (parts.length !== 3) return null;
+  try {
+    const aud = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))?.aud;
+    return typeof aud === 'string' || Array.isArray(aud) ? aud : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Throws when a token answer names a resource (its `resource`, its `aud`, or the `aud` of a JWT
+ * access token) and none of them is `resource`. An answer that names none is taken as issued for
+ * the resource that was asked for.
+ */
+export function assertTokenResource(body, resource) {
+  const named = [];
+  if (typeof body?.resource === 'string') named.push([body.resource]);
+  if (typeof body?.aud === 'string' || Array.isArray(body?.aud)) named.push([].concat(body.aud));
+  const jwtAud = jwtAudience(body?.access_token);
+  if (jwtAud) named.push([].concat(jwtAud));
+  for (const list of named) {
+    if (!list.some((r) => typeof r === 'string' && sameResource(r, resource))) {
+      throw new Error(`the token was issued for another resource (${list.filter((r) => typeof r === 'string').join(', ')}), not ${resource}`);
+    }
+  }
+}
 
 async function getJson(fetchImpl, url, timeoutMs) {
   const res = await fetchImpl(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(timeoutMs) });
@@ -49,7 +105,10 @@ export async function discover(nodeUrl, { fetchImpl = globalThis.fetch, fallback
         // not a URL: refused below
       }
       if (!named || named.origin !== origin) throw new Error("the node's protected-resource metadata names a resource on another origin");
-      resource = prm.resource;
+      // A token for any other resource is refused by the node, so a sign-in for it would only
+      // leave a grant that never works.
+      if (sameResource(prm.resource, mcpEndpoint) === false) throw new Error(`the node's protected-resource metadata names ${prm.resource}, not its /mcp endpoint`);
+      resource = mcpEndpoint;
     }
     if (Array.isArray(prm.authorization_servers) && typeof prm.authorization_servers[0] === 'string') issuer = prm.authorization_servers[0];
     if (Array.isArray(prm.scopes_supported)) resourceScopes = prm.scopes_supported;
@@ -90,7 +149,7 @@ export async function register({ metadata, redirectUri, scopes, fetchImpl = glob
   return { clientId: body.client_id };
 }
 
-export function authorizeUrl({ metadata, clientId, redirectUri, scopes, state, challenge, resource }) {
+export function authorizeUrl({ metadata, clientId, redirectUri, scopes, state, challenge, resource, accountHint = null }) {
   const u = new URL(metadata.authorization_endpoint);
   u.searchParams.set('response_type', 'code');
   u.searchParams.set('client_id', clientId);
@@ -100,6 +159,7 @@ export function authorizeUrl({ metadata, clientId, redirectUri, scopes, state, c
   u.searchParams.set('code_challenge', challenge);
   u.searchParams.set('code_challenge_method', 'S256');
   u.searchParams.set('resource', resource);
+  if (accountHint) u.searchParams.set('account_hint', accountHint);
   return u.toString();
 }
 
@@ -145,6 +205,7 @@ export async function exchangeCode({ metadata, clientId, code, verifier, redirec
     code_verifier: verifier,
     resource,
   }, fetchImpl, timeoutMs);
+  assertTokenResource(body, resource);
   return tokensToCredentials(body, { requestedScopes, now });
 }
 
@@ -158,12 +219,35 @@ export async function refreshTokens({ tokenEndpoint, clientId, refreshToken, res
       client_id: clientId,
       resource,
     }, fetchImpl, timeoutMs);
+    assertTokenResource(body, resource);
     const next = tokensToCredentials(body, { requestedScopes, now });
     if (!next.refreshToken) next.refreshToken = refreshToken;
     return next;
   } catch {
     return null;
   }
+}
+
+/**
+ * A stored grant renewed instead of a new sign-in: only for the same fixed client, the same
+ * node's /mcp resource, scopes it already holds and a refresh the authorization server accepts.
+ * Returns the whole credentials with the new tokens, or null when a sign-in is needed.
+ */
+export async function renewGrant(existing, { clientId, nodeUrl, scopes = null, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
+  if (!existing || !clientId || existing.clientId !== clientId || !existing.refreshToken || typeof existing.tokenEndpoint !== 'string') return null;
+  let origin;
+  try {
+    origin = new URL(nodeUrl).origin;
+    if (new URL(existing.nodeUrl).origin !== origin) return null;
+  } catch {
+    return null;
+  }
+  const resource = `${origin}/mcp`;
+  if (sameResource(existing.resource ?? existing.mcpEndpoint, resource) !== true) return null;
+  const held = Array.isArray(existing.scopes) ? existing.scopes : [];
+  if (scopes && !scopes.every((s) => held.includes(s))) return null;
+  const next = await refreshTokens({ tokenEndpoint: existing.tokenEndpoint, clientId, refreshToken: existing.refreshToken, resource, requestedScopes: held, fetchImpl, now: now() });
+  return next ? { ...existing, resource, ...next } : null;
 }
 
 const DONE_PAGE = (title, body) => `<!doctype html><meta charset="utf-8"><title>${title}</title><body style="font-family:system-ui;max-width:32rem;margin:4rem auto;line-height:1.5"><h1>${title}</h1><p>${body}</p></body>`;
@@ -242,26 +326,31 @@ export function openBrowser(url, { platform = process.platform, spawnImpl = spaw
  * tokens, granted scopes. `log(line)` receives progress lines (no token ever passes through it).
  * `onUrl(url)` receives the authorization URL (public challenge and state only) as soon as it is
  * known, for a caller that shows it itself (lib/mcp-proxy.js).
- * `clientName` names the harness on the consent screen and in the node's pairing list; each
- * harness registers its own client (one pairing per assistant).
+ * `clientId` is a fixed client (STATIC_CLIENTS): no registration. Without it, `clientName` names
+ * the harness for a dynamic registration.
+ * `harnessAccount` (the harness's own sign-in, lib/session-info.js accountOf) is sent as
+ * `account_hint` in the URL the browser opens only, and kept on the credentials.
  */
-export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientName = 'wybe-connect (Claude Code)', fetchImpl = globalThis.fetch, spawnImpl = spawn, platform = process.platform, timeoutMs = 5 * 60_000, log = () => {}, onUrl = () => {}, now = Date.now } = {}) {
+export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientId: fixedClientId = null, clientName = 'wybe-connect (Claude Code)', harnessAccount = null, fetchImpl = globalThis.fetch, spawnImpl = spawn, platform = process.platform, timeoutMs = 5 * 60_000, log = () => {}, onUrl = () => {}, now = Date.now } = {}) {
   const d = await discover(nodeUrl, { fetchImpl });
   log(`authorization server: ${d.issuer}`);
   const state = randomBytes(16).toString('base64url');
   const { verifier, challenge } = pkcePair();
   const loop = startLoopback({ expectedState: state, timeoutMs });
   const redirectUri = await loop.redirectUri;
-  let clientId;
-  try {
-    ({ clientId } = await register({ metadata: d.metadata, redirectUri, scopes, fetchImpl, clientName }));
-  } catch (err) {
-    loop.close();
-    throw err;
+  let clientId = fixedClientId;
+  if (!clientId) {
+    try {
+      ({ clientId } = await register({ metadata: d.metadata, redirectUri, scopes, fetchImpl, clientName }));
+    } catch (err) {
+      loop.close();
+      throw err;
+    }
   }
-  const url = authorizeUrl({ metadata: d.metadata, clientId, redirectUri, scopes, state, challenge, resource: d.resource });
+  const request = { metadata: d.metadata, clientId, redirectUri, scopes, state, challenge, resource: d.resource };
+  const url = authorizeUrl(request); // shown and logged: without the account
   onUrl(url);
-  const opened = openBrowser(url, { platform, spawnImpl });
+  const opened = openBrowser(authorizeUrl({ ...request, accountHint: harnessAccount }), { platform, spawnImpl });
   log(opened ? `browser opened; if nothing appeared, open this URL yourself:\n${url}` : `open this URL in your browser:\n${url}`);
   const { code } = await loop.result;
   const tokens = await exchangeCode({ metadata: d.metadata, clientId, code, verifier, redirectUri, resource: d.resource, requestedScopes: scopes, fetchImpl, now: now() });
@@ -273,6 +362,7 @@ export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientName = 'wybe
     tokenEndpoint: d.metadata.token_endpoint,
     clientId,
     connectedAt: new Date(now()).toISOString(),
+    ...(harnessAccount ? { harnessAccount } : {}),
     ...tokens,
   };
 }

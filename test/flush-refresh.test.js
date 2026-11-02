@@ -4,7 +4,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDelivery, newSummary } from '../lib/flush.js';
-import { paths } from '../lib/home.js';
+import { paths, saveCredentials } from '../lib/home.js';
 
 const NODE = 'https://demo.wybe.me';
 const TOKEN_ENDPOINT = 'https://auth.wybe.me/oauth/token';
@@ -30,6 +30,7 @@ for (const [label, extra, expected] of [
     const node = refusingNode();
     const credentials = { version: 1, nodeUrl: NODE, mcpEndpoint: `${NODE}/mcp`, tokenEndpoint: TOKEN_ENDPOINT, clientId: 'c1', accessToken: 'wat_x', refreshToken: 'wrt_y', scopes: ['sessions:light'], ...extra };
     const p = paths(mkdtempSync(join(tmpdir(), 'wybe-connect-refresh-')));
+    saveCredentials(credentials, p); // a flush only runs for a stored grant
     const summary = newSummary('Stop');
     const { deliver } = createDelivery({ credentials, paths: p, fetchImpl: node.fetchImpl, summary });
     await deliver({ scope: 'sessions:light', turns: [] });
