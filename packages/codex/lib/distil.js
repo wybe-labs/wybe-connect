@@ -44,7 +44,7 @@ import { homedir } from 'node:os';
 import { withLock, acquire, isAlive as defaultAlive } from './lock.js';
 import { claim, claimKey, claims } from './claims.js';
 import { appendRecord, readRecords } from './ledger.js';
-import { paths as legacyPaths, harnessHome, loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
+import { paths as legacyPaths, harnessHome, loadCredentials, saveCredentials, readJson, writeJsonPrivate, isRefused, markRefused } from './home.js';
 import { rolloutHead, stripCodexInjected } from './codex-rollout.js';
 import { connectionPaths, checkedName, connectionNames, recordTranscript, sessionLines, NODE_ENV } from './connections.js';
 import { callTool } from './post.js';
@@ -188,9 +188,11 @@ export function safeTranscriptPath(path) {
   return path;
 }
 
+// A grant refused for good (home.js markRefused) distils nothing: nothing could be sent with it.
 const hasRemember = (p) => {
   try {
-    return loadCredentials(p)?.scopes?.includes('remember') === true;
+    const c = loadCredentials(p);
+    return !isRefused(c) && c?.scopes?.includes('remember') === true;
   } catch {
     return false;
   }
@@ -1197,10 +1199,11 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
       if (acked.has(r.seq)) continue;
       if (!c) return { ok: false, class: 'signed-out', message: 'not connected to a Wybe AI colleague', importDone, sent };
       if (replaced()) return changed();
+      if (isRefused(readJson(p.credentials))) return { ok: false, class: 'signed-out', message: 'the connection was refused (revoked); connect again', importDone, sent };
       const args = { ...r.args, idempotency_key: r.key };
       let out = await callTool({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, name: 'remember', args, fetchImpl, timeoutMs });
       if (!out.ok && out.kind === 'auth' && c.refreshToken) {
-        const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now() });
+        const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now(), onRefused: () => markRefused(p, c, { now }) });
         if (next) {
           if (replaced()) return changed();
           c = { ...c, ...next };

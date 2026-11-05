@@ -19,7 +19,7 @@
 
 import { mkdirSync, appendFileSync, readFileSync, readdirSync, renameSync, unlinkSync, statSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { loadCredentials, readJson, writeJsonPrivate } from './home.js';
+import { loadCredentials, readJson, writeJsonPrivate, isRefused } from './home.js';
 import { redactValue } from './redact.js';
 import { buildSession, gitRemoteNames, gitBranch } from './transcript.js';
 import { sessionScopeOf, createDelivery, newSummary, mergeHits } from './flush.js';
@@ -140,7 +140,7 @@ export function spoolEntries(records, { conversationId = null, branch = null } =
 export async function flushConversation({ conversationId, event = 'stop', offline = false, paths, fetchImpl = globalThis.fetch, now = Date.now }) {
   const summary = newSummary(event);
   const credentials = loadCredentials(paths);
-  if (!credentials) {
+  if (!credentials || isRefused(credentials)) {
     summary.skipped = 'not-connected';
     return summary;
   }

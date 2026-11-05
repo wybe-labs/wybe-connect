@@ -9,6 +9,8 @@
 //                  and the server sends notifications/tools/list_changed
 //   connected      tools/list = the node's own tools + connect; tools/call is forwarded to the
 //                  node's /mcp with the stored bearer (one refresh on 401), the result verbatim
+//   refused        a refresh refused for good marks the connection (home.js markRefused): no call
+//                  goes out for it, every call says to connect again, and `connect` signs in anew
 //   distil run     (`distilRun` set: the background `claude -p` of lib/distil.js) tools/list is fixed,
 //                  whatever the node or the sign-in: remember, distil_done, pending_questions.
 //                  remember is redacted and appended to the run's outbox, never forwarded; the
@@ -25,7 +27,7 @@
 import { createInterface } from 'node:readline';
 import { connect as defaultConnect, refreshTokens, harnessOf, ALL_SCOPES } from './oauth.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
-import { loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
+import { loadCredentials, saveCredentials, readJson, writeJsonPrivate, isRefused, markRefused } from './home.js';
 import { connectionPaths, connectionNames, checkSave, saveConnection, sessionConnection, pinnedConnection, sessionIdRequired } from './connections.js';
 import { spoolRemember, spoolDone, distilPaths } from './distil.js';
 import { redactToolArguments } from './tool-args.js';
@@ -209,9 +211,11 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
   async function upstream(method, params, sessionId = null) {
     let c = credentials(sessionId);
     if (!c) return { ok: false, kind: 'not-connected', message: 'not connected' };
+    // the grant was refused for good: never presented again, the answer is the refusal's
+    if (isRefused(c)) return { ok: false, kind: 'auth', message: 'the connection was refused' };
     let out = await forward({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, method, params, fetchImpl });
     if (!out.ok && out.kind === 'auth' && c.refreshToken) {
-      const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now() });
+      const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now(), onRefused: () => markRefused(current(sessionId), c, { now }) });
       if (next) {
         c = { ...c, ...next };
         // Stored only while the file still holds the grant this call started with: a grant removed

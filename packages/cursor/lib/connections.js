@@ -17,6 +17,9 @@
 // A second harness account on a node that already has a connection gets <host>~<short account hash>
 // (accountKey), so the first account's grant is never replaced; the name never carries the account.
 // A grant made before accounts were recorded carries none, and only a sign-in under an account marks one.
+// A grant the authorization server refused for good (home.js isRefused) protects nothing: a sign-in to its node
+// under any account takes its name over, and one that lands on another connection of that node moves the
+// sessions fixed to the refused one along, so a reconnect brings every open session back.
 //
 // Which connection a session uses, first match wins:
 //   1. the one the session already uses (its first hook fixed it; `connect use --session` changes it)
@@ -37,7 +40,7 @@
 import { join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from 'node:fs';
-import { paths as legacyPaths, readJson, writeJsonPrivate, loadCredentials, saveCredentials } from './home.js';
+import { paths as legacyPaths, readJson, writeJsonPrivate, loadCredentials, saveCredentials, isRefused } from './home.js';
 import { rolloutSessionIds } from './codex-rollout.js';
 
 export const NODE_ENV = 'WYBE_CONNECT_NODE';
@@ -226,7 +229,7 @@ export function checkSave(root, nodeUrl, name = null) {
 function heldFor(root, key, origin) {
   const held = readGrant(connectionPaths(root, key));
   if (!held || originOf(held.nodeUrl) !== origin) return null;
-  return { account: accountId(held.harnessAccount) };
+  return { account: accountId(held.harnessAccount), refused: isRefused(held) };
 }
 
 /** `<host>~<short account hash>`: the name of a second harness account's connection to `nodeUrl`. */
@@ -237,8 +240,9 @@ export function accountName(nodeUrl, account) {
 
 /**
  * The name a grant for `nodeUrl` made under harness `account` belongs under: the connection this node already has
- * for that account (the most recently used first, the host's own name before others), else the host, else, when the
- * host's connection is another account's, accountName. The host's connection made before accounts were recorded is
+ * for that account (the most recently used first, the host's own name before others), else a connection of this node
+ * whose grant was refused for good (the same order), else the host, else, when the host's connection is another
+ * account's, accountName. The host's connection made before accounts were recorded is
  * renewed under its own name, since nothing tells whose it is. Without an account: the host, as before.
  */
 export function accountKey(root, nodeUrl, account) {
@@ -251,6 +255,8 @@ export function accountKey(root, nodeUrl, account) {
   const rank = (k) => (k === base ? -1 : order.includes(k) ? order.indexOf(k) : order.length);
   const same = knownKeys(root).filter((k) => heldFor(root, k, origin)?.account === a).sort((x, y) => rank(x) - rank(y));
   if (same.length) return same[0];
+  const refused = knownKeys(root).filter((k) => heldFor(root, k, origin)?.refused).sort((x, y) => rank(x) - rank(y));
+  if (refused.length) return refused[0];
   const atBase = heldFor(root, base, origin);
   if (!atBase || atBase.account === null) return base;
   return accountName(nodeUrl, a);
@@ -264,8 +270,36 @@ export function accountKey(root, nodeUrl, account) {
 export function saveConnection(root, credentials, { name = null } = {}) {
   const key = checkSave(root, credentials.nodeUrl, name ?? (credentials.harnessAccount ? accountKey(root, credentials.nodeUrl, credentials.harnessAccount) : null));
   saveCredentials({ ...credentials, grantId: randomBytes(16).toString('hex') }, connectionPaths(root, key));
+  moveOffRefused(root, key);
   markRecent(root, key);
   return key;
+}
+
+/**
+ * Moves every session fixed to a refused connection of `key`'s node (home.js isRefused) to `key`, as `use <key>
+ * --session <id>` would: nothing could be sent from it on the refused one. A session whose transcript cannot be
+ * counted (pin) stays where it is, for `use` once it can.
+ */
+function moveOffRefused(root, key) {
+  const dir = join(root, 'state', 'sessions');
+  const origin = originOf(readGrant(connectionPaths(root, key)).nodeUrl);
+  if (!existsSync(dir)) return;
+  for (const f of readdirSync(dir)) {
+    if (!f.endsWith('.json')) continue;
+    let pinned;
+    try {
+      pinned = readJson(join(dir, f));
+    } catch {
+      continue; // a pin that cannot be read is left as it is
+    }
+    const from = pinned && 'connection' in pinned ? livePin(root, pinned) : null;
+    if (!from || from === key || !heldFor(root, from, origin)?.refused) continue;
+    try {
+      pin(root, f.slice(0, -'.json'.length), key, { moved: true });
+    } catch {
+      // its lines cannot be counted now; the session stays until `use` moves it
+    }
+  }
 }
 
 /** The stored grant of connection `key`, or null. */
@@ -277,13 +311,15 @@ export function connectionGrant(root, key) {
 /**
  * Stores renewed tokens of the same grant (oauth.renewGrant) and makes it the default. The grantId
  * stays: it is the same grant, so nothing running on it is stale. Refused when the file no longer
- * holds that grant (removed or replaced meanwhile).
+ * holds that grant (removed or replaced meanwhile). Sessions on a refused connection of the node move to it,
+ * as after a sign-in (moveOffRefused).
  */
 export function renewConnection(root, key, credentials) {
   const p = connectionPaths(root, key);
   const held = readGrant(p);
   if (!held || (held.grantId ?? null) !== (credentials.grantId ?? null)) throw new Error(`connection ${key} changed meanwhile; run connect again`);
   saveCredentials(credentials, p);
+  moveOffRefused(root, key);
   markRecent(root, key);
   return key;
 }

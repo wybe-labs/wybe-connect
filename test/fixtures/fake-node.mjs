@@ -18,6 +18,8 @@ export function startFakeNode({ valid = TOKEN, level = 'write' } = {}) {
     calls: [], // { name, args, auth, body }
     bodies: [],
     refreshes: 0,
+    grant: 'live', // 'revoked': the token endpoint answers 400 invalid_grant; 'flaky': it answers 503
+    requests: 0, // MCP requests (everything but the token endpoint)
     tool: (name) => node.calls.filter((c) => c.name === name),
   };
   const server = createServer((req, res) => {
@@ -28,10 +30,13 @@ export function startFakeNode({ valid = TOKEN, level = 'write' } = {}) {
       if (node.down) { res.writeHead(503).end(); return; }
       if (req.url === '/oauth/token') {
         node.refreshes += 1;
+        if (node.grant === 'revoked') { res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'invalid_grant' })); return; }
+        if (node.grant === 'flaky') { res.writeHead(503).end(); return; }
         node.valid = NEW_TOKEN;
         res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ access_token: NEW_TOKEN, token_type: 'Bearer', expires_in: 3600, refresh_token: REFRESH, scope: 'remember sessions:light' }));
         return;
       }
+      node.requests += 1;
       if (req.method === 'DELETE') { res.writeHead(200).end(); return; }
       if (req.headers.authorization !== `Bearer ${node.valid}`) { res.writeHead(401).end(); return; }
       const msg = JSON.parse(body);

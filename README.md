@@ -395,6 +395,17 @@ same one twice within 14 days (`packages/cursor/README.md`, "The followup guard"
 and never prints a token or a payload. An unreachable node queues the delta locally; the next
 flush drains the queue. A queue older than 7 days or larger than 50 MB loses its oldest items.
 
+**A revoked grant.** When the authorization server refuses a refresh for good (`invalid_grant`,
+`invalid_client` or `unauthorized_client`, or a bare 401: for example after «Koble fra» in the
+portal), the connection is marked once (`refusedAt` in its `credentials.json`, only while the file
+still holds that grant and that refresh token). From then on nothing presents the dead token
+again: every poller of the connection stops, a node call or a tool call makes no request and says
+to connect again, a flush keeps what it has in the queue, and SessionStart says the connection was
+refused. A 5xx, a 429, a timeout or a network failure never marks it. `connect` signs in anew
+(never renewing the dead grant), takes over the refused connection's name even under another
+harness account, and moves the sessions fixed to a refused connection of that node to the one it
+stored, so every open session works again.
+
 ## Layout
 
 ```
