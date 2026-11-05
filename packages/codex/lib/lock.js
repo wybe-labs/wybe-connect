@@ -1,12 +1,15 @@
-// A cross-process lock file for the distil state (lib/distil.js). Synchronous, because the hooks
-// and the watchdog hold it only around a read-modify-write of one JSON file.
+// A cross-process lock file: the distil state (lib/distil.js) and the claims take it synchronously
+// (acquire, withLock), because the hooks and the watchdog hold it only around a read-modify-write of
+// one JSON file; the token refresh (lib/refresh.js) takes it with acquireAsync, which waits on a
+// timer so the process keeps serving while it waits.
 //
 //   take     open(<lock>, 'wx') and write { pid, token, at }. Exclusive by the file system.
 //   wait     a lock whose pid is alive is busy, however long it has been held: a laptop that sleeps
 //            mid-hook, an AV scan or a slow disk is still a live holder. No age rule.
 //   take over  only a dead holder's lock (process.kill(pid, 0) says ESRCH); a lock with no readable
 //            pid only after LOCK_UNREADABLE_MS (its writer died between create and write); and,
-//            for a pid the OS has since reused, after LOCK_MAX_HOLD_MS.
+//            for a pid the OS has since reused, after LOCK_MAX_HOLD_MS. A holder known to finish
+//            much sooner (one token call) passes a shorter maxHoldMs, so a hung holder is outwaited.
 //   fence    the holder gets stillHeld(): true while the lock file still carries its token. A
 //            holder checks it right before it writes, so a holder whose lock was taken over never
 //            overwrites the new holder's work, and on release it deletes only its own lock.
@@ -65,12 +68,12 @@ const identityOf = (file) => {
   }
 };
 
-function reapable(seen, now, alive) {
+function reapable(seen, now, alive, { maxHoldMs = LOCK_MAX_HOLD_MS, unreadableMs = LOCK_UNREADABLE_MS } = {}) {
   const { holder, mtimeMs } = seen;
-  if (!holder || !Number.isInteger(holder.pid)) return now - mtimeMs > LOCK_UNREADABLE_MS;
+  if (!holder || !Number.isInteger(holder.pid)) return now - mtimeMs > unreadableMs;
   if (!alive(holder.pid)) return true;
   const at = Date.parse(holder.at);
-  return Number.isFinite(at) && now - at > LOCK_MAX_HOLD_MS;
+  return Number.isFinite(at) && now - at > maxHoldMs;
 }
 
 /** Moves a dead lock aside. If what was moved turns out to be someone's live lock, it goes back. */
@@ -143,6 +146,11 @@ export function acquire(file, { tries = 50, waitMs = 100, alive = isAlive, now =
     err.code = 'ELOCKBUSY';
     throw err;
   }
+  return heldBy(file, token);
+}
+
+/** What a holder of the lock file gets: the fence and the release, both by its own token. */
+function heldBy(file, token) {
   const stillHeld = () => {
     try {
       return JSON.parse(readFileSync(file, 'utf8')).token === token;
@@ -159,6 +167,32 @@ export function acquire(file, { tries = 50, waitMs = 100, alive = isAlive, now =
     }
   };
   return { stillHeld, release };
+}
+
+/**
+ * The same lock for a process that must keep serving while it waits (an MCP server, a poller): it
+ * waits on a timer, `waitMs` plus jitter between attempts, for at most `maxWaitMs`, then throws an
+ * Error with code 'ELOCKBUSY'. `maxHoldMs` and `unreadableMs` are the takeover ages (see the top).
+ * The lock's directory is never created: a directory removed meanwhile (a connection removed)
+ * throws ENOENT instead of coming back. Returns { stillHeld, release }.
+ */
+export async function acquireAsync(file, { waitMs = 25, maxWaitMs = 30_000, maxHoldMs = LOCK_MAX_HOLD_MS, unreadableMs = LOCK_UNREADABLE_MS, alive = isAlive, now = Date.now } = {}) {
+  const token = randomBytes(12).toString('hex');
+  const until = now() + maxWaitMs;
+  for (;;) {
+    if (tryTake(file, token)) return heldBy(file, token);
+    const seen = readHolder(file);
+    if (seen && reapable(seen, now(), alive, { maxHoldMs, unreadableMs })) {
+      reap(file, seen);
+      if (tryTake(file, token)) return heldBy(file, token);
+    }
+    if (now() >= until) {
+      const err = new Error('the lock is held by a live process');
+      err.code = 'ELOCKBUSY';
+      throw err;
+    }
+    await new Promise((resolve) => setTimeout(resolve, waitMs + Math.floor(Math.random() * waitMs)));
+  }
 }
 
 export const _internals = { readHolder, reapable, reap };

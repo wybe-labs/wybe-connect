@@ -18,7 +18,14 @@ export function startFakeNode({ valid = TOKEN, level = 'write' } = {}) {
     calls: [], // { name, args, auth, body }
     bodies: [],
     refreshes: 0,
-    grant: 'live', // 'revoked': the token endpoint answers 400 invalid_grant; 'flaky': it answers 503
+    // 'revoked': the token endpoint answers 400 invalid_grant; 'flaky': it answers 503; 'rotating': an
+    // authorization server with rotating refresh tokens and reuse detection (see below)
+    grant: 'live',
+    refresh: REFRESH, // 'rotating': the one refresh token it accepts now
+    generation: 0, // 'rotating': how many times it rotated
+    reused: 0, // 'rotating': refreshes that presented a refresh token it had already rotated
+    presented: [], // every refresh token presented to the token endpoint
+    tokenDelayMs: 0, // how long the token endpoint takes to answer
     requests: 0, // MCP requests (everything but the token endpoint)
     tool: (name) => node.calls.filter((c) => c.name === name),
   };
@@ -30,10 +37,29 @@ export function startFakeNode({ valid = TOKEN, level = 'write' } = {}) {
       if (node.down) { res.writeHead(503).end(); return; }
       if (req.url === '/oauth/token') {
         node.refreshes += 1;
-        if (node.grant === 'revoked') { res.writeHead(400, { 'content-type': 'application/json' }).end(JSON.stringify({ error: 'invalid_grant' })); return; }
+        const presented = new URLSearchParams(body).get('refresh_token');
+        node.presented.push(presented);
+        const answer = (status, json) => setTimeout(() => res.writeHead(status, { 'content-type': 'application/json' }).end(JSON.stringify(json)), node.tokenDelayMs);
+        if (node.grant === 'rotating') {
+          // Each refresh token works once. One presented again after it was rotated is taken as stolen:
+          // the whole grant is revoked (every token of it, the new ones too), as the authorization server does.
+          if (presented !== node.refresh) {
+            node.reused += 1;
+            node.grant = 'revoked';
+            node.valid = 'wat_nobody-has-this';
+            answer(400, { error: 'invalid_grant' });
+            return;
+          }
+          node.generation += 1;
+          node.refresh = `wrt_rotated-${node.generation}`;
+          node.valid = `wat_rotated-${node.generation}`;
+          answer(200, { access_token: node.valid, token_type: 'Bearer', expires_in: 3600, refresh_token: node.refresh, scope: 'remember sessions:light' });
+          return;
+        }
+        if (node.grant === 'revoked') { answer(400, { error: 'invalid_grant' }); return; }
         if (node.grant === 'flaky') { res.writeHead(503).end(); return; }
         node.valid = NEW_TOKEN;
-        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({ access_token: NEW_TOKEN, token_type: 'Bearer', expires_in: 3600, refresh_token: REFRESH, scope: 'remember sessions:light' }));
+        answer(200, { access_token: NEW_TOKEN, token_type: 'Bearer', expires_in: 3600, refresh_token: REFRESH, scope: 'remember sessions:light' });
         return;
       }
       node.requests += 1;

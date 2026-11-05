@@ -406,6 +406,17 @@ refused. A 5xx, a 429, a timeout or a network failure never marks it. `connect` 
 harness account, and moves the sessions fixed to a refused connection of that node to the one it
 stored, so every open session works again.
 
+**One refresh at a time.** Every process of a connection (each session's poller, the MCP server,
+flushes, distil, `connect`) holds the same tokens, and the authorization server rotates the refresh
+token on every refresh and revokes the whole grant when a rotated one is presented again. So a
+refresh takes `refresh.lock` in the connection's directory first (an exclusive file with the
+holder's pid and time; a dead holder's lock is taken over at once, a live one after 30 seconds),
+reads `credentials.json` again inside it, and uses the tokens another process stored meanwhile
+instead of refreshing. Only when the stored access token is still the refused one (or has expired)
+does it present the stored refresh token, and it writes the new tokens before it lets go. A
+refusal marks the connection only when the refused refresh token is still the stored one, so a
+race between processes never marks a live grant.
+
 ## Layout
 
 ```

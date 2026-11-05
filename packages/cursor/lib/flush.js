@@ -7,12 +7,12 @@
 
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { paths as defaultPaths, loadCredentials, saveCredentials, readJson, writeJsonPrivate, isRefused, markRefused } from './home.js';
+import { paths as defaultPaths, loadCredentials, readJson, writeJsonPrivate, isRefused } from './home.js';
 import { parseTranscript, readDelta, buildSession, gitRemoteNames } from './transcript.js';
 import { parseRollout, rolloutHead } from './codex-rollout.js';
 import { redactValue, FAMILIES } from './redact.js';
 import { reportSession } from './post.js';
-import { refreshTokens } from './oauth.js';
+import { refreshStored } from './refresh.js';
 import { enqueue, drain, size as queueSize } from './queue.js';
 
 /** The sessions scope the grant allows: full beats light; none means report_session never fires. */
@@ -84,9 +84,10 @@ export function createDelivery({ credentials, paths, fetchImpl = globalThis.fetc
   };
   const refresh = async (c) => {
     if (stale() || refused()) return null;
-    const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now(), onRefused: () => markRefused(paths, c, { now }) });
+    // one process at a time, stored before it returns (lib/refresh.js)
+    const next = await refreshStored(paths, c, { fetchImpl, now });
     if (!next || stale()) return null;
-    return { ...c, ...next };
+    return next;
   };
   const staleOutcome = () => {
     summary.lastOutcome = { kind: 'stale', message: 'the connection was removed or replaced while this flush ran' };
@@ -101,8 +102,7 @@ export function createDelivery({ credentials, paths, fetchImpl = globalThis.fetc
     const { outcome, credentials: after } = await reportSession({ credentials: creds, session, fetchImpl, refresh });
     if (after !== creds) {
       if (stale()) return staleOutcome();
-      creds = after;
-      saveCredentials(creds, paths);
+      creds = after; // already stored by the refresh, under its lock
     }
     if (outcome.ok) {
       if (outcome.openQuestions.length && !stale()) {
