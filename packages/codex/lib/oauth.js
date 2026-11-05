@@ -10,13 +10,15 @@
 //   resource   asked for the node's /mcp endpoint; a token answer naming another resource is refused
 //   browser    opened by spawning the platform opener with the URL as an argument (never a shell)
 //   exchange   code + verifier -> access + refresh tokens (RFC 8707 `resource` = the node's /mcp endpoint)
-//   refresh    rotating refresh token
+//   refresh    rotating refresh token; an answer that says the grant is dead (refusedForGood) is
+//              told apart from a failure that may pass (5xx, the network, a timeout)
 // Tokens are returned to the caller; this module stores nothing and logs nothing but the URL to
 // open (which carries the public challenge and state, never a token).
 
 import { createServer } from 'node:http';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawn } from 'node:child_process';
+import { isRefused } from './home.js';
 
 export const DEFAULT_ISSUER = 'https://auth.wybe.me';
 export const ALL_SCOPES = Object.freeze(['remember', 'conversations', 'sessions:light', 'sessions:full']);
@@ -171,14 +173,14 @@ async function tokenRequest(tokenEndpoint, form, fetchImpl, timeoutMs) {
     signal: AbortSignal.timeout(timeoutMs),
   });
   if (!res.ok) {
-    let reason = '';
+    let error = null;
     try {
       const err = await res.json();
-      reason = typeof err?.error === 'string' ? ` (${err.error})` : '';
+      error = typeof err?.error === 'string' ? err.error : null;
     } catch {
       // no JSON body
     }
-    throw new Error(`token endpoint refused: HTTP ${res.status}${reason}`);
+    throw Object.assign(new Error(`token endpoint refused: HTTP ${res.status}${error ? ` (${error})` : ''}`), { status: res.status, oauthError: error });
   }
   const body = await res.json();
   if (typeof body.access_token !== 'string') throw new Error('token endpoint answered without an access_token');
@@ -209,9 +211,27 @@ export async function exchangeCode({ metadata, clientId, code, verifier, redirec
   return tokensToCredentials(body, { requestedScopes, now });
 }
 
-/** Rotates the refresh token. Returns the new token fields, or null when the grant is gone. */
-export async function refreshTokens({ tokenEndpoint, clientId, refreshToken, resource, requestedScopes, fetchImpl = globalThis.fetch, timeoutMs = 10_000, now = Date.now() }) {
+// RFC 6749 5.2: the refresh token is dead (revoked, expired, spent) or the client is unknown. Presenting
+// it again can only be refused again.
+const DEAD_GRANT_ERRORS = new Set(['invalid_grant', 'invalid_client', 'unauthorized_client']);
+
+/**
+ * Whether a token endpoint's refusal is for good: a 400 or 401 naming a dead grant or an unknown client,
+ * or a 401 with no error named. A 5xx, a 429, another 400 (invalid_scope: nothing was spent) are not.
+ */
+export function refusedForGood(status, oauthError) {
+  if (status !== 400 && status !== 401) return false;
+  return DEAD_GRANT_ERRORS.has(oauthError) || (status === 401 && !oauthError);
+}
+
+/**
+ * Rotates the refresh token. Returns the new token fields, or null when it did not. `onRefused()` is
+ * called (before null is returned) when the authorization server refused the grant for good
+ * (refusedForGood), never for a failure that may pass: the network, a timeout, a 5xx.
+ */
+export async function refreshTokens({ tokenEndpoint, clientId, refreshToken, resource, requestedScopes, fetchImpl = globalThis.fetch, timeoutMs = 10_000, now = Date.now(), onRefused = () => {} }) {
   if (!refreshToken) return null;
+  let refused = false;
   try {
     const body = await tokenRequest(tokenEndpoint, {
       grant_type: 'refresh_token',
@@ -223,9 +243,11 @@ export async function refreshTokens({ tokenEndpoint, clientId, refreshToken, res
     const next = tokensToCredentials(body, { requestedScopes, now });
     if (!next.refreshToken) next.refreshToken = refreshToken;
     return next;
-  } catch {
-    return null;
+  } catch (err) {
+    refused = refusedForGood(err?.status, err?.oauthError);
   }
+  if (refused) onRefused();
+  return null;
 }
 
 /**
@@ -235,6 +257,7 @@ export async function refreshTokens({ tokenEndpoint, clientId, refreshToken, res
  */
 export async function renewGrant(existing, { clientId, nodeUrl, scopes = null, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
   if (!existing || !clientId || existing.clientId !== clientId || !existing.refreshToken || typeof existing.tokenEndpoint !== 'string') return null;
+  if (isRefused(existing)) return null; // its refresh token is dead: a new sign-in replaces it
   let origin;
   try {
     origin = new URL(nodeUrl).origin;

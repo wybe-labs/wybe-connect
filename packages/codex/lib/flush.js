@@ -7,7 +7,7 @@
 
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
-import { paths as defaultPaths, loadCredentials, saveCredentials, readJson, writeJsonPrivate } from './home.js';
+import { paths as defaultPaths, loadCredentials, saveCredentials, readJson, writeJsonPrivate, isRefused, markRefused } from './home.js';
 import { parseTranscript, readDelta, buildSession, gitRemoteNames } from './transcript.js';
 import { parseRollout, rolloutHead } from './codex-rollout.js';
 import { redactValue, FAMILIES } from './redact.js';
@@ -73,9 +73,18 @@ export function createDelivery({ credentials, paths, fetchImpl = globalThis.fetc
       return true;
     }
   };
+  // A grant the authorization server refused for good (home.js markRefused) is never presented
+  // again: what this flush has not sent stays in the queue for the connection's next sign-in.
+  const refused = () => {
+    try {
+      return isRefused(readJson(paths.credentials));
+    } catch {
+      return false;
+    }
+  };
   const refresh = async (c) => {
-    if (stale()) return null;
-    const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now() });
+    if (stale() || refused()) return null;
+    const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now(), onRefused: () => markRefused(paths, c, { now }) });
     if (!next || stale()) return null;
     return { ...c, ...next };
   };
@@ -85,6 +94,10 @@ export function createDelivery({ credentials, paths, fetchImpl = globalThis.fetc
   };
   const send = async (session) => {
     if (stale()) return staleOutcome();
+    if (refused()) {
+      summary.lastOutcome = { kind: 'refused', message: 'the connection was refused (revoked); connect again' };
+      return false;
+    }
     const { outcome, credentials: after } = await reportSession({ credentials: creds, session, fetchImpl, refresh });
     if (after !== creds) {
       if (stale()) return staleOutcome();
@@ -138,7 +151,7 @@ export function createDelivery({ credentials, paths, fetchImpl = globalThis.fetc
 export async function flush({ transcriptPath, sessionId = null, cwd = null, event = 'Stop', harness = 'claude-code', offline = false, lines = null, paths = defaultPaths(), fetchImpl = globalThis.fetch, now = Date.now }) {
   const summary = newSummary(event);
   const credentials = loadCredentials(paths);
-  if (!credentials) {
+  if (!credentials || isRefused(credentials)) {
     summary.skipped = 'not-connected';
     return summary;
   }

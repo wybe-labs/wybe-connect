@@ -23,7 +23,7 @@
 import { join, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, writeFileSync, readFileSync, mkdirSync, statSync } from 'node:fs';
-import { readJson, writeJsonPrivate, loadCredentials, saveCredentials } from './home.js';
+import { readJson, writeJsonPrivate, loadCredentials, saveCredentials, isRefused, markRefused } from './home.js';
 import { callTool } from './post.js';
 import { refreshTokens } from './oauth.js';
 import { redact, redactValue } from './redact.js';
@@ -70,9 +70,11 @@ function quietJson(path) {
   }
 }
 
+/** The connection's grant; null when there is none, or the authorization server refused it for good. */
 function credentialsOf(p) {
   try {
-    return p?.credentials ? loadCredentials(p) : null;
+    const c = p?.credentials ? loadCredentials(p) : null;
+    return isRefused(c) ? null : c;
   } catch {
     return null;
   }
@@ -163,7 +165,9 @@ export function dataOf(result) {
 /**
  * One node tool call with the connection's grant: arguments redacted first (a value the walker
  * cannot read is never sent), one refresh on an auth refusal, stored only while the file still
- * holds the grant the call started with. Returns { ok, data } or { ok: false, kind, toolError? }.
+ * holds the grant the call started with. A refresh refused for good marks the connection refused
+ * (home.js markRefused): from then on no call is made for it, and every poller of it stops.
+ * Returns { ok, data } or { ok: false, kind, toolError? }.
  */
 export async function nodeCall(p, name, args, { fetchImpl = globalThis.fetch, now = Date.now, timeoutMs = CALL_TIMEOUT_MS, redactOptions = {} } = {}) {
   let c = credentialsOf(p);
@@ -177,7 +181,7 @@ export async function nodeCall(p, name, args, { fetchImpl = globalThis.fetch, no
   const attempt = (creds) => callTool({ endpoint: creds.mcpEndpoint, accessToken: creds.accessToken, name, args: safe, fetchImpl, timeoutMs });
   let out = await attempt(c);
   if (!out.ok && out.kind === 'auth' && c.refreshToken) {
-    const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now() });
+    const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now(), onRefused: () => markRefused(p, c, { now }) });
     if (next) {
       c = { ...c, ...next };
       const onDisk = quietJson(p.credentials);
@@ -465,7 +469,8 @@ export function pollInterval(env = process.env) {
 
 /**
  * Polls the node for this session until a reason to stop: 'superseded' (a newer poller),
- * 'closed' (SessionEnd), 'gone' (the connection or the session record is gone), 'idle' (no
+ * 'closed' (SessionEnd), 'gone' (the connection or the session record is gone, or the grant was
+ * refused for good: a revoked grant is never presented again), 'idle' (no
  * activity for IDLE_LIMIT_MS), or 'stop' (onTasks asked to: Claude Code exits to wake the session).
  * Each round: the results waiting, a sessions_report every REPORT_EVERY_MS (and at start), with `harness` a scan
  * of every session of that harness on disk when one is due (scanSessions), then the inbox. onTasks(tasks) returns 'stop' or 'continue'. The node down: backoff up to MAX_BACKOFF_MS.

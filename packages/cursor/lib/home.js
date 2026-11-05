@@ -107,3 +107,28 @@ export function loadCredentials(p = paths()) {
 export function saveCredentials(credentials, p = paths()) {
   writeJsonPrivate(p.credentials, { version: 1, ...credentials });
 }
+
+/**
+ * A grant the authorization server refused for good (revoked, e.g. disconnected in the Wybe portal): its
+ * refresh token is dead, so nothing presents it again. Only a new sign-in, which writes new
+ * credentials without the mark, brings the connection back.
+ */
+export const isRefused = (c) => typeof c?.refusedAt === 'string';
+
+/**
+ * Marks the grant `c` refused, once, and only while the file still holds that grant with the refresh
+ * token that was refused: a grant replaced meanwhile (another grantId) or refreshed by another process
+ * (a rotated refresh token: that refusal was the two racing, not a revocation) is left as it is.
+ * Returns true when it marked.
+ */
+export function markRefused(p, c, { now = Date.now } = {}) {
+  let onDisk;
+  try {
+    onDisk = p?.credentials ? readJson(p.credentials) : null;
+  } catch {
+    return false;
+  }
+  if (!onDisk || isRefused(onDisk) || (onDisk.grantId ?? null) !== (c?.grantId ?? null) || onDisk.refreshToken !== c?.refreshToken) return false;
+  writeJsonPrivate(p.credentials, { ...onDisk, refusedAt: new Date(now()).toISOString() });
+  return true;
+}
