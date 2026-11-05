@@ -44,11 +44,11 @@ import { homedir } from 'node:os';
 import { withLock, acquire, isAlive as defaultAlive } from './lock.js';
 import { claim, claimKey, claims } from './claims.js';
 import { appendRecord, readRecords } from './ledger.js';
-import { paths as legacyPaths, harnessHome, loadCredentials, saveCredentials, readJson, writeJsonPrivate, isRefused, markRefused } from './home.js';
+import { paths as legacyPaths, harnessHome, loadCredentials, readJson, writeJsonPrivate, isRefused } from './home.js';
 import { rolloutHead, stripCodexInjected } from './codex-rollout.js';
 import { connectionPaths, checkedName, connectionNames, recordTranscript, sessionLines, NODE_ENV } from './connections.js';
 import { callTool } from './post.js';
-import { refreshTokens } from './oauth.js';
+import { refreshStored } from './refresh.js';
 import { redactValue } from './redact.js';
 
 export const DISTIL_ENV = 'WYBE_CONNECT_DISTIL';
@@ -1203,11 +1203,10 @@ export async function deliver(p, run, { fetchImpl = globalThis.fetch, timeoutMs 
       const args = { ...r.args, idempotency_key: r.key };
       let out = await callTool({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, name: 'remember', args, fetchImpl, timeoutMs });
       if (!out.ok && out.kind === 'auth' && c.refreshToken) {
-        const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now(), onRefused: () => markRefused(p, c, { now }) });
+        const next = await refreshStored(p, c, { fetchImpl, now });
         if (next) {
           if (replaced()) return changed();
-          c = { ...c, ...next };
-          saveCredentials(c, p);
+          c = next;
           out = await callTool({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, name: 'remember', args, fetchImpl, timeoutMs });
         }
       }

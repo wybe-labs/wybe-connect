@@ -25,9 +25,10 @@
 // stdout carries JSON-RPC only; nothing here prints a token.
 
 import { createInterface } from 'node:readline';
-import { connect as defaultConnect, refreshTokens, harnessOf, ALL_SCOPES } from './oauth.js';
+import { connect as defaultConnect, harnessOf, ALL_SCOPES } from './oauth.js';
+import { refreshStored } from './refresh.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
-import { loadCredentials, saveCredentials, readJson, writeJsonPrivate, isRefused, markRefused } from './home.js';
+import { loadCredentials, saveCredentials, readJson, writeJsonPrivate, isRefused } from './home.js';
 import { connectionPaths, connectionNames, checkSave, saveConnection, sessionConnection, pinnedConnection, sessionIdRequired } from './connections.js';
 import { spoolRemember, spoolDone, distilPaths } from './distil.js';
 import { redactToolArguments } from './tool-args.js';
@@ -215,19 +216,12 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     if (isRefused(c)) return { ok: false, kind: 'auth', message: 'the connection was refused' };
     let out = await forward({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, method, params, fetchImpl });
     if (!out.ok && out.kind === 'auth' && c.refreshToken) {
-      const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now(), onRefused: () => markRefused(current(sessionId), c, { now }) });
+      // One process at a time, stored only over the grant this call started with (lib/refresh.js):
+      // a grant removed or replaced meanwhile (a new grantId, lib/connections.js) is never written over.
+      const p = current(sessionId);
+      const next = p ? await refreshStored(p, c, { fetchImpl, now }) : null;
       if (next) {
-        c = { ...c, ...next };
-        // Stored only while the file still holds the grant this call started with: a grant removed
-        // or replaced meanwhile (a new grantId, lib/connections.js) is never written over.
-        const p = current(sessionId);
-        let onDisk = null;
-        try {
-          onDisk = p ? readJson(p.credentials) : null;
-        } catch {
-          onDisk = null;
-        }
-        if (onDisk && (onDisk.grantId ?? null) === (c.grantId ?? null)) saveCredentials(c, p);
+        c = next;
         out = await forward({ endpoint: c.mcpEndpoint, accessToken: c.accessToken, method, params, fetchImpl });
       }
     }

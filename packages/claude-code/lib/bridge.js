@@ -23,9 +23,9 @@
 import { join, dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readdirSync, writeFileSync, readFileSync, mkdirSync, statSync } from 'node:fs';
-import { readJson, writeJsonPrivate, loadCredentials, saveCredentials, isRefused, markRefused } from './home.js';
+import { readJson, writeJsonPrivate, loadCredentials, isRefused } from './home.js';
 import { callTool } from './post.js';
-import { refreshTokens } from './oauth.js';
+import { refreshStored } from './refresh.js';
 import { redact, redactValue } from './redact.js';
 import { withLock, isAlive } from './lock.js';
 import { sessionInfo } from './session-info.js';
@@ -164,9 +164,10 @@ export function dataOf(result) {
 
 /**
  * One node tool call with the connection's grant: arguments redacted first (a value the walker
- * cannot read is never sent), one refresh on an auth refusal, stored only while the file still
- * holds the grant the call started with. A refresh refused for good marks the connection refused
- * (home.js markRefused): from then on no call is made for it, and every poller of it stops.
+ * cannot read is never sent), one refresh on an auth refusal (lib/refresh.js: one process at a
+ * time, the tokens another process stored are taken without a token call). A refresh refused for
+ * good marks the connection refused (home.js markRefused): from then on no call is made for it,
+ * and every poller of it stops.
  * Returns { ok, data } or { ok: false, kind, toolError? }.
  */
 export async function nodeCall(p, name, args, { fetchImpl = globalThis.fetch, now = Date.now, timeoutMs = CALL_TIMEOUT_MS, redactOptions = {} } = {}) {
@@ -181,11 +182,9 @@ export async function nodeCall(p, name, args, { fetchImpl = globalThis.fetch, no
   const attempt = (creds) => callTool({ endpoint: creds.mcpEndpoint, accessToken: creds.accessToken, name, args: safe, fetchImpl, timeoutMs });
   let out = await attempt(c);
   if (!out.ok && out.kind === 'auth' && c.refreshToken) {
-    const next = await refreshTokens({ tokenEndpoint: c.tokenEndpoint, clientId: c.clientId, refreshToken: c.refreshToken, resource: c.resource ?? c.mcpEndpoint, requestedScopes: c.scopes, fetchImpl, now: now(), onRefused: () => markRefused(p, c, { now }) });
+    const next = await refreshStored(p, c, { fetchImpl, now });
     if (next) {
-      c = { ...c, ...next };
-      const onDisk = quietJson(p.credentials);
-      if (onDisk && (onDisk.grantId ?? null) === (c.grantId ?? null)) saveCredentials(c, p);
+      c = next;
       out = await attempt(c);
     }
   }

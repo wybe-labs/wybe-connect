@@ -1,7 +1,7 @@
 {
   "name": "wybe-connect",
   "description": "Feeds your Wybe node from Claude Code with the essence of your work: a background distil on your machine turns your sessions into short, redacted work facts and delivers each exactly once. Nothing raw leaves the machine. The connect skill pairs this machine with your node once. Sends only, and never reads what your colleague knows; two things come back: a task you gave your colleague for an open session (one that needs your yes is shown to you first), and your colleague's open questions, shown at session start for you to answer or not.",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "author": {
     "name": "Wybe Labs AS"
   },

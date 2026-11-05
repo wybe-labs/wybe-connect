@@ -5,6 +5,7 @@
 //   connections/<name>/       one per node or account (lib/connections.js), each holding:
 //     credentials.json        the OAuth grant for the node, mode 600 (chmod is best effort on
 //                             Windows, where the profile directory's ACL is the protection)
+//     refresh.lock            held while one process refreshes the grant (lib/refresh.js)
 //     queue/                  payloads the node has not taken yet (see queue.js for the bounds)
 //     open-questions.json     the node's open questions from the last tool response
 //     surfaced-questions.json (Cursor) question ids already put to the person, and when
