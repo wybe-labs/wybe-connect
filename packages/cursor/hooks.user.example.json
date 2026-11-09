@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "hooks": {
+    "sessionStart": [
+      { "command": "node \"/ABSOLUTE/PATH/TO/wybe-connect/packages/cursor/hooks/on-event.js\"", "timeout": 10 }
+    ],
+    "beforeSubmitPrompt": [
+      { "command": "node \"/ABSOLUTE/PATH/TO/wybe-connect/packages/cursor/hooks/on-event.js\"", "timeout": 5 }
+    ],
+    "afterFileEdit": [
+      { "command": "node \"/ABSOLUTE/PATH/TO/wybe-connect/packages/cursor/hooks/on-event.js\"", "timeout": 5 }
+    ],
+    "afterAgentResponse": [
+      { "command": "node \"/ABSOLUTE/PATH/TO/wybe-connect/packages/cursor/hooks/on-event.js\"", "timeout": 5 }
+    ],
+    "postToolUse": [
+      { "command": "node \"/ABSOLUTE/PATH/TO/wybe-connect/packages/cursor/hooks/on-event.js\"", "timeout": 5 }
+    ],
+    "stop": [
+      { "command": "node \"/ABSOLUTE/PATH/TO/wybe-connect/packages/cursor/hooks/on-event.js\"", "timeout": 30, "loop_limit": 1 }
+    ],
+    "sessionEnd": [
+      { "command": "node \"/ABSOLUTE/PATH/TO/wybe-connect/packages/cursor/hooks/on-event.js\"", "timeout": 10 }
+    ]
+  }
+}
