@@ -113,6 +113,11 @@ function allLines(cwd = process.cwd()) {
 }
 
 const gitMergeBase = (ref) => execFileSync('git', ['merge-base', 'HEAD', ref], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+/** Whether HEAD is a root commit: a full-history checkout whose HEAD has no parent. */
+const gitHeadIsRoot = () => {
+  try { return execFileSync('git', ['rev-list', '--parents', '-n', '1', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split(/\s+/).length === 1; }
+  catch { return false; }
+};
 
 /**
  * What "added" is measured against. One answer per event, and never a quiet fallback that reads less:
@@ -120,11 +125,12 @@ const gitMergeBase = (ref) => execFileSync('git', ['merge-base', 'HEAD', ref], {
  *                 When it is missing that is an error: HEAD~1 would see only the last commit.
  *   push          PUSH_BEFORE (the workflow passes github.event.before), the branch as it was
  *                 before the push, so a push of several commits is read whole. For a new branch
- *                 (all zeros) or a commit no longer in the checkout: HEAD^1.
+ *                 (all zeros) or a commit no longer in the checkout: HEAD^1. A root commit (no
+ *                 parent at all) adds every line: `{ all: true }`, the whole tree is read.
  *   local         origin/main, else HEAD~1.
  * `{ base: null, reason }` means "unknown"; main() says so and fails instead of reading everything.
  */
-export function findBase(arg, env = process.env, mergeBase = gitMergeBase) {
+export function findBase(arg, env = process.env, mergeBase = gitMergeBase, headIsRoot = gitHeadIsRoot) {
   if (arg) return { base: arg };
   const tryRef = (ref) => { try { return mergeBase(ref); } catch { return null; } };
   if (env.GITHUB_EVENT_NAME === 'pull_request') {
@@ -135,7 +141,9 @@ export function findBase(arg, env = process.env, mergeBase = gitMergeBase) {
   if (env.GITHUB_EVENT_NAME === 'push') {
     const before = env.PUSH_BEFORE && !/^0+$/.test(env.PUSH_BEFORE) ? tryRef(env.PUSH_BEFORE) : null;
     const base = before ?? tryRef('HEAD^1');
-    return base ? { base } : { base: null, reason: 'a push without a parent (HEAD^1 is not in the checkout)' };
+    if (base) return { base };
+    if (headIsRoot()) return { base: null, all: true };
+    return { base: null, reason: 'a push without a parent (HEAD^1 is not in the checkout)' };
   }
   const base = tryRef('origin/main') ?? tryRef('HEAD~1');
   return base ? { base } : { base: null, reason: 'neither origin/main nor HEAD~1 exists' };
@@ -152,10 +160,13 @@ function main() {
   let lines;
   if (argv.includes('--all')) lines = allLines();
   else {
-    const { base, reason } = findBase(baseArg(argv));
-    if (!base) { console.log(`no base to compare with: ${reason}\nrun with --base <ref> or --all\nLEAK_SCAN_FAIL`); process.exitCode = 1; return; }
-    console.log(`base ${base.slice(0, 12)}`);
-    lines = addedLines(base);
+    const { base, reason, all } = findBase(baseArg(argv));
+    if (all) { console.log('a root commit: every line is added'); lines = allLines(); }
+    else if (!base) { console.log(`no base to compare with: ${reason}\nrun with --base <ref> or --all\nLEAK_SCAN_FAIL`); process.exitCode = 1; return; }
+    else {
+      console.log(`base ${base.slice(0, 12)}`);
+      lines = addedLines(base);
+    }
   }
   let n = 0;
   for (const { file, nr, text } of lines) {

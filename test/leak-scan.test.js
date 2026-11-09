@@ -129,4 +129,8 @@ test('a push is diffed against the commit the branch pointed at before the push,
   // A new branch (all zeros) or a before-commit not in the checkout: the commit before HEAD.
   assert.deepEqual(findBase(null, { GITHUB_EVENT_NAME: 'push', PUSH_BEFORE: '0000000000000000000000000000000000000000' }, mergeBase), { base: 'bbb' });
   assert.deepEqual(findBase(null, { GITHUB_EVENT_NAME: 'push', PUSH_BEFORE: 'ddd' }, mergeBase), { base: 'bbb' });
+  const none = () => { throw new Error('no ref'); };
+  assert.deepEqual(findBase(null, { GITHUB_EVENT_NAME: 'push', PUSH_BEFORE: '0'.repeat(40) }, none, () => true), { base: null, all: true }, 'a root commit reads the whole tree');
+  assert.equal(findBase(null, { GITHUB_EVENT_NAME: 'push' }, none, () => false).base, null, 'a missing parent that is not a root stays unknown');
+  assert.ok(findBase(null, { GITHUB_EVENT_NAME: 'push' }, none, () => false).reason);
 });
