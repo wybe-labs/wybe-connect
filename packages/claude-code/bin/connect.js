@@ -10,7 +10,7 @@ import { NODE_ENV } from '../lib/connections.js';
 
 process.exitCode = await runConnect({
   harness: 'claude-code',
-  clientName: 'wybe-connect (Claude Code)',
+  clientName: 'Claude Code (wybe)',
   nextSteps: (_c, { key, others }) => [
     others.length
       ? `The plugin's \`wybe\` MCP server uses the default connection (now ${key}), or the one ${NODE_ENV}=<name> names when Claude Code starts; restart Claude Code to load the tools.`

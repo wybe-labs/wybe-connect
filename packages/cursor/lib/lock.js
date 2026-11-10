@@ -124,9 +124,11 @@ function tryTake(file, token) {
 /**
  * Takes the lock and returns { stillHeld, release } (for a holder that awaits, such as the
  * watchdog's delivery). Throws an Error with code 'ELOCKBUSY' when the lock stayed with a live
- * holder for `tries` attempts.
+ * holder for `tries` attempts. `maxHoldMs` and `unreadableMs` are the takeover ages (see the top):
+ * a holder known to finish in milliseconds passes a short maxHoldMs, so a lock whose pid the OS
+ * has since reused does not block it for a day.
  */
-export function acquire(file, { tries = 50, waitMs = 100, alive = isAlive, now = Date.now } = {}) {
+export function acquire(file, { tries = 50, waitMs = 100, maxHoldMs = LOCK_MAX_HOLD_MS, unreadableMs = LOCK_UNREADABLE_MS, alive = isAlive, now = Date.now } = {}) {
   mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   const token = randomBytes(12).toString('hex');
   let taken = false;
@@ -134,7 +136,7 @@ export function acquire(file, { tries = 50, waitMs = 100, alive = isAlive, now =
     taken = tryTake(file, token);
     if (taken) break;
     const seen = readHolder(file);
-    if (seen && reapable(seen, now(), alive)) {
+    if (seen && reapable(seen, now(), alive, { maxHoldMs, unreadableMs })) {
       reap(file, seen);
       taken = tryTake(file, token);
       if (taken) break;

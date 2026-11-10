@@ -100,3 +100,14 @@ test('an unreadable lock is busy while young and taken over once old (a holder t
   utimesSync(file, old, old);
   assert.equal(withLock(file, () => 2, { tries: 1, waitMs: 1 }), 2);
 });
+
+test('acquire takes maxHoldMs: a lock older than that whose pid is alive (the pid reused) is taken over', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wc-lock-hold-'));
+  const file = join(dir, 'x.lock');
+  writeFileSync(file, JSON.stringify({ pid: process.pid, token: 'reused', at: new Date(Date.now() - 120e3).toISOString() }));
+  let ran = false;
+  withLock(file, () => { ran = true; }, { maxHoldMs: 60e3, tries: 3, waitMs: 10 });
+  assert.equal(ran, true);
+  writeFileSync(file, JSON.stringify({ pid: process.pid, token: 'fresh', at: new Date().toISOString() }));
+  assert.throws(() => withLock(file, () => {}, { maxHoldMs: 60e3, tries: 3, waitMs: 10 }), (e) => e.code === 'ELOCKBUSY', 'a younger live holder still waits');
+});

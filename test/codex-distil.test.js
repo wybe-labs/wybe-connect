@@ -380,7 +380,7 @@ test('a sign-in finished through the server\'s connect tool asks the node for it
     const proxy = createProxy({
       root: m.codexRoot,
       env: {},
-      clientName: 'wybe-connect (Codex)',
+      clientName: 'Codex (wybe)',
       connectImpl: async (_url, { onUrl }) => { onUrl('https://auth.example.invalid/authorize'); return creds; },
       onImportRequest: (at, paths) => seen.push({ at, connection: paths?.connection }),
     });

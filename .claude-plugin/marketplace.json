@@ -12,7 +12,7 @@
       "name": "wybe-connect",
       "source": "./packages/claude-code",
       "description": "Feeds your Wybe node from Claude Code: a background distil turns your sessions into short work facts, redacted on your laptop before anything leaves it. The node never reads your machine. Sends only, and never reads what your colleague knows; two things come back: a task you gave your colleague for an open session (one that needs your yes is shown to you first), and your colleague's open questions, shown at session start for you to answer or not.",
-      "version": "0.3.3",
+      "version": "0.3.4",
       "category": "productivity"
     }
   ]

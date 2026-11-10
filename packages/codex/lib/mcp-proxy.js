@@ -25,11 +25,11 @@
 // stdout carries JSON-RPC only; nothing here prints a token.
 
 import { createInterface } from 'node:readline';
-import { connect as defaultConnect, harnessOf, ALL_SCOPES } from './oauth.js';
+import { connect as defaultConnect, harnessOf, ALL_SCOPES, DEFAULT_CLIENT_NAME } from './oauth.js';
 import { refreshStored } from './refresh.js';
 import { forward, openQuestionsOf, PROTOCOL_VERSION } from './post.js';
 import { loadCredentials, saveCredentials, readJson, writeJsonPrivate, isRefused } from './home.js';
-import { connectionPaths, connectionNames, checkSave, saveConnection, sessionConnection, pinnedConnection, sessionIdRequired } from './connections.js';
+import { accountKey, checkStoreFree, connectionPaths, connectionNames, checkSave, saveConnection, sessionConnection, pinnedConnection, sessionIdRequired } from './connections.js';
 import { spoolRemember, spoolDone, distilPaths } from './distil.js';
 import { redactToolArguments } from './tool-args.js';
 import { renewStored } from './connect-cli.js';
@@ -56,7 +56,7 @@ export const NO_SESSION = 'Not delivered: pass session_id from the SessionStart 
 
 export const CONNECT_TOOL = Object.freeze({
   name: 'connect',
-  description: 'Connect this Claude Code to the person\'s Wybe AI colleague, once. Pass the colleague\'s address (https://<company>.wybe.me). A browser opens on the Wybe sign-in page; the person signs in with their passkey and ticks what to share. The answer carries the sign-in link in case no browser appeared. Call it again to see whether the sign-in has finished, or to reconnect.',
+  description: 'Connect this Claude Code to the person\'s Wybe AI colleague, once. Pass the colleague\'s address (https://<company>.wybe.me). A browser opens on the Wybe sign-in page; the person signs in with their passkey and ticks what to share. The answer carries the sign-in link in case no browser appeared. Call it again to see whether the sign-in has finished, or to reconnect. One address can hold several colleagues: connecting to it again adds another.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -66,6 +66,11 @@ export const CONNECT_TOOL = Object.freeze({
     additionalProperties: false,
   },
 });
+
+/** An error as this server says it: a connection of another account gets what the person can do from here. */
+const toolError = (err) => (err?.code === 'EOTHERACCOUNT'
+  ? `the connection ${err.connection} on this computer belongs to another account. Connect to another address, or remove ${err.connection} first (connect.js remove ${err.connection})`
+  : err instanceof Error ? err.message : String(err));
 
 const text = (t, isError = false) => ({ content: [{ type: 'text', text: t }], ...(isError ? { isError: true } : {}) });
 
@@ -178,7 +183,7 @@ export function importRequestOf(result) {
  * stands for): `connect` sends it as the sign-in's account hint and keeps a second account's grant
  * apart from the first (lib/connections.js accountKey). No answer of this server names it.
  */
-export function createProxy({ paths: fixed = null, root = null, env = process.env, clientId = null, clientName = 'wybe-connect (Claude Code)', harnessAccount = () => accountOf(harnessOf(clientId), env), notify = () => {}, request = null, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, distilRun = null, onImportRequest = null }) {
+export function createProxy({ paths: fixed = null, root = null, env = process.env, clientId = null, clientName = DEFAULT_CLIENT_NAME, harnessAccount = () => accountOf(harnessOf(clientId), env), notify = () => {}, request = null, fetchImpl = globalThis.fetch, connectImpl = defaultConnect, now = Date.now, distilRun = null, onImportRequest = null }) {
   let pending = null; // { nodeUrl, url, done, error }
   const shown = new Set(); // ids of tasks whose text this server has returned to the session
   let canElicit = false; // the client declared the elicitation capability at initialize
@@ -257,7 +262,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
       // now, not at the next poll.
       pollImport().catch(() => {});
     }).catch((err) => {
-      state.error = err instanceof Error ? err.message : String(err);
+      state.error = toolError(err);
     }).finally(() => resolveUrl());
     return urlKnown.then(() => state);
   }
@@ -286,9 +291,12 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     if (!fixed) {
       try {
         if (!root) throw new Error('this server has no wybe-connect home');
-        checkSave(root, origin); // a name another node holds is refused before the browser opens
+        // a name another node or another harness account holds is refused before the browser opens
+        const account = harnessAccount();
+        checkSave(root, origin, accountKey(root, origin, account), { account: account ?? null });
+        checkStoreFree(root); // a busy store is said now, not after a sign-in it would drop
       } catch (err) {
-        return text(`Could not start the sign-in: ${err instanceof Error ? err.message : String(err)}`, true);
+        return text(`Could not start the sign-in: ${toolError(err)}`, true);
       }
       // Already connected to this node under the same fixed client: renew, never a second grant.
       const renewed = await renewStored(root, origin, { clientId, account: harnessAccount(), fetchImpl });

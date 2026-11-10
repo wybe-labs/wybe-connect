@@ -66,7 +66,7 @@ test('runConnect: stores the grant in the harness home under the harness client 
     let seen;
     const code = await runConnect({
       harness: 'cursor',
-      clientName: 'wybe-connect (Cursor)',
+      clientName: 'Cursor (wybe)',
       argv: ['https://dittfirma.wybe.me', '--scopes', 'sessions:light'],
       out,
       err,
@@ -77,7 +77,7 @@ test('runConnect: stores the grant in the harness home under the harness client 
       },
     });
     assert.equal(code, 0);
-    assert.equal(seen.clientName, 'wybe-connect (Cursor)');
+    assert.equal(seen.clientName, 'Cursor (wybe)');
     assert.deepEqual(seen.scopes, ['sessions:light']);
     const stored = JSON.parse(readFileSync(join(home, 'cursor', 'connections', 'dittfirma.wybe.me', 'credentials.json'), 'utf8'));
     assert.equal(stored.version, 1);

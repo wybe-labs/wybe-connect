@@ -208,7 +208,7 @@ test('connect: the whole flow end to end against a fake AS and a real loopback; 
   const joined = log.join('\n');
   assert.ok(joined.length > 0, 'the log captured lines');
   assert.ok(!joined.includes(ACCESS) && !joined.includes(REFRESH), 'a token reached the log');
-  assert.equal(JSON.parse(as.calls.find((c) => c.url === METADATA.registration_endpoint).body).client_name, 'wybe-connect (Claude Code)', 'the default client is Claude Code');
+  assert.equal(JSON.parse(as.calls.find((c) => c.url === METADATA.registration_endpoint).body).client_name, 'Claude Code (wybe)', 'the default client is Claude Code');
 });
 
 test('connect: each harness registers under its own client name (one pairing per assistant)', async () => {
@@ -221,8 +221,8 @@ test('connect: each harness registers under its own client name (one pairing per
     setTimeout(() => getStatus(redirect.toString()).catch(() => {}), 10);
     return { unref() {}, on() {} };
   };
-  await connect(NODE, { clientName: 'wybe-connect (Codex)', fetchImpl: as.fetchImpl, spawnImpl, platform: 'linux', timeoutMs: 5000 });
-  assert.equal(JSON.parse(as.calls.find((c) => c.url === METADATA.registration_endpoint).body).client_name, 'wybe-connect (Codex)');
+  await connect(NODE, { clientName: 'Codex (wybe)', fetchImpl: as.fetchImpl, spawnImpl, platform: 'linux', timeoutMs: 5000 });
+  assert.equal(JSON.parse(as.calls.find((c) => c.url === METADATA.registration_endpoint).body).client_name, 'Codex (wybe)');
 });
 
 test('connect: a registration refusal closes the loopback and surfaces the refusal', async () => {

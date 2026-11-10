@@ -124,7 +124,17 @@ and Cursor use `~/.wybe-connect/codex/` and `~/.wybe-connect/cursor/`.
 
 **Several nodes or accounts.** Within a harness, each connect is its own connection
 (`connections/<name>/`: grant, queue, question cache), keyed by the node host or by `--name`, so
-a second node never replaces the first and one node's queue is never sent to another. A session
+a second node never replaces the first and one node's queue is never sent to another. One address
+can hold several colleagues: `connect` to it again signs in, and the colleague you choose gets a
+connection of its own (`<host>~<colleague>`). `use`, `remove` and `WYBE_CONNECT_NODE` take a
+connection's full name; the bare host names only the connection under the host's own name, and `use`
+and `remove` list the full names when it names none. What you name is yours: `use`, `remove`,
+`connect --name` and `WYBE_CONNECT_NODE` act on the connection you name, whichever harness login made it,
+since one user account on a computer is one person. What happens on its own never crosses logins: a `connect`
+without `--name` never renews, replaces or takes over a connection another login made, and no session is moved to
+one. A connection whose stored sign-in cannot be read at that moment is refused (try again). When the connection under the host's
+own name has stopped working and no colleague is connected there yet, the first colleague you sign in to there
+under the same login takes it over, and the bare host name is then that colleague's. A session
 uses the connection its first hook found: one it was moved to (`connect.js use <name> --session
 <id>`), else `WYBE_CONNECT_NODE=<name>` in the harness's environment, else the default (the one
 connected or `use`d last, or the only one). `connect.js list` and `connect.js remove <name>`
@@ -235,7 +245,9 @@ from the node: the person's own words for a task, never anything the colleague k
     StopFailure. It waits in the background and exits 2 with the notice when a task arrives,
     which wakes Claude even when the session is idle. Every Stop re-arms it, a newer one
     supersedes the older, and it pauses while the person's own turn runs (UserPromptSubmit), so
-    a task always gets a turn of its own.
+    a task always gets a turn of its own. A headless run (`claude -p`, where Claude Code sets
+    `CLAUDE_CODE_SESSION_ATTENDED=0`) is never reported or polled: nobody is there to take a
+    task, and a waiting SessionStart hook would hold the run.
   - Codex: no hook can wake an idle Codex session, so SessionStart starts a detached poller
     that runs `codex queue --thread <session> --message <notice>`. If that fails, the next
     Stop hook hands the notice over as a `decision: block` (a new turn), once.
@@ -398,9 +410,11 @@ still holds that grant and that refresh token). From then on nothing presents th
 again: every poller of the connection stops, a node call or a tool call makes no request and says
 to connect again, a flush keeps what it has in the queue, and SessionStart says the connection was
 refused. A 5xx, a 429, a timeout or a network failure never marks it. `connect` signs in anew
-(never renewing the dead grant), takes over the refused connection's name even under another
-harness account, and moves the sessions fixed to a refused connection of that node to the one it
-stored, so every open session works again.
+(never renewing the dead grant), takes over the refused connection's name under the same harness
+account (or when it recorded none), and moves the sessions fixed to a refused connection of that node
+and account to the one it stored, so every open session works again. Another account's refused
+connection, its queue and its sessions are left as they are: `connect` says to `remove` it, and only
+`--name` with its name replaces it.
 
 **One refresh at a time.** Every process of a connection (each session's poller, the MCP server,
 flushes, distil, `connect`) holds the same tokens, and refresh tokens are single-use (OAuth 2.1

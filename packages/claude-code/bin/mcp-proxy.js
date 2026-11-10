@@ -19,7 +19,7 @@ const distilRun = typeof run === 'string' && /^[A-Za-z0-9-]{1,80}$/.test(run) ? 
 runStdio({
   ...(distilRun ? { paths: planPaths({ connection: process.env[NODE_ENV] || null }, root) } : { root }),
   clientId: STATIC_CLIENTS['claude-code'],
-  clientName: 'wybe-connect (Claude Code)',
+  clientName: 'Claude Code (wybe)',
   distilRun,
   onImportRequest: (requestedAt, p) => {
     if (p && requestImport(p, requestedAt)) maybeRunUntilPlanned({ paths: p }).catch(() => {}); // a chunk of the disk per turn, so the server keeps answering

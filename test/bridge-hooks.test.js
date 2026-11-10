@@ -196,6 +196,31 @@ test('Claude Code: StopFailure sends the running task\'s result as failed', asyn
   }
 });
 
+test('Claude Code: a headless run (claude -p, CLAUDE_CODE_SESSION_ATTENDED=0) never waits for tasks: no event reports, records or polls the session', async () => {
+  // claude -p waits for its SessionStart asyncRewake hooks before the first turn: a poller there
+  // held every headless run of a connected person for up to the 24 h hook timeout.
+  const node = await startFakeNode();
+  const s = sandbox(node, 'claude-code');
+  try {
+    node.tasks.push(task());
+    const headless = { ...s.env, CLAUDE_CODE_SESSION_ATTENDED: '0' };
+    for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop', 'StopFailure', 'SessionEnd']) {
+      const t0 = Date.now();
+      assert.deepEqual(await hook(CC, 'task-wait.js', ccInput(s, event, { source: 'startup', prompt: 'hei', last_assistant_message: 'ok' }), headless).done, { code: 0, stdout: '', stderr: '' }, event);
+      assert.ok(Date.now() - t0 < 5000, `${event} took ${Date.now() - t0} ms`);
+    }
+    await sleep(1500); // SessionEnd's closing report would come from a detached sender: give one time to call
+    assert.equal(node.calls.length, 0, 'no session report, no inbox call');
+    assert.equal(B.readSession(s.p, SID), null, 'no session record: a scan never offers this run tasks');
+    // an attended session (the variable 1, or absent in older Claude Code) still waits and wakes
+    const live = await hook(CC, 'task-wait.js', ccInput(s, 'SessionStart', { source: 'startup' }), { ...s.env, CLAUDE_CODE_SESSION_ATTENDED: '1' }).done;
+    assert.equal(live.code, 2);
+  } finally {
+    killAll();
+    await node.close();
+  }
+});
+
 test('Claude Code: no connection, a distil run, or bad stdin: exit 0 at once, nothing printed', async () => {
   const node = await startFakeNode();
   const s = sandbox(node, 'claude-code');

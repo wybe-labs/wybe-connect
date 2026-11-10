@@ -82,7 +82,7 @@ test('Cursor\'s connect.js signs in under wybe-connect-cursor and never calls re
   const as = fakeAs();
   const browser = autoBrowser();
   const code = await runConnect({
-    harness: 'cursor', clientName: 'wybe-connect (Cursor)', argv: [NODE], out: sink(), err: sink(), nextSteps: () => '', fetchImpl: as.fetchImpl,
+    harness: 'cursor', clientName: 'Cursor (wybe)', argv: [NODE], out: sink(), err: sink(), nextSteps: () => '', fetchImpl: as.fetchImpl,
     connectImpl: (url, opts) => connect(url, { ...opts, spawnImpl: browser.spawnImpl, platform: 'linux', timeoutMs: 5000 }),
   });
   assert.equal(code, 0);
@@ -182,7 +182,7 @@ test('connect with a fixed client id never registers a client and asks for the n
 test('connect without a fixed client id still registers', async () => {
   const as = fakeAs();
   const browser = autoBrowser();
-  const creds = await connect(NODE, { clientName: 'wybe-connect (test)', fetchImpl: as.fetchImpl, spawnImpl: browser.spawnImpl, platform: 'linux', timeoutMs: 5000 });
+  const creds = await connect(NODE, { clientName: 'Test Harness (wybe)', fetchImpl: as.fetchImpl, spawnImpl: browser.spawnImpl, platform: 'linux', timeoutMs: 5000 });
   assert.equal(creds.clientId, 'dcr_client_1');
 });
 
@@ -267,7 +267,7 @@ test('connect.js signs in under the fixed client when the stored grant cannot be
   saveConnection(root, stored('dcr_client_1'));
   const as = fakeAs();
   const seen = [];
-  const code = await runConnect({ harness: 'codex', clientName: 'wybe-connect (Codex)', argv: [NODE], out: sink(), err: sink(), nextSteps: () => '', fetchImpl: as.fetchImpl, connectImpl: async (url, opts) => { seen.push(opts.clientId); return { ...stored(opts.clientId), accessToken: ACCESS2 }; } });
+  const code = await runConnect({ harness: 'codex', clientName: 'Codex (wybe)', argv: [NODE], out: sink(), err: sink(), nextSteps: () => '', fetchImpl: as.fetchImpl, connectImpl: async (url, opts) => { seen.push(opts.clientId); return { ...stored(opts.clientId), accessToken: ACCESS2 }; } });
   assert.equal(code, 0);
   assert.deepEqual(seen, ['wybe-connect-codex']);
 });

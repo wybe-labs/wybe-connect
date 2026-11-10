@@ -1,5 +1,5 @@
 {
-  "description": "wybe-connect: SessionStart injects the standing instruction, the node's cached open questions and a background-distil problem (once per kind); Stop, SessionEnd and PreCompact note the session for the background distil and send nothing themselves. task-wait.js is the session bridge: in the background (asyncRewake) it reports the session and waits for a task from the person's Wybe colleague, and wakes Claude with it (exit 2); UserPromptSubmit pauses it, SessionEnd marks the session closed. Every other exit is 0.",
+  "description": "wybe-connect: SessionStart injects the standing instruction, the node's cached open questions and a background-distil problem (once per kind); Stop, SessionEnd and PreCompact note the session for the background distil and send nothing themselves. task-wait.js is the session bridge: in the background (asyncRewake) it reports the session and waits for a task from the person's Wybe colleague, and wakes Claude with it (exit 2); UserPromptSubmit pauses it, SessionEnd marks the session closed; a headless run (claude -p, CLAUDE_CODE_SESSION_ATTENDED=0) is never reported or polled. Every other exit is 0.",
   "hooks": {
     "SessionStart": [
       {

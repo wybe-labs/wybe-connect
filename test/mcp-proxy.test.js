@@ -61,7 +61,7 @@ test('connect: answers at once with the sign-in link, stores the grant when the 
   let finish;
   const connectImpl = (url, opts) => {
     assert.equal(url, NODE);
-    assert.equal(opts.clientName, 'wybe-connect (Claude Code)');
+    assert.equal(opts.clientName, 'Claude Code (wybe)');
     opts.onUrl('https://auth.wybe.me/oauth/authorize?client_id=c1&state=s');
     return new Promise((r) => { finish = () => r(creds()); });
   };

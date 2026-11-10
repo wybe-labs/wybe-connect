@@ -126,6 +126,11 @@ const touch = (s, harness, input, extra = {}) => touchSession(s.p, s.sessionId, 
 export async function claudeHook(input, { env = process.env, stderr = process.stderr, fetchImpl = globalThis.fetch, spawnImpl = defaultSpawn } = {}) {
   const s = sessionOf('claude-code', input, env);
   if (!s) return 0;
+  // A headless run (claude -p) waits for its SessionStart asyncRewake hooks before the first turn,
+  // so a poller there would hold it up to the hook's 24 h timeout. Nobody is there to take a task:
+  // no event of it writes a session record, reports it or polls. Claude Code sets the variable
+  // itself for every hook (0 headless, 1 a live session); it is not inherited from a parent.
+  if (env.CLAUDE_CODE_SESSION_ATTENDED === '0') return 0;
   const event = str(input.hook_event_name) ?? 'Stop';
   if (event === 'UserPromptSubmit') {
     pausePoller(s.p, s.sessionId);

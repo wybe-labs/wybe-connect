@@ -4,7 +4,7 @@
 // (5xx, the network) never marks it. A new sign-in replaces the grant and clears the mark.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { connectionPaths, saveConnection, sessionPaths, pinnedConnection, accountName, connectionKey } from '../lib/connections.js';
@@ -250,33 +250,74 @@ const ownGrant = (nodeUrl, account) => ({ nodeUrl, resource: `${nodeUrl}/mcp`, m
 const NODE_A = 'https://node-a.example.invalid:9443';
 const NODE_B = 'https://node-b.example.invalid';
 
-test('connect after a refusal under another harness account takes over the refused connection, so the sessions on it work again', () => {
+test('connect after a refusal under the same harness account takes over the refused connection, so the sessions on it work again', () => {
   const root = mkdtempSync(join(tmpdir(), 'wybe-connect-revoked-reconnect-'));
   const dead = saveConnection(root, ownGrant(NODE_A, 'jobb@example.invalid'));
   assert.equal(sessionPaths(root, { sessionId: SID, env: {} }).connection, dead, 'the session is fixed to it');
   markDead(connectionPaths(root, dead));
-  const key = saveConnection(root, ownGrant(NODE_A, 'privat@example.invalid'));
+  const key = saveConnection(root, ownGrant(NODE_A, 'Jobb@Example.invalid'));
   assert.equal(key, dead, 'the name of the refused connection is reused, no second connection');
   assert.equal(key, connectionKey(NODE_A));
   assert.equal(isRefused(readJson(connectionPaths(root, key).credentials)), false);
   assert.equal(pinnedConnection(root, SID), key);
 });
 
-test('connect after a refusal that lands on another connection of the node moves every session fixed to the refused one there', () => {
+test('connect after a refusal of a connection that recorded no account takes it over under any account', () => {
+  const root = mkdtempSync(join(tmpdir(), 'wybe-connect-revoked-reconnect-'));
+  const dead = saveConnection(root, ownGrant(NODE_A, undefined));
+  assert.equal(sessionPaths(root, { sessionId: SID, env: {} }).connection, dead);
+  markDead(connectionPaths(root, dead));
+  assert.equal(saveConnection(root, ownGrant(NODE_A, 'privat@example.invalid')), dead);
+  assert.equal(pinnedConnection(root, SID), dead);
+});
+
+test('connect under another harness account never takes over a refused connection: it, its queue and its sessions stay that account\'s', () => {
   const root = mkdtempSync(join(tmpdir(), 'wybe-connect-revoked-reconnect-'));
   const dead = saveConnection(root, ownGrant(NODE_A, 'jobb@example.invalid'));
-  const own = saveConnection(root, ownGrant(NODE_A, 'privat@example.invalid'));
-  assert.equal(own, accountName(NODE_A, 'privat@example.invalid'));
+  assert.equal(sessionPaths(root, { sessionId: SID, env: {} }).connection, dead);
+  const p = connectionPaths(root, dead);
+  mkdirSync(p.queue, { recursive: true });
+  writeFileSync(join(p.queue, 'jobb-payload.json'), '{}');
+  markDead(p);
+  const key = saveConnection(root, ownGrant(NODE_A, 'privat@example.invalid'));
+  assert.equal(key, accountName(NODE_A, 'privat@example.invalid'), 'a connection of its own');
+  assert.equal(readJson(p.credentials).harnessAccount, 'jobb@example.invalid');
+  assert.equal(isRefused(readJson(p.credentials)), true, 'left as it is, for its own account to connect again or remove');
+  assert.deepEqual(readdirSync(p.queue), ['jobb-payload.json']);
+  assert.equal(pinnedConnection(root, SID), dead);
+  assert.throws(() => saveConnection(root, ownGrant(NODE_A, undefined)), /another account.*--name.*remove/, 'a sign-in that records no account cannot take it either');
+  assert.equal(saveConnection(root, ownGrant(NODE_A, 'privat@example.invalid'), { name: dead }), dead, 'named by the person (--name), it is replaced');
+});
+
+test('connect after a refusal that lands on another connection of the node and account moves every session fixed to the refused one there', () => {
+  const root = mkdtempSync(join(tmpdir(), 'wybe-connect-revoked-reconnect-'));
+  const dead = saveConnection(root, ownGrant(NODE_A, 'jobb@example.invalid'));
+  const own = saveConnection(root, ownGrant(NODE_A, 'jobb@example.invalid'), { name: 'work' });
   const elsewhere = saveConnection(root, ownGrant(NODE_B, 'jobb@example.invalid'));
   for (const [sid, key] of [[SID, dead], [OTHER, elsewhere], ['sess-live-0003', own]]) {
-    saveConnection(root, ownGrant(key === elsewhere ? NODE_B : NODE_A, key === own ? 'privat@example.invalid' : 'jobb@example.invalid'), { name: key });
+    saveConnection(root, ownGrant(key === elsewhere ? NODE_B : NODE_A, 'jobb@example.invalid'), { name: key });
     assert.equal(sessionPaths(root, { sessionId: sid, env: {} }).connection, key);
   }
   markDead(connectionPaths(root, dead));
   markDead(connectionPaths(root, elsewhere));
-  const key = saveConnection(root, ownGrant(NODE_A, 'privat@example.invalid'));
-  assert.equal(key, own, 'the own connection of this account on the node is signed in again');
-  assert.equal(pinnedConnection(root, SID), own, 'moved off the refused connection of this node');
+  const key = saveConnection(root, ownGrant(NODE_A, 'jobb@example.invalid'), { name: 'work' });
+  assert.equal(key, own);
+  assert.equal(pinnedConnection(root, SID), own, 'moved off the refused connection of this node and account');
   assert.equal(pinnedConnection(root, 'sess-live-0003'), own);
   assert.equal(pinnedConnection(root, OTHER), elsewhere, 'a refused connection of another node keeps its sessions');
+});
+
+test('connect after a refusal under another harness account never moves that account\'s sessions to this one', () => {
+  const root = mkdtempSync(join(tmpdir(), 'wybe-connect-revoked-reconnect-'));
+  const dead = saveConnection(root, ownGrant(NODE_A, 'jobb@example.invalid'));
+  const own = saveConnection(root, ownGrant(NODE_A, 'privat@example.invalid'));
+  assert.equal(own, accountName(NODE_A, 'privat@example.invalid'));
+  for (const [sid, key, account] of [[SID, dead, 'jobb@example.invalid'], ['sess-live-0003', own, 'privat@example.invalid']]) {
+    saveConnection(root, ownGrant(NODE_A, account), { name: key });
+    assert.equal(sessionPaths(root, { sessionId: sid, env: {} }).connection, key);
+  }
+  markDead(connectionPaths(root, dead));
+  assert.equal(saveConnection(root, ownGrant(NODE_A, 'privat@example.invalid')), own);
+  assert.equal(pinnedConnection(root, SID), dead, 'stays with its own account');
+  assert.equal(pinnedConnection(root, 'sess-live-0003'), own);
 });

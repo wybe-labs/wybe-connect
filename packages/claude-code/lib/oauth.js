@@ -31,6 +31,13 @@ const REQUIRED_METADATA = ['issuer', 'authorization_endpoint', 'token_endpoint',
  */
 export const STATIC_CLIENTS = Object.freeze({ 'claude-code': 'wybe-connect-claude-code', codex: 'wybe-connect-codex', cursor: 'wybe-connect-cursor' });
 
+/**
+ * The client_name a harness without a fixed client registers under: the harness's own name with a
+ * trailing "(wybe)", such as "Claude Code (wybe)". The authorization server refuses a registration
+ * name that claims Wybe in any other form.
+ */
+export const DEFAULT_CLIENT_NAME = 'Claude Code (wybe)';
+
 /** The harness a fixed client id stands for, or null. */
 export function harnessOf(clientId) {
   return Object.keys(STATIC_CLIENTS).find((h) => STATIC_CLIENTS[h] === clientId) ?? null;
@@ -46,15 +53,31 @@ function sameResource(a, b) {
   }
 }
 
-function jwtAudience(token) {
+/** The claims of a JWT access token, read without verifying it, or null for any other token. */
+function jwtClaims(token) {
   const parts = typeof token === 'string' ? token.split('.') : [];
   if (parts.length !== 3) return null;
   try {
-    const aud = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'))?.aud;
-    return typeof aud === 'string' || Array.isArray(aud) ? aud : null;
+    const claims = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8'));
+    return claims && typeof claims === 'object' ? claims : null;
   } catch {
     return null;
   }
+}
+
+function jwtAudience(token) {
+  const aud = jwtClaims(token)?.aud;
+  return typeof aud === 'string' || Array.isArray(aud) ? aud : null;
+}
+
+/**
+ * The colleague an access token is for (its `node_id` claim), or null when it names none (an opaque
+ * token, or a JWT without the claim). Read without verifying: it only keeps one colleague's
+ * connection apart from another's on this machine; the server decides what the token may do.
+ */
+export function colleagueOf(accessToken) {
+  const id = jwtClaims(accessToken)?.node_id;
+  return typeof id === 'string' && id ? id : null;
 }
 
 /**
@@ -127,7 +150,7 @@ export function pkcePair() {
   return { verifier, challenge };
 }
 
-export async function register({ metadata, redirectUri, scopes, fetchImpl = globalThis.fetch, clientName = 'wybe-connect (Claude Code)', timeoutMs = 10_000 }) {
+export async function register({ metadata, redirectUri, scopes, fetchImpl = globalThis.fetch, clientName = DEFAULT_CLIENT_NAME, timeoutMs = 10_000 }) {
   if (typeof metadata.registration_endpoint !== 'string') throw new Error('authorization server offers no registration endpoint');
   const res = await fetchImpl(metadata.registration_endpoint, {
     method: 'POST',
@@ -348,11 +371,11 @@ export function openBrowser(url, { platform = process.platform, spawnImpl = spaw
  * `onUrl(url)` receives the authorization URL (public challenge and state only) as soon as it is
  * known, for a caller that shows it itself (lib/mcp-proxy.js).
  * `clientId` is a fixed client (STATIC_CLIENTS): no registration. Without it, `clientName` names
- * the harness for a dynamic registration.
+ * the harness for a dynamic registration, as "<harness> (wybe)" (DEFAULT_CLIENT_NAME).
  * `harnessAccount` (the harness's own sign-in, lib/session-info.js accountOf) is sent as
  * `account_hint` in the URL the browser opens only, and kept on the credentials.
  */
-export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientId: fixedClientId = null, clientName = 'wybe-connect (Claude Code)', harnessAccount = null, fetchImpl = globalThis.fetch, spawnImpl = spawn, platform = process.platform, timeoutMs = 5 * 60_000, log = () => {}, onUrl = () => {}, now = Date.now } = {}) {
+export async function connect(nodeUrl, { scopes = ALL_SCOPES, clientId: fixedClientId = null, clientName = DEFAULT_CLIENT_NAME, harnessAccount = null, fetchImpl = globalThis.fetch, spawnImpl = spawn, platform = process.platform, timeoutMs = 5 * 60_000, log = () => {}, onUrl = () => {}, now = Date.now } = {}) {
   const d = await discover(nodeUrl, { fetchImpl });
   log(`authorization server: ${d.issuer}`);
   const state = randomBytes(16).toString('base64url');
