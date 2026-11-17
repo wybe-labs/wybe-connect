@@ -37,6 +37,11 @@
 //   3. the most recently used connection made under the harness account the session runs under; when it has
 //      none and the default is another account's, the default node's connection made before accounts were recorded
 //   4. the default: the most recently connected or `use`d one, or the only one
+// Steps 3 and 4 never pick a connection whose grant was refused (revoked) while another one is live: a new session
+// fixed to it would send nowhere. A session the plugin fixed by these steps (not one the person chose with
+// `use --session`, nor one WYBE_CONNECT_NODE fixed) whose connection was refused follows them again on its next hook,
+// to the connection a new session of its harness account would use, when that one is live: its later lines and
+// reports go there, its earlier lines stay with the refused one (sessionLines). A pin the person chose stays.
 // A session is fixed to a connection and its node: when that connection is removed, or its name
 // is reused for another node, the session stays unconnected rather than move. A name another node
 // holds is refused at connect, so a grant and its queue never pass from one node to another.
@@ -227,7 +232,10 @@ export function migrateLegacy(root) {
 export function defaultConnection(root) {
   migrateLegacy(root);
   const known = knownKeys(root);
-  return recent(root).find((k) => known.includes(k)) ?? (known.length === 1 ? known[0] : null);
+  const order = recent(root).filter((k) => known.includes(k));
+  // The most recent one whose grant was not refused; a refused one only when every one is (a sign-in brings it back).
+  const live = order.find((k) => !isRefused(readGrant(connectionPaths(root, k))));
+  return live ?? order[0] ?? (known.length === 1 ? known[0] : null);
 }
 
 /** A ref as a connection's own name: the name itself, or the host name a bare host or node URL gives; null when neither. */
@@ -552,7 +560,7 @@ function segmentsOf(pinned) {
  * Fixes a session to a connection and the node it is for, so a name reused later does not move it. A move starts a
  * segment at the transcript's line count: the lines before it stay with the connection the session was on.
  */
-function pin(root, sessionId, key, { moved = false, transcriptPath = null, pendingTranscript = null } = {}) {
+function pin(root, sessionId, key, { moved = false, chosen = false, transcriptPath = null, pendingTranscript = null } = {}) {
   const nodeUrl = key ? readGrant(connectionPaths(root, key))?.nodeUrl ?? null : null;
   const was = readJson(pinPath(root, sessionId));
   const pending = pendingTranscript ?? (typeof was?.pendingTranscript === 'string' ? was.pendingTranscript : null);
@@ -580,7 +588,9 @@ function pin(root, sessionId, key, { moved = false, transcriptPath = null, pendi
     if (last && last.fromLine >= fromLine) segments = segments.filter((s) => s.fromLine < fromLine);
     segments = [...segments, { connection: key, nodeUrl, fromLine }];
   }
-  writeJsonPrivate(pinPath(root, sessionId), { connection: key, nodeUrl, ...(moved ? { moved: true } : {}), ...(path ? { transcriptPath: path } : pending ? { pendingTranscript: pending } : {}), segments });
+  // `chosen`: the person fixed this session (use --session, or WYBE_CONNECT_NODE); it then never follows on its own
+  const keepChosen = chosen || was?.chosen === true;
+  writeJsonPrivate(pinPath(root, sessionId), { connection: key, nodeUrl, ...(moved ? { moved: true } : {}), ...(keepChosen ? { chosen: true } : {}), ...(path ? { transcriptPath: path } : pending ? { pendingTranscript: pending } : {}), segments });
 }
 
 /**
@@ -744,7 +754,7 @@ function mustRead(root, key) {
 export function useConnection(root, ref, { sessionId = null } = {}) {
   const key = mustFind(root, ref);
   mustRead(root, key);
-  if (sessionId) pin(root, sessionId, key, { moved: true });
+  if (sessionId) pin(root, sessionId, key, { moved: true, chosen: true });
   else markRecent(root, key);
   return key;
 }
@@ -799,19 +809,22 @@ export function connectionNames(root) {
 function accountConnection(root, account) {
   const known = knownKeys(root);
   if (known.length < 2) return null;
-  const by = new Map(known.map((k) => [k, accountId(readGrant(connectionPaths(root, k))?.harnessAccount)]));
+  // A refused (revoked) grant is never chosen for a session: it would send nowhere. Its sessions come back on a sign-in.
+  const grants = new Map(known.map((k) => [k, readGrant(connectionPaths(root, k))]));
+  const live = known.filter((k) => !isRefused(grants.get(k)));
+  const by = new Map(known.map((k) => [k, accountId(grants.get(k)?.harnessAccount)]));
   if (![...by.values()].some(Boolean)) return null;
   const a = accountId(typeof account === 'function' ? account() : account);
   if (!a) return null;
   const order = recent(root);
   const rank = (k) => (order.includes(k) ? order.indexOf(k) : order.length);
   const newest = (keys) => keys.sort((x, y) => rank(x) - rank(y) || x.localeCompare(y))[0] ?? null;
-  const own = newest(known.filter((k) => by.get(k) === a));
+  const own = newest(live.filter((k) => by.get(k) === a));
   if (own) return own;
   const def = defaultConnection(root);
   if (!def || !by.get(def)) return null;
   const origin = originOf(readGrant(connectionPaths(root, def)).nodeUrl);
-  return newest(known.filter((k) => by.get(k) === null && heldFor(root, k, origin)));
+  return newest(live.filter((k) => by.get(k) === null && heldFor(root, k, origin)));
 }
 
 /**
@@ -822,10 +835,23 @@ function accountConnection(root, account) {
 export function sessionConnection(root, { sessionId = null, env = process.env, account = null } = {}) {
   migrateLegacy(root);
   const pinned = pinnedConnection(root, sessionId);
-  if (pinned !== undefined) return pinned;
+  if (pinned !== undefined) return followLive(root, sessionId, pinned, { env, account }) ?? pinned;
   const wanted = env[NODE_ENV];
   if (wanted) return findConnection(root, wanted);
   return accountConnection(root, account) ?? defaultConnection(root);
+}
+
+/**
+ * Where a session fixed by the routing rules goes when its own connection's grant was refused: the live connection a
+ * new session of its harness account would use (steps 3 and 4). Null when it stays: the person chose its pin, or
+ * WYBE_CONNECT_NODE names a node for it, or its connection is not refused, or no other one is live.
+ */
+function followLive(root, sessionId, pinned, { env, account }) {
+  if (!pinned || env[NODE_ENV]) return null;
+  if (!isRefused(readGrant(connectionPaths(root, pinned)))) return null;
+  if (readJson(pinPath(root, sessionId))?.chosen === true) return null;
+  const next = accountConnection(root, account) ?? defaultConnection(root);
+  return next && next !== pinned && !isRefused(readGrant(connectionPaths(root, next))) ? next : null;
 }
 
 /**
@@ -838,12 +864,20 @@ export function resolveSession(root, { sessionId = null, env = process.env, tran
   const was = sessionId ? readJson(pinPath(root, sessionId)) : null;
   if (was && 'connection' in was) {
     recordTranscript(root, sessionId, transcriptPath);
+    // followLive: the pin moves with it, so its later lines go there too
+    if (key && key !== livePin(root, was)) {
+      try {
+        pin(root, sessionId, key, { moved: true });
+      } catch {
+        return livePin(root, was); // its lines cannot be counted now: it stays until they can
+      }
+    }
     return key;
   }
   // a connection whose grant cannot be read now is not pinned: the next hook resolves the session again
   if (key && !readGrant(connectionPaths(root, key))) return null;
   // an unknown WYBE_CONNECT_NODE is pinned too: that session stays unconnected, never on another node
-  if (sessionId && (key || env[NODE_ENV])) pin(root, sessionId, key, { transcriptPath: transcript, pendingTranscript: transcript ? null : givenPath(transcriptPath) });
+  if (sessionId && (key || env[NODE_ENV])) pin(root, sessionId, key, { chosen: Boolean(env[NODE_ENV]), transcriptPath: transcript, pendingTranscript: transcript ? null : givenPath(transcriptPath) });
   return key;
 }
 

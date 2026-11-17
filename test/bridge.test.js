@@ -329,7 +329,8 @@ test('sessions_report: project is the basename, the account the local label, ide
     assert.equal(one[0].project, 'demo-app');
     assert.equal(one[0].account, 'eier@example.invalid');
     assert.equal(one[0].state, 'open');
-    assert.ok(one[0].title.startsWith('Add a retry'));
+    // the transcript has a custom-title line: the session's own name is its title, not the first prompt
+    assert.equal(one[0].title, 'Retry for the ingest queue');
     assert.ok(!JSON.stringify(one).includes(tmpdir()), 'no local path');
     assert.deepEqual(one, two);
     touchSession(p, SID, { closed: true });

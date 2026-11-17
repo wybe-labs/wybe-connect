@@ -77,7 +77,8 @@ test('every Claude Code session on disk is reported, hooked or not, open or clos
     assert.deepEqual([got.get(old.id).state, got.get(old.id).can_take_tasks], ['closed', false]);
     assert.equal(got.get(old.id).project, 'crm-demo');
     assert.equal(got.get(old.id).title, 'Write the import script');
-    assert.equal(got.get(old.id).account, 'eier@example.invalid');
+    // never the scanning process's own login: no hook of this session ever ran (test/session-names-times.test.js)
+    assert.equal(got.get(old.id).account, undefined);
     assert.equal(got.get(old.id).harness, 'claude-code');
     assert.ok(Date.parse(got.get(old.id).last_active_at) < Date.now() - 80 * DAY, 'last active is when the transcript was last written');
     assert.ok(Date.parse(got.get(old.id).started_at) <= Date.parse(got.get(old.id).last_active_at));

@@ -1,7 +1,7 @@
 // The session bridge: the person's Wybe colleague can see the open Claude Code and Codex sessions
 // on this machine, send one a task, and read the result. Per connection (lib/connections.js), per
 // session, under <connection>/bridge/:
-//   <session>/session.json  { harness, cwd, transcriptPath, startedAt, lastActiveAt, state, title }
+//   <session>/session.json  { harness, cwd, transcriptPath, startedAt, lastActiveAt, state, title, account }
 //   <session>/poller.json   { token, pid }: the one poller this session has; a newer token supersedes it
 //   <session>/tasks.json    { tasks: { <id>: task }, acks: [{ id, outcome }], pendingNotices: [<id>] }
 //   claims/<task id>        an untargeted task belongs to the first session that claims it
@@ -28,7 +28,8 @@ import { callTool } from './post.js';
 import { refreshStored } from './refresh.js';
 import { redact, redactValue } from './redact.js';
 import { withLock, isAlive } from './lock.js';
-import { sessionInfo } from './session-info.js';
+import { claudeSessionNames, sessionInfo, transcriptTailFacts } from './session-info.js';
+import { claudeHomeOf } from './session-scan.js';
 import { scanTick, scanDue, summaryOf } from './session-scan.js';
 
 export const POLL_MS = 20_000;
@@ -119,6 +120,7 @@ export function touchSession(p, sessionId, { harness, cwd = null, transcriptPath
     lastActiveAt: iso(now),
     state: closed ? 'closed' : 'open',
     title: old.title ?? null,
+    account: old.account ?? null,
     reportedAt: old.reportedAt ?? null,
   };
   writeJsonPrivate(f.session, rec);
@@ -208,12 +210,16 @@ export async function reportSession(p, sessionId, { env = process.env, home, fet
   const rec = readSession(p, sessionId);
   if (!rec || !hasSessionScope(credentialsOf(p))) return { ok: false, kind: 'skipped' };
   const f = sessionFiles(p, sessionId);
-  // the later of the last hook and the last transcript write, as the scan (lib/session-scan.js) sends it
-  const written = writtenAt(rec.transcriptPath);
+  // the later of the last hook and the transcript's last line (its own time; the file's time only without one), as the
+  // scan (lib/session-scan.js) sends it
+  const tail = rec.harness === 'claude-code' && rec.transcriptPath ? transcriptTailFacts(rec.transcriptPath) : { name: null, lastAt: null };
+  const written = Date.parse(tail.lastAt ?? '') || writtenAt(rec.transcriptPath);
   const lastActiveAt = written > (Date.parse(rec.lastActiveAt) || 0) ? iso(written) : rec.lastActiveAt;
+  // its own name in Claude (the live mark, else the transcript's last custom-title), else the first prompt
+  const name = rec.harness === 'claude-code' ? (claudeSessionNames(claudeHomeOf(env)).get(sessionId) ?? tail.name) : null;
   const info = sessionInfo({
     harness: rec.harness, sessionId, cwd: rec.cwd, transcriptPath: rec.transcriptPath, env, ...(home ? { home } : {}),
-    startedAt: rec.startedAt, lastActiveAt, state: rec.state, ...(rec.title ? { title: rec.title } : {}),
+    startedAt: rec.startedAt, lastActiveAt, state: rec.state, ...(rec.title ? { title: rec.title } : {}), name,
   });
   // a hooked session not ended can take a task: its poller runs at each turn's end
   info.can_take_tasks = rec.state === 'open';
@@ -223,7 +229,14 @@ export async function reportSession(p, sessionId, { env = process.env, home, fet
   }
   const out = await nodeCall(p, 'sessions_report', { sessions: [info] }, { fetchImpl, now, redactOptions: { emails: false } });
   const after = quietJson(f.session);
-  if (after) writeJsonPrivate(f.session, { ...after, title: after.title ?? info.title ?? null, ...(out.ok ? { reportedAt: iso(now()) } : {}) });
+  // The record keeps the first prompt (the name is read fresh each time) and the account this session runs under, which
+  // the scan of every session on the machine sends for it (lib/session-scan.js), never its own process's.
+  if (after) {
+    writeJsonPrivate(f.session, {
+      ...after, title: after.title ?? (name ? null : info.title ?? null), account: info.account ?? after.account ?? null,
+      ...(out.ok ? { reportedAt: iso(now()) } : {}),
+    });
+  }
   return out;
 }
 

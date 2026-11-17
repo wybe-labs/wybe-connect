@@ -8,7 +8,8 @@
 //   Codex        <codex home>/sessions/YYYY/MM/DD/rollout-*.jsonl and archived_sessions/: the person's
 //                threads only (session_meta.source), never a distil run's.
 //
-// Each entry is what lib/session-info.js sends for a hooked session, plus:
+// Each entry is what lib/session-info.js sends for a hooked session (its own name as the title, the last line's time as
+// last_active_at; the account only from the session's own hook record, never this process's login), plus:
 //   state           open while the harness runs it: Claude Code's own <claude home>/sessions/<pid>.json
 //                   with a live pid, a transcript written in the last OPEN_RECENT_MS, or a hooked session
 //                   not ended, active within the idle limit, whose poller process is alive. Else closed:
@@ -40,7 +41,7 @@ import { homedir } from 'node:os';
 import { readJson, writeJsonPrivate } from './home.js';
 import { acquire, isAlive as defaultAlive } from './lock.js';
 import { sessionConnection, NODE_ENV } from './connections.js';
-import { accountOf, cleanTitle, projectOf } from './session-info.js';
+import { accountOf as accountOfThis, cleanTitle, claudeSessionNames, projectOf, transcriptTailFacts, TAIL_BYTES } from './session-info.js';
 import { parseTranscript } from './transcript.js';
 import { parseRollout, headOf, stripCodexInjected } from './codex-rollout.js';
 import { redact } from './redact.js';
@@ -132,6 +133,23 @@ async function readHead(path, bytes = HEAD_BYTES) {
   }
 }
 
+/** The last TAIL_BYTES of a file, or null. */
+async function readTailAsync(path, size, bytes = TAIL_BYTES) {
+  let fh;
+  try {
+    fh = await open(path, 'r');
+    const from = Math.max(0, size - bytes);
+    const buf = Buffer.alloc(Math.min(bytes, size));
+    const { bytesRead } = await fh.read(buf, 0, buf.length, from);
+    const text = buf.subarray(0, bytesRead).toString('utf8');
+    return from > 0 ? text.slice(text.indexOf(String.fromCharCode(10)) + 1) : text;
+  } catch {
+    return null;
+  } finally {
+    await fh?.close().catch(() => {});
+  }
+}
+
 async function dirents(dir) {
   try {
     return await readdir(dir, { withFileTypes: true });
@@ -160,7 +178,7 @@ async function claudeFiles(claudeHome) {
       if (!UUID.test(id)) continue;
       const path = join(root, d.name, f.name);
       const st = await statQuiet(path);
-      if (st) out.push({ id, path, mtimeMs: st.mtimeMs, birthMs: st.birthtimeMs || st.mtimeMs, archived: false });
+      if (st) out.push({ id, path, mtimeMs: st.mtimeMs, birthMs: st.birthtimeMs || st.mtimeMs, size: st.size, archived: false });
     }
   }
   return out;
@@ -181,7 +199,7 @@ async function codexFiles(codexHome) {
       const m = ROLLOUT.exec(e.name);
       if (!m || !e.isFile()) continue;
       const st = await statQuiet(path);
-      if (st) out.push({ id: m[1].toLowerCase(), path, mtimeMs: st.mtimeMs, birthMs: st.birthtimeMs || st.mtimeMs, archived });
+      if (st) out.push({ id: m[1].toLowerCase(), path, mtimeMs: st.mtimeMs, birthMs: st.birthtimeMs || st.mtimeMs, size: st.size, archived });
     }
   };
   await walk(join(codexHome, 'sessions'), 3, false);
@@ -331,12 +349,14 @@ export async function scanTick({
     const heads = state.heads && typeof state.heads === 'object' ? state.heads : {};
     const full = hasScope(credentials, 'sessions:full');
     const t = now();
-    const account = accountOf(harness, env, home);
+    // This process's own login decides only where an unpinned session goes; it is never shown as another session's account.
+    const account = accountOfThis(harness, env, home);
     // Where an unpinned session of this harness account goes: the env of this process says nothing about another session.
     const envNoPin = { ...env };
     delete envNoPin[NODE_ENV];
     const files = harness === 'codex' ? await codexFiles(codexHome) : await claudeFiles(claudeHome);
     const { live, dead } = harness === 'claude-code' ? await claudeMarks(claudeHome, alive) : { live: new Set(), dead: new Set() };
+    const names = harness === 'claude-code' ? claudeSessionNames(claudeHome) : new Map();
     const summaries = full ? quietJson(f.summaries) ?? {} : {};
 
     const candidates = [];
@@ -352,22 +372,35 @@ export async function scanTick({
         if (h.skip || h.title) heads[file.id] = h;
       }
       if (h.skip) continue;
+      // the end of the transcript, read again only when the file changed: its own name and its last line's time
+      if (harness === 'claude-code' && h.tailMtime !== file.mtimeMs) {
+        const tail = await readTailAsync(file.path, file.size ?? 0);
+        if (tail !== null) {
+          const facts = transcriptTailFacts(null, { text: tail });
+          h = { ...h, tailMtime: file.mtimeMs, name: facts.name ?? h.name ?? null, lastAt: facts.lastAt ?? h.lastAt ?? null };
+          if (heads[file.id]) heads[file.id] = h;
+        }
+      }
       const rec = bridgeRecord(file.id);
       const hooked = rec && rec.state === 'open' && t - Date.parse(rec.lastActiveAt) <= IDLE_LIMIT_MS;
       // the poller record: { pid } of the process waiting for a task, pid null while paused for the person's turn
       const poller = pollerOf(file.id);
       const pollerRuns = Number.isInteger(poller?.pid) && alive(poller.pid);
-      const running = live.has(file.id) || (!dead.has(file.id) && t - file.mtimeMs <= OPEN_RECENT_MS);
+      // the last line's own time; the file's time only when no line has one (a copy or touch sets the file's time)
+      const lastLine = Date.parse(h.lastAt ?? '');
+      const written = Number.isFinite(lastLine) ? lastLine : file.mtimeMs;
+      const running = live.has(file.id) || (!dead.has(file.id) && t - written <= OPEN_RECENT_MS);
       const open = !file.archived && (running || (hooked && pollerRuns && !dead.has(file.id)));
       const entry = { id: file.id, harness };
-      const title = h.title ?? (typeof rec?.title === 'string' ? rec.title : null);
+      const title = names.get(file.id) ?? h.name ?? h.title ?? (typeof rec?.title === 'string' ? rec.title : null);
       if (title) entry.title = title;
       const project = projectOf(h.cwd ?? rec?.cwd ?? null);
       if (project) entry.project = project;
-      if (account) entry.account = account;
+      // the account the session's own hooks saw (bridge.js reportSession), never this process's
+      if (typeof rec?.account === 'string' && rec.account) entry.account = rec.account;
       const started = Date.parse(h.startedAt ?? rec?.startedAt ?? '');
-      entry.started_at = iso(Number.isFinite(started) ? Math.min(started, file.mtimeMs) : Math.min(file.birthMs, file.mtimeMs));
-      entry.last_active_at = iso(Math.max(file.mtimeMs, Date.parse(rec?.lastActiveAt ?? '') || 0));
+      entry.started_at = iso(Number.isFinite(started) ? Math.min(started, written) : Math.min(file.birthMs, written));
+      entry.last_active_at = iso(Math.max(written, Date.parse(rec?.lastActiveAt ?? '') || 0));
       entry.state = open ? 'open' : 'closed';
       entry.can_take_tasks = Boolean(open && hooked && (pollerRuns || (poller && poller.pid === null && running)));
       const summary = summaries[file.id]?.text;
