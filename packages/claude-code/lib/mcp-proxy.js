@@ -76,11 +76,12 @@ const text = (t, isError = false) => ({ content: [{ type: 'text', text: t }], ..
 
 // A task from the person's Wybe colleague that needs the person's yes (mode confirm, lib/bridge.js).
 // The session's notice carries only the id; this tool is the one way to the text. With the
-// client's elicitation capability the person decides in a form; without it the model is told to
-// show the text word for word and act only after an explicit yes (model-mediated, a stated limit).
+// client's elicitation capability the person decides in a form; without it, or when the form closes
+// without Godta or Avvis, the model is told to show the text word for word and act only after an
+// explicit yes (model-mediated, a stated limit).
 export const TAKE_TASK_TOOL = Object.freeze({
   name: 'take_task',
-  description: 'Take a task the person\'s Wybe AI colleague sent to this session; the notice you got names its task_id. It shows the exact task to the person, who accepts or declines it, and returns the task only when they accept. If it says this client cannot show a form: show the task to the person word for word, ask them, and only after their explicit yes call take_task again with accepted: true (accepted: false when they say no).',
+  description: 'Take a task the person\'s Wybe AI colleague sent to this session; the notice you got names its task_id. It shows the exact task to the person, who accepts or declines it, and returns the task only when they accept. If it tells you to ask the person yourself: show the task to the person word for word, ask them, and only after their explicit yes call take_task again with accepted: true (accepted: false when they say no).',
   inputSchema: {
     type: 'object',
     properties: {
@@ -306,7 +307,12 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
       }
     }
     const state = await startConnect(origin);
-    if (state.error) return text(`Could not start the sign-in: ${state.error}`, true);
+    if (state.error) {
+      // Said now, so it is not kept to be said again: the next connect starts a new sign-in. Only this
+      // sign-in's own slot is cleared; another node's sign-in that took it meanwhile is left waiting.
+      if (pending === state) pending = null;
+      return text(`Could not start the sign-in: ${state.error}`, true);
+    }
     if (state.done) {
       const c = credentials();
       return text(`Connected to ${c?.nodeUrl ?? origin} (scopes: ${(c?.scopes ?? []).join(', ')}). The Wybe tools are available now.`);
@@ -336,7 +342,10 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
       await decideTask(p, sessionId, id, yes, { fetchImpl, now });
       return yes ? accepted(task.text) : declined();
     };
-    if (canElicit && request) {
+    // A form is asked once per task. Only Godta (accept) or Avvis (decline) decides; a form closed
+    // without a choice (cancel, or no action: Claude Code in print mode cancels every form at once)
+    // is no answer, so the task is asked in the chat below, as for a client without forms.
+    if (canElicit && request && !shown.has(id)) {
       let answer;
       try {
         answer = await request('elicitation/create', {
@@ -346,13 +355,14 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
       } catch {
         return text('The person has not answered the form. Nothing was done; call take_task again to ask once more.', true);
       }
-      return decide(answer?.action === 'accept');
+      if (answer?.action === 'accept') return decide(true);
+      if (answer?.action === 'decline') return decide(false);
     }
     // A no needs no text; a yes counts only once the text has gone back to the session, so the person
     // can have seen what they say yes to. Before that, the text is shown and the question asked.
     if (args?.accepted === false || (args?.accepted === true && shown.has(id))) return decide(args.accepted);
     shown.add(id);
-    return text(`This client cannot show a form, so ask the person yourself. Show them this task word for word, exactly as written: ${quoted(task.text)}. Ask whether they accept it. Do nothing for it until they give an explicit yes in this chat; then call take_task again with task_id "${id}" and accepted: true. If they say no, call take_task with accepted: false.`);
+    return text(`${canElicit ? 'The form closed without an answer' : 'This client cannot show a form'}, so ask the person yourself. Show them this task word for word, exactly as written: ${quoted(task.text)}. Ask whether they accept it. Do nothing for it until they give an explicit yes in this chat; then call take_task again with task_id "${id}" and accepted: true. If they say no, call take_task with accepted: false.`);
   }
 
   // An import request goes to the connection that answered: the call's own, never this server's default.

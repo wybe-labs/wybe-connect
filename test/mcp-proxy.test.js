@@ -104,6 +104,35 @@ test('connect: a node that cannot be discovered is reported at once', async () =
   assert.match(r.result.content[0].text, /Could not start the sign-in: .*HTTP 404/);
 });
 
+test('connect: after a sign-in that could not start, the next connect tries again instead of repeating the error', async () => {
+  let calls = 0;
+  const proxy = createProxy({ paths: home(), connectImpl: () => { calls += 1; return Promise.reject(new Error('auth.wybe.me did not answer within 10 s (asked twice). Nothing was saved; connect again to retry.')); } });
+  const first = await proxy.handle(req(1, 'tools/call', { name: 'connect', arguments: { node_url: NODE } }));
+  assert.match(first.result.content[0].text, /^Could not start the sign-in: auth\.wybe\.me did not answer/);
+  const second = await proxy.handle(req(2, 'tools/call', { name: 'connect', arguments: { node_url: NODE } }));
+  assert.equal(calls, 2, 'the second connect starts a new sign-in');
+  assert.match(second.result.content[0].text, /^Could not start the sign-in: auth\.wybe\.me did not answer/);
+  assert.doesNotMatch(second.result.content[0].text, /did not finish/);
+});
+
+test('connect: a sign-in that could not start never clears another node\'s sign-in waiting in the browser', async () => {
+  const starts = { a: 0, b: 0 };
+  const connectImpl = (url, opts) => {
+    if (url.includes('a.wybe.me')) { starts.a += 1; return new Promise((_r, reject) => setTimeout(() => reject(new Error('a.wybe.me did not answer')), 30)); }
+    starts.b += 1;
+    opts.onUrl('https://auth.wybe.me/oauth/authorize?b');
+    return new Promise(() => {}); // B waits in the browser
+  };
+  const proxy = createProxy({ paths: home(), connectImpl });
+  const a = proxy.handle(req(1, 'tools/call', { name: 'connect', arguments: { node_url: 'https://a.wybe.me' } }));
+  const b1 = await proxy.handle(req(2, 'tools/call', { name: 'connect', arguments: { node_url: 'https://b.wybe.me' } }));
+  assert.match(b1.result.content[0].text, /browser window is opening/);
+  assert.match((await a).result.content[0].text, /^Could not start the sign-in: a\.wybe\.me did not answer/);
+  const b2 = await proxy.handle(req(3, 'tools/call', { name: 'connect', arguments: { node_url: 'https://b.wybe.me' } }));
+  assert.match(b2.result.content[0].text, /^Still waiting for the sign-in/);
+  assert.equal(starts.b, 1, 'one browser for B, never a second');
+});
+
 test('connected: the node\'s tools are listed with connect, a call is forwarded verbatim, open questions are cached', async () => {
   const p = home();
   saveCredentials(creds(), p);

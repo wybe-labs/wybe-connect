@@ -68,23 +68,65 @@ test('elicitation, Godta: the form shows the exact text; take_task returns it an
   }
 });
 
-for (const action of ['decline', 'cancel']) {
-  test(`elicitation, ${action}: task_result refused is sent, and the text is not handed to the session`, async () => {
+test('elicitation, decline: task_result refused is sent, and the text is not handed to the session', async () => {
+  const node = await startFakeNode();
+  try {
+    const { p, t } = await withOffered(node);
+    const proxy = createProxy({ paths: p, request: async () => ({ action: 'decline' }) });
+    await initialized(proxy, true);
+    const r = await proxy.handle(req(2, 'tools/call', { name: 'take_task', arguments: { task_id: t.id } }));
+    assert.ok(!textOf(r).includes(t.text));
+    assert.match(textOf(r), /declined/);
+    assert.deepEqual(node.tool('task_result').map((c) => [c.args.task_id, c.args.session_id, c.args.status]), [[t.id, SID, 'refused']]);
+    assert.equal(findTask(p, t.id).task.status, 'reported');
+  } finally {
+    await node.close();
+  }
+});
+
+// A form closed without a choice is not a no. Claude Code in print mode (the desktop app, the SDK)
+// declares elicitation and answers every form with cancel at once, so nobody saw the task: it is
+// asked in the chat instead, as for a client without forms, and only an explicit yes there runs it.
+for (const [name, answer] of [['cancel', { action: 'cancel' }], ['no action', {}], ['no result', undefined]]) {
+  test(`elicitation, ${name}: nothing is decided; the text is shown to ask in the chat, and a yes there runs it`, async () => {
     const node = await startFakeNode();
     try {
       const { p, t } = await withOffered(node);
-      const proxy = createProxy({ paths: p, request: async () => ({ action }) });
+      let asked = 0;
+      const proxy = createProxy({ paths: p, request: async () => { asked += 1; return answer; } });
       await initialized(proxy, true);
       const r = await proxy.handle(req(2, 'tools/call', { name: 'take_task', arguments: { task_id: t.id } }));
-      assert.ok(!textOf(r).includes(t.text));
-      assert.match(textOf(r), /declined/);
-      assert.deepEqual(node.tool('task_result').map((c) => [c.args.task_id, c.args.session_id, c.args.status]), [[t.id, SID, 'refused']]);
-      assert.equal(findTask(p, t.id).task.status, 'reported');
+      assert.doesNotMatch(textOf(r), /declined/);
+      assert.ok(textOf(r).includes(t.text));
+      assert.match(textOf(r), /word for word/);
+      assert.match(textOf(r), /explicit yes/);
+      assert.equal(findTask(p, t.id).task.status, 'offered', 'nothing runs and nothing is refused');
+      assert.equal(node.tool('task_result').length, 0, 'the colleague is not told no');
+      const yes = await proxy.handle(req(3, 'tools/call', { name: 'take_task', arguments: { task_id: t.id, accepted: true } }));
+      assert.equal(asked, 1, 'the form that closed by itself is not asked again');
+      assert.ok(textOf(yes).includes(t.text));
+      assert.match(textOf(yes), /accepted/);
+      assert.equal(findTask(p, t.id).task.status, 'running');
     } finally {
       await node.close();
     }
   });
 }
+
+test('elicitation, cancel and then a no in the chat: refused', async () => {
+  const node = await startFakeNode();
+  try {
+    const { p, t } = await withOffered(node);
+    const proxy = createProxy({ paths: p, request: async () => ({ action: 'cancel' }) });
+    await initialized(proxy, true);
+    await proxy.handle(req(2, 'tools/call', { name: 'take_task', arguments: { task_id: t.id } }));
+    const no = await proxy.handle(req(3, 'tools/call', { name: 'take_task', arguments: { task_id: t.id, accepted: false } }));
+    assert.match(textOf(no), /declined/);
+    assert.equal(node.tool('task_result')[0].args.status, 'refused');
+  } finally {
+    await node.close();
+  }
+});
 
 test('elicitation present: accepted: true from the model does not skip the form', async () => {
   const node = await startFakeNode();

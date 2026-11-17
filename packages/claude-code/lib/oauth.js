@@ -98,10 +98,31 @@ export function assertTokenResource(body, resource) {
   }
 }
 
+/** A discovery document that did not come within the wait, twice. Says which host, how long, and that it is safe to retry. */
+class DiscoveryTimeout extends Error {
+  constructor(url, timeoutMs) {
+    super(`${new URL(url).host} did not answer within ${timeoutMs / 1000} s (asked twice). Nothing was saved; connect again to retry.`);
+    this.name = 'DiscoveryTimeout';
+  }
+}
+
+/**
+ * GET one discovery document. A request that times out is asked once more: a GET writes nothing, and
+ * discovery runs before the loopback listens and before any browser opens, so a retry leaves nothing
+ * behind. A second timeout is a DiscoveryTimeout. Any other failure, an HTTP refusal included, is
+ * answered at once.
+ */
 async function getJson(fetchImpl, url, timeoutMs) {
-  const res = await fetchImpl(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(timeoutMs) });
-  if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status}`);
-  return res.json();
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      const res = await fetchImpl(url, { headers: { accept: 'application/json' }, signal: AbortSignal.timeout(timeoutMs) });
+      if (!res.ok) throw new Error(`GET ${url} -> HTTP ${res.status}`);
+      return await res.json();
+    } catch (err) {
+      if (err?.name !== 'TimeoutError') throw err;
+      if (attempt >= 2) throw new DiscoveryTimeout(url, timeoutMs);
+    }
+  }
 }
 
 export async function discover(nodeUrl, { fetchImpl = globalThis.fetch, fallbackIssuer = DEFAULT_ISSUER, timeoutMs = 10_000 } = {}) {
@@ -117,7 +138,10 @@ export async function discover(nodeUrl, { fetchImpl = globalThis.fetch, fallback
   let prm = null;
   try {
     prm = await getJson(fetchImpl, `${origin}/.well-known/oauth-protected-resource`, timeoutMs);
-  } catch {
+  } catch (err) {
+    // An unanswered document is not a missing one: the node may name another issuer, so it is never
+    // replaced by the default.
+    if (err instanceof DiscoveryTimeout) throw err;
     // no protected-resource document: fall back to the default issuer
   }
   if (prm) {

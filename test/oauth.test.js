@@ -231,3 +231,85 @@ test('connect: a registration refusal closes the loopback and surfaces the refus
   await assert.rejects(connect(NODE, { fetchImpl: as.fetchImpl, spawnImpl: () => { opened += 1; return { unref() {}, on() {} }; }, timeoutMs: 5000 }), /registration refused: HTTP 429/);
   assert.equal(opened, 0, 'no browser may open when there is no client');
 });
+
+/** A fetch whose answer for `slowUrl` never comes: it settles only when the request's own timeout signal fires. */
+function hangingFetch(inner, slowUrl, { answerOnTry = Infinity } = {}) {
+  const tries = [];
+  const fetchImpl = (url, init = {}) => {
+    if (String(url) !== slowUrl) return inner(url, init);
+    tries.push(String(url));
+    if (tries.length >= answerOnTry) return inner(url, init);
+    return new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason), { once: true }));
+  };
+  return { fetchImpl, tries };
+}
+
+test('discover: an authorization server that never answers is asked twice, then the error names its host, the wait and that connecting again retries', async () => {
+  const as = fakeAs();
+  const slow = hangingFetch(as.fetchImpl, `${ISSUER}/.well-known/oauth-authorization-server`);
+  const err = await discover(NODE, { fetchImpl: slow.fetchImpl, timeoutMs: 30 }).then(() => null, (e) => e);
+  assert.ok(err instanceof Error, 'discovery must fail');
+  assert.equal(slow.tries.length, 2, 'one retry, no more');
+  assert.match(err.message, /auth\.wybe\.me did not answer within 0\.03 s/);
+  assert.match(err.message, /connect again/);
+  assert.doesNotMatch(err.message, /aborted due to timeout/);
+});
+
+test('discover: a timeout on the first try and an answer on the second is a normal discovery', async () => {
+  const as = fakeAs();
+  const slow = hangingFetch(as.fetchImpl, `${ISSUER}/.well-known/oauth-authorization-server`, { answerOnTry: 2 });
+  const d = await discover(NODE, { fetchImpl: slow.fetchImpl, timeoutMs: 30 });
+  assert.equal(slow.tries.length, 2);
+  assert.equal(d.metadata.token_endpoint, METADATA.token_endpoint);
+});
+
+test('discover: a node whose protected-resource document never answers is not silently sent to the default issuer', async () => {
+  const as = fakeAs({ prm: { resource: `${NODE}/mcp`, authorization_servers: ['https://auth.staging.example'], scopes_supported: [...ALL_SCOPES] } });
+  const slow = hangingFetch(as.fetchImpl, `${NODE}/.well-known/oauth-protected-resource`);
+  await assert.rejects(discover(NODE, { fetchImpl: slow.fetchImpl, timeoutMs: 30 }), /demo\.wybe\.me did not answer within 0\.03 s.*connect again/);
+  assert.equal(slow.tries.length, 2);
+  assert.ok(!as.calls.some((c) => c.url.startsWith(DEFAULT_ISSUER)), 'the default issuer is not asked in place of an unanswered document');
+});
+
+test('discover: an HTTP refusal is answered at once, never retried', async () => {
+  const as = fakeAs();
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push(String(url));
+    if (String(url) === `${ISSUER}/.well-known/oauth-authorization-server`) return new Response('', { status: 503 });
+    return as.fetchImpl(url, init);
+  };
+  await assert.rejects(discover(NODE, { fetchImpl }), /HTTP 503/);
+  assert.equal(calls.filter((u) => u.endsWith('/oauth-authorization-server')).length, 1);
+});
+
+test('connect: a discovery timeout opens no browser and surfaces the named-host message', async () => {
+  const as = fakeAs();
+  const timedOut = async (url, init) => {
+    if (String(url) === `${ISSUER}/.well-known/oauth-authorization-server`) throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    return as.fetchImpl(url, init);
+  };
+  let opened = 0;
+  await assert.rejects(connect(NODE, { fetchImpl: timedOut, spawnImpl: () => { opened += 1; return { unref() {}, on() {} }; }, timeoutMs: 5000 }), /auth\.wybe\.me did not answer within 10 s.*connect again/);
+  assert.equal(opened, 0, 'no browser may open when discovery failed');
+});
+
+for (const stall of ['before the headers', 'in the middle of the body']) {
+  test(`discover through real fetch: a server that stalls ${stall} is asked twice, then named`, async () => {
+    const { createServer } = await import('node:http');
+    const hits = [];
+    const server = createServer((req, res) => {
+      hits.push(req.url);
+      if (stall === 'in the middle of the body') { res.writeHead(200, { 'content-type': 'application/json' }); res.write('{"issuer":'); }
+    });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      await assert.rejects(discover(base, { timeoutMs: 150 }), (e) => e.message.startsWith(`127.0.0.1:${server.address().port} did not answer within 0.15 s (asked twice)`));
+      assert.deepEqual(hits, ['/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource']);
+    } finally {
+      server.closeAllConnections();
+      server.close();
+    }
+  });
+}
