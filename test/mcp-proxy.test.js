@@ -296,3 +296,21 @@ test('connections: a refresh never writes over a grant replaced while it ran', a
   assert.equal(r.result.content[0].text, '{"ok":true,"stored":1}', 'this call still goes through with its refreshed token');
   assert.equal(loadCredentials(connectionPaths(root, key)).accessToken, replacement, 'the new grant stands');
 });
+
+test('task_result: the node gets the session_id too, since it names the session the task went to', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'wybe-connect-proxy-conn-'));
+  saveConnection(root, at(A, { accessToken: TOK_A }));
+  saveConnection(root, at(B, { accessToken: TOK_B }));
+  const node = anyBearerNode();
+  const sent = [];
+  const fetchImpl = async (url, init = {}) => {
+    if (typeof init.body === 'string') { const m = JSON.parse(init.body); if (m.method === 'tools/call') sent.push(m.params); }
+    return node.fetchImpl(url, init);
+  };
+  const proxy = createProxy({ root, env: {}, fetchImpl });
+  const id = '62461ce6-ef24-4984-8b08-82d4b95a4a5c';
+  await proxy.handle(req(1, 'tools/call', { name: 'task_result', arguments: { task_id: id, session_id: 's1', status: 'done', text: 'ok' } }));
+  await proxy.handle(req(2, 'tools/call', { name: 'remember', arguments: { items: [{ content: 'x' }], session_id: 's1' } }));
+  assert.deepEqual(sent[0], { name: 'task_result', arguments: { task_id: id, status: 'done', text: 'ok', session_id: 's1' } });
+  assert.equal('session_id' in sent[1].arguments, false, 'other tools: the session id routes the call and stays on this machine');
+});
