@@ -58,7 +58,7 @@ test('content rules: work only, send-only, no secrets, the person decides; nb sa
 test('the ChatGPT card carries the developer-mode step first; both cards use the example address', () => {
   assert.match(texts.setup.chatgpt.nb[0], /utviklermodus/i);
   assert.match(texts.setup.chatgpt.en[0], /developer mode/i);
-  assert.equal(texts.mcp_address_example, 'https://dittfirma.wybe.me/mcp');
+  assert.equal(texts.mcp_address_example, 'https://kollega.wybe.me/mcp');
   for (const s of stepLists) for (const list of [s.nb, s.en]) assert.ok(list.some((x) => x.includes(texts.mcp_address_example)));
 });
 

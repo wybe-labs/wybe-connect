@@ -79,9 +79,9 @@ Two commands inside Claude Code (2.1.292 or newer):
 
 Then paste one of these with your own node address:
 
-> Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
+> Koble meg til KI-kollegaen min i Wybe: https://kollega.wybe.me
 
-> Connect me to my Wybe AI colleague at https://dittfirma.wybe.me
+> Connect me to my Wybe AI colleague at https://kollega.wybe.me
 
 Claude runs the `connect` skill, which calls the plugin's own `wybe` MCP server: a browser
 opens on `auth.wybe.me`, you log in with your passkey and tick the scopes. That one sign-in
@@ -151,7 +151,7 @@ without it is refused. Its `connect` tool stores a new connection and makes it t
 ## Claude Desktop, claude.ai and ChatGPT (no hooks)
 
 These assistants call the node from their vendor's cloud, through a custom connector at
-`https://dittfirma.wybe.me/mcp` (your company's own address). Nothing is installed from this
+`https://kollega.wybe.me/mcp` (one address for every company; the node is chosen by the sign-in). Nothing is installed from this
 repository; what they need is a standing instruction and a sync prompt. The texts below are
 generated from `texts/standing.json`.
 
@@ -182,14 +182,14 @@ generated from `texts/standing.json`.
 **Norsk**
 
 1. Åpne Claude (skrivebordsappen eller claude.ai) og gå til Customize → Connectors → + → Add custom connector.
-2. Kall den «wybe» og lim inn adressen til KI-kollegaen din, for eksempel https://dittfirma.wybe.me/mcp (bruk firmaets egen adresse).
+2. Kall den «wybe» og lim inn adressen til KI-kollegaen din, for eksempel https://kollega.wybe.me/mcp (adressen står på Claude-kortet under Integrasjoner i Wybe-portalen).
 3. Trykk Connect, logg inn med passnøkkelen din på auth.wybe.me og kryss av for det du vil dele. Du kan oppheve koblingen når som helst under «Mine koblinger».
 4. Lim inn den faste instruksen i Claude sine personlige preferanser eller i instruksjonene til et prosjekt. Bruk synk-meldingen når du vil sende et sammendrag.
 
 **English**
 
 1. Open Claude (the desktop app or claude.ai) and go to Customize → Connectors → + → Add custom connector.
-2. Name it «wybe» and paste your AI colleague's address, for example https://dittfirma.wybe.me/mcp (use your company's own address).
+2. Name it «wybe» and paste your AI colleague's address, for example https://kollega.wybe.me/mcp (the address is on the Claude card under Integrasjoner in the Wybe portal).
 3. Click Connect, sign in with your passkey at auth.wybe.me and tick what you want to share. You can revoke the connection at any time under «Mine koblinger».
 4. Paste the standing instruction into Claude's personal preferences or into a project's instructions. Use the sync prompt when you want to send a summary.
 
@@ -198,14 +198,14 @@ generated from `texts/standing.json`.
 **Norsk**
 
 1. Slå på utviklermodus i ChatGPT på nett: Settings → Security and login → Developer mode (Plus, Pro, Business, Enterprise og Edu). Utviklermodus lar ChatGPT bruke verktøy som skriver; KI-kollegaen tar bare imot og gir ingenting tilbake.
-2. Gå til ChatGPT Plugins, trykk + og lag en utviklermodus-app med adressen til KI-kollegaen din, for eksempel https://dittfirma.wybe.me/mcp (bruk firmaets egen adresse), og OAuth.
+2. Gå til ChatGPT Plugins, trykk + og lag en utviklermodus-app med adressen til KI-kollegaen din, for eksempel https://kollega.wybe.me/mcp (adressen står på Claude-kortet under Integrasjoner i Wybe-portalen), og OAuth.
 3. Logg inn med passnøkkelen din på auth.wybe.me og kryss av for det du vil dele. Du kan oppheve koblingen når som helst under «Mine koblinger».
 4. Lim inn den faste instruksen under Customize ChatGPT (egendefinerte instruksjoner). Bruk synk-meldingen når du vil sende et sammendrag.
 
 **English**
 
 1. Turn on developer mode in ChatGPT on the web: Settings → Security and login → Developer mode (Plus, Pro, Business, Enterprise and Edu). Developer mode lets ChatGPT use tools that write; your AI colleague only receives and gives nothing back.
-2. Go to ChatGPT Plugins, press + and create a developer-mode app with your AI colleague's address, for example https://dittfirma.wybe.me/mcp (use your company's own address), and OAuth.
+2. Go to ChatGPT Plugins, press + and create a developer-mode app with your AI colleague's address, for example https://kollega.wybe.me/mcp (the address is on the Claude card under Integrasjoner in the Wybe portal), and OAuth.
 3. Sign in with your passkey at auth.wybe.me and tick what you want to share. You can revoke the connection at any time under «Mine koblinger».
 4. Paste the standing instruction under Customize ChatGPT (custom instructions). Use the sync prompt when you want to send a summary.
 
@@ -369,7 +369,7 @@ Cursor ──hook stdin (transcript)──▶ hooks/flush.js
                                                 │ scope-aware payload (lib/transcript.js)
                                                 │ redaction (lib/redact.js)
                                                 ▼
-                                    lib/post.js ── JSON-RPC tools/call report_session ──▶ https://<slug>.wybe.me/mcp
+                                    lib/post.js ── JSON-RPC tools/call report_session ──▶ https://kollega.wybe.me/mcp
                                                 │ Bearer wat_… from ~/.wybe-connect/connections/<node>/credentials.json
                                                 │ 401 → one refresh → else queue
                                                 │ unreachable → ~/.wybe-connect/connections/<node>/queue/ (7 days / 50 MB, oldest dropped)
@@ -481,7 +481,7 @@ e-postadresser). Hvor mye som deles velger du én gang, på samtykkeskjermen på
 
 Kun jobb. Å oppheve koblingen stopper strømmen; å slette det som ble lært er en egen handling.
 Lim inn i Claude Code, Codex eller Cursor: *«Koble meg til KI-kollegaen min i Wybe:
-https://dittfirma.wybe.me»*. For Claude Desktop og ChatGPT: se den faste instruksen og
+https://kollega.wybe.me»*. For Claude Desktop og ChatGPT: se den faste instruksen og
 synk-meldingen over.
 
 ## Licence

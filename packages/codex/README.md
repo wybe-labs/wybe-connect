@@ -10,7 +10,7 @@ codex plugin add wybe-connect@wybe-connect
 
 Then paste, with your own address:
 
-> Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
+> Koble meg til KI-kollegaen min i Wybe: https://kollega.wybe.me
 
 The `connect` skill takes it from there (`skills/connect/SKILL.md`). Codex runs a plugin's hooks
 only after you have reviewed and trusted them once.

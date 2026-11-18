@@ -1,15 +1,15 @@
 ---
 name: connect
-description: Connect this Claude Code to the person's Wybe colleague (their Wybe node) so that a background distil feeds it the redacted essence of their work and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me", "Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me", "Koble til Wybe", "Connect me to my Wybe colleague at https://<slug>.wybe.me", "connect to Wybe", "wybe connect", or any request to pair, link or hook up Claude Code with a Wybe node URL.
+description: Connect this Claude Code to the person's Wybe colleague (their Wybe node) so that a background distil feeds it the redacted essence of their work and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://kollega.wybe.me", "Koble meg til Wybe-kollegaen min: https://<slug>.wybe.me", "Koble til Wybe", "Connect me to my Wybe colleague at https://<slug>.wybe.me", "connect to Wybe", "wybe connect", or any request to pair, link or hook up Claude Code with a Wybe node URL.
 ---
 
 # Connect to Wybe
 
 The person pasted (or said) one of these, with their own node URL:
 
-> Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
+> Koble meg til KI-kollegaen min i Wybe: https://kollega.wybe.me
 
-> Connect me to my Wybe AI colleague at https://dittfirma.wybe.me
+> Connect me to my Wybe AI colleague at https://kollega.wybe.me
 
 Your job: pair this machine with that node once. The first sync is not yours to run: the node
 asks for it by itself when the connection is made (an import), and the plugin runs it in the
@@ -25,7 +25,7 @@ hear what it means.
 ## Steps
 
 1. **Take the node URL from the sentence.** It must be `https://<something>.wybe.me`. If there
-   is no URL, ask for it: "Hvilken adresse har KI-kollegaen din i Wybe? (https://dittfirma.wybe.me)".
+   is no URL, ask for it: "Hvilken adresse har KI-kollegaen din i Wybe? (https://kollega.wybe.me)".
 
 2. **Make sure the plugin is installed.** Its `wybe` MCP server offers a `connect` tool. If you
    do not have it, tell the person to run, inside Claude Code:
@@ -47,7 +47,7 @@ hear what it means.
    the default for new sessions. From a terminal, `node "${CLAUDE_PLUGIN_ROOT}/bin/connect.js" list`
    shows them, `connect.js use <name>` changes the default, `connect.js use <name> --session <id>`
    moves one session's hooks, `connect.js remove <name>` deletes one locally, and
-   `connect.js https://<slug>.wybe.me --name <name>` adds a second account on the same node.
+   `connect.js https://kollega.wybe.me --name <name>` adds a second account on the same node.
 
 4. **Confirm** in one paragraph: connected to which node, and which scopes. Say that the first
    sync now runs by itself in the background: the node asked for an import, and the plugin

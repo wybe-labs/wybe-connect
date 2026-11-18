@@ -1,15 +1,15 @@
 ---
 name: connect
-description: Connect this Cursor to the person's Wybe AI colleague so that hooks feed it redacted session summaries and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me", "Koble til Wybe", "Connect me to my Wybe AI colleague at https://dittfirma.wybe.me", "connect to Wybe", or any request to pair Cursor with a Wybe address.
+description: Connect this Cursor to the person's Wybe AI colleague so that hooks feed it redacted session summaries and `remember` can store work facts. Triggers on a pasted sentence like "Koble meg til KI-kollegaen min i Wybe: https://kollega.wybe.me", "Koble til Wybe", "Connect me to my Wybe AI colleague at https://kollega.wybe.me", "connect to Wybe", or any request to pair Cursor with a Wybe address.
 ---
 
 # Connect to Wybe (Cursor)
 
 The person pasted (or said) one of these, with their own address:
 
-> Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
+> Koble meg til KI-kollegaen min i Wybe: https://kollega.wybe.me
 
-> Connect me to my Wybe AI colleague at https://dittfirma.wybe.me
+> Connect me to my Wybe AI colleague at https://kollega.wybe.me
 
 Your job: pair this machine with that address once. The first sync is not a step here: the
 colleague asks for it by itself when the connection is made (an import request in its tool
@@ -24,12 +24,12 @@ The plugin root is the directory two levels above this `SKILL.md` (it holds `bin
 ## Steps
 
 1. **Take the address from the sentence.** It must be `https://<something>.wybe.me`. If there
-   is none, ask: "Hvilken adresse har KI-kollegaen din i Wybe? (https://dittfirma.wybe.me)".
+   is none, ask: "Hvilken adresse har KI-kollegaen din i Wybe? (https://kollega.wybe.me)".
 
 2. **Run the OAuth flow** (stores the credential the hooks use in
    `~/.wybe-connect/cursor/connections/<node>/credentials.json`, owner-only):
    ```
-   node "<plugin root>/bin/connect.js" https://dittfirma.wybe.me
+   node "<plugin root>/bin/connect.js" https://kollega.wybe.me
    ```
    A browser opens on `auth.wybe.me`; the person logs in with their passkey and ticks what to
    share (`remember`, `conversations`, `sessions:light`, `sessions:full`). Wait for
@@ -41,7 +41,7 @@ The plugin root is the directory two levels above this `SKILL.md` (it holds `bin
    moves one session, `connect.js remove <name>` deletes one locally.
 
 3. **Add the MCP server for the interactive tools** (`remember`, `import_conversation`,
-   `pending_questions`): add `"wybe": { "url": "https://dittfirma.wybe.me/mcp" }` under
+   `pending_questions`): add `"wybe": { "url": "https://kollega.wybe.me/mcp" }` under
    `mcpServers` in `~/.cursor/mcp.json` (merge; never overwrite other servers). Cursor runs its
    own sign-in the first time a tool is used.
 

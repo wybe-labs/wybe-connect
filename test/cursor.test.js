@@ -269,7 +269,7 @@ test('cursor plugin: manifest, root marketplace listing, mcp.json entry; gitBran
   assert.ok(existsSync(join(PKG, 'skills', 'connect', 'SKILL.md')));
   const market = JSON.parse(readFileSync(join(ROOT, '.cursor-plugin', 'marketplace.json'), 'utf8'));
   assert.deepEqual(market.plugins.map((p) => [p.name, p.source]), [['wybe-connect', 'packages/cursor']]);
-  assert.deepEqual(JSON.parse(readFileSync(join(PKG, 'mcp.json.snippet'), 'utf8')), { mcpServers: { wybe: { url: 'https://dittfirma.wybe.me/mcp' } } });
+  assert.deepEqual(JSON.parse(readFileSync(join(PKG, 'mcp.json.snippet'), 'utf8')), { mcpServers: { wybe: { url: 'https://kollega.wybe.me/mcp' } } });
 
   const dir = mkdtempSync(join(tmpdir(), 'wybe-connect-head-'));
   mkdirSync(join(dir, '.git'));

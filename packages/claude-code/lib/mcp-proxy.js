@@ -60,7 +60,7 @@ export const CONNECT_TOOL = Object.freeze({
   inputSchema: {
     type: 'object',
     properties: {
-      node_url: { type: 'string', description: 'The AI colleague\'s address, e.g. https://dittfirma.wybe.me' },
+      node_url: { type: 'string', description: 'The AI colleague\'s address, e.g. https://kollega.wybe.me' },
     },
     required: ['node_url'],
     additionalProperties: false,
@@ -274,7 +274,7 @@ export function createProxy({ paths: fixed = null, root = null, env = process.en
     try {
       origin = new URL(raw).origin;
     } catch {
-      return text('Give the AI colleague\'s address, e.g. https://dittfirma.wybe.me', true);
+      return text('Give the AI colleague\'s address, e.g. https://kollega.wybe.me', true);
     }
     if (pending && !pending.done && !pending.error && pending.nodeUrl === origin) {
       return text(`Still waiting for the sign-in in the browser. If no browser opened, open this link: ${pending.url}`);

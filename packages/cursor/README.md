@@ -4,13 +4,13 @@ A Cursor plugin (`.cursor-plugin/plugin.json`; the repository root lists it in
 `.cursor-plugin/marketplace.json`). Install it from Cursor's plugin view (Customize), then paste,
 with your own address:
 
-> Koble meg til KI-kollegaen min i Wybe: https://dittfirma.wybe.me
+> Koble meg til KI-kollegaen min i Wybe: https://kollega.wybe.me
 
 The `connect` skill takes it from there (`skills/connect/SKILL.md`).
 
 Without the plugin system, copy `hooks.user.example.json` to `~/.cursor/hooks.json` (merge with
 what is there), replacing `/ABSOLUTE/PATH/TO/wybe-connect` with where you cloned this repository,
-and run `node packages/cursor/bin/connect.js https://dittfirma.wybe.me` yourself.
+and run `node packages/cursor/bin/connect.js https://kollega.wybe.me` yourself.
 
 | Piece | What it does |
 |---|---|
