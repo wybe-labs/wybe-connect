@@ -53,11 +53,12 @@
 
 import { basename, join } from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync } from 'node:fs';
 import { paths as legacyPaths, readJson, writeJsonPrivate, loadCredentials, saveCredentials, isRefused } from './home.js';
 import { rolloutSessionIds } from './codex-rollout.js';
 import { colleagueOf } from './oauth.js';
 import { acquire } from './lock.js';
+import { rotatedPath } from './refresh.js';
 
 export const NODE_ENV = 'WYBE_CONNECT_NODE';
 const MAX_NAME = 120;
@@ -475,7 +476,9 @@ export function saveConnection(root, credentials, { name = null } = {}) {
       ? colleagueKey(root, credentials.nodeUrl, colleague, credentials.harnessAccount)
       : credentials.harnessAccount ? accountKey(root, credentials.nodeUrl, credentials.harnessAccount) : null;
     const key = checkSave(root, credentials.nodeUrl, name ?? auto, { colleague, account: accountId(credentials.harnessAccount), named: name !== null });
-    saveCredentials({ ...credentials, grantId: randomBytes(16).toString('hex') }, connectionPaths(root, key));
+    const p = connectionPaths(root, key);
+    saveCredentials({ ...credentials, grantId: randomBytes(16).toString('hex') }, p);
+    forgetKept(p);
     moveOffRefused(root, key);
     markRecent(root, key);
     return key;
@@ -532,9 +535,19 @@ export function renewConnection(root, key, credentials) {
   const held = readGrant(p);
   if (!held || (held.grantId ?? null) !== (credentials.grantId ?? null)) throw new Error(`connection ${key} changed meanwhile; run connect again`);
   saveCredentials(credentials, p);
+  forgetKept(p);
   moveOffRefused(root, key);
   markRecent(root, key);
   return key;
+}
+
+/** Removes tokens a refresh kept for the grant just replaced or renewed (refresh.js «keep»): they are spent or of an old grant. */
+function forgetKept(p) {
+  try {
+    unlinkSync(rotatedPath(p));
+  } catch {
+    // none kept
+  }
 }
 
 /** Lines in a transcript file (a line is written whole, so the count is a line boundary), or null when it cannot be read. */

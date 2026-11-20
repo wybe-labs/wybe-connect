@@ -18,7 +18,7 @@
 
 import { connect, renewGrant, ALL_SCOPES, STATIC_CLIENTS } from './oauth.js';
 import { harnessHome } from './home.js';
-import { withRefreshLock } from './refresh.js';
+import { withRefreshLock, liveGrant } from './refresh.js';
 import { connectionPaths, connectionGrant, renewConnection, listConnections, saveConnection, useConnection, removeConnection, checkedName, checkSave, sessionTranscript, accountKey, accountName, servesColleagues, refusedOfOtherAccounts, checkStoreFree, NODE_ENV } from './connections.js';
 import { noteSession } from './distil.js';
 import { accountOf } from './session-info.js';
@@ -122,7 +122,10 @@ export async function renewStored(root, nodeUrl, { name = null, scopes = null, c
   // refresh token is single-use (OAuth 2.1 rotation): presenting a used one may end the grant.
   const done = await withRefreshLock(connectionPaths(root, key), async () => {
     const held = connectionGrant(root, key);
-    const renewed = await renewGrant(held, { clientId, nodeUrl, scopes, fetchImpl });
+    // with tokens a refresh kept because its save did not hold: their refresh token, never the spent one on disk
+    const live = liveGrant(connectionPaths(root, key), held);
+    if (!live) return null;
+    const renewed = await renewGrant(live, { clientId, nodeUrl, scopes, fetchImpl });
     if (!renewed) return null;
     try {
       renewConnection(root, key, renewed);

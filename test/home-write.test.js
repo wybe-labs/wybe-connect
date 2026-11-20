@@ -41,3 +41,18 @@ test('an atomic write gives up on a rename that stays busy, leaving no temp file
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('an atomic write with tries: 1 tries the rename once and never blocks waiting (refresh.js waits between its own tries)', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'wc-home-write-'));
+  try {
+    const target = join(dir, 'state.json');
+    let calls = 0;
+    const t0 = Date.now();
+    assert.throws(() => writeJsonPrivate(target, { ok: 1 }, { tries: 1, renameImpl: () => { calls += 1; throw Object.assign(new Error('busy'), { code: 'EBUSY' }); } }), /busy/);
+    assert.equal(calls, 1);
+    assert.ok(Date.now() - t0 < 100, 'no Atomics.wait between tries');
+    assert.deepEqual(readdirSync(dir), [], 'no temp file left behind');
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

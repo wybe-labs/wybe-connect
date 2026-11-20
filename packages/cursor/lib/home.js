@@ -67,7 +67,7 @@ const RENAME_TRIES = 12;
  * milliseconds: it is retried with a short wait, and given up (temp file removed) only when it
  * stays busy.
  */
-export function writeJsonPrivate(path, value, { renameImpl = renameSync } = {}) {
+export function writeJsonPrivate(path, value, { renameImpl = renameSync, tries = RENAME_TRIES } = {}) {
   mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
   const tmp = `${path}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(value, null, 2), { mode: 0o600 });
@@ -81,7 +81,7 @@ export function writeJsonPrivate(path, value, { renameImpl = renameSync } = {}) 
       renameImpl(tmp, path);
       return;
     } catch (err) {
-      if (!BUSY.has(err?.code) || i >= RENAME_TRIES) {
+      if (!BUSY.has(err?.code) || i >= tries) {
         try {
           unlinkSync(tmp);
         } catch {
@@ -103,8 +103,9 @@ export function loadCredentials(p = paths()) {
   return c;
 }
 
-export function saveCredentials(credentials, p = paths()) {
-  writeJsonPrivate(p.credentials, { version: 1, ...credentials });
+/** Stores credentials for `p`; `opts` go to writeJsonPrivate (refresh.js passes tries: 1 and waits between tries itself). */
+export function saveCredentials(credentials, p = paths(), opts = {}) {
+  writeJsonPrivate(p.credentials, { version: 1, ...credentials }, opts);
 }
 
 /**
